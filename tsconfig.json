@@ -1,0 +1,11 @@
+{
+  "extends": "@ntnyq/tsconfig/strict.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["DOM", "ES2024"],
+    "module": "ESNext",
+    "types": ["node"],
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  }
+}

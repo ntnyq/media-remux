@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>media-remux OPFS benchmark</title>
+  <p>
+    Select MP4/FLV files to measure Worker startup, inspection, copying, and
+    finalization on this browser.
+  </p>
+  <input id="files" type="file" multiple />
+  <button id="run">Benchmark selected files</button>
+  <pre id="result">Ready</pre>
+  <script type="module" src="./benchmark.js"></script>
+</html>
