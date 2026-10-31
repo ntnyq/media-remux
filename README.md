@@ -1,5 +1,10 @@
 # media-remux
 
+[![CI](https://github.com/ntnyq/media-remux/workflows/CI/badge.svg)](https://github.com/ntnyq/media-remux/actions)
+[![NPM VERSION](https://img.shields.io/npm/v/media-remux.svg)](https://www.npmjs.com/package/media-remux)
+[![NPM DOWNLOADS](https://img.shields.io/npm/dy/media-remux.svg)](https://www.npmjs.com/package/media-remux)
+[![LICENSE](https://img.shields.io/github/license/ntnyq/media-remux.svg)](https://github.com/ntnyq/media-remux/blob/main/LICENSE)
+
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
 Disk-backed browser media remuxing, track combining, and segment concatenation without re-encoding. No runtime dependencies; the required patched Mediabunny source subset is included directly.
