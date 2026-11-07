@@ -1,6 +1,6 @@
 {
   "name": "media-remux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Disk-backed media remuxing, track combining, and segment concatenation for browsers without re-encoding.",
   "keywords": [
     "audio",
