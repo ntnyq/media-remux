@@ -1,6 +1,8 @@
 /* oxlint-disable no-await-in-loop -- Tracks and segments are consumed in order with bounded memory. */
 import { checkAbort } from '../abort'
 import type { RemuxOptions, RemuxResult } from '../types'
+import { createDecodeTimeline } from './decodeTimeline'
+import type { DecodeTimeline } from './decodeTimeline'
 import { openMediaInput } from './input/mediaInput'
 import type { MediaInput, PacketTrack } from './input/mediaInput'
 import { selectTracks, trackSignature, inspectTracks } from './mediaTracks'
@@ -81,6 +83,7 @@ export async function concatMedia(
   const infos: SegmentInfo[] = []
   let baseline: PacketTrack[] = []
   let signature = ''
+  let decodeTimeline: DecodeTimeline | undefined
 
   // Validate every segment before opening the output, so a later incompatible
   // segment cannot leave a partially written concatenation behind.
@@ -99,13 +102,14 @@ export async function concatMedia(
       if (index === 0) {
         baseline = tracks
         signature = current
+        decodeTimeline = createDecodeTimeline(tracks)
       } else if (current !== signature) {
         throw new Error(
           `Incompatible track layout or decoder configuration in segment ${index}.`,
         )
       }
 
-      infos.push(await inspectTracks(tracks, settings.signal))
+      infos.push(await inspectTracks(tracks, settings.signal, decodeTimeline))
     } finally {
       input.dispose()
     }
@@ -136,7 +140,15 @@ export async function concatMedia(
     }
   }
 
-  return writeSegments(baseline, segments(), settings)
+  if (!decodeTimeline) {
+    throw new Error('Missing output decode timeline.')
+  }
+  return writeSegments(
+    baseline,
+    segments(),
+    settings,
+    decodeTimeline.trackTimings(),
+  )
 }
 
 /**
@@ -187,9 +199,15 @@ export async function combineTracks(
     }
 
     const tracks = [videoTrack, audioTrack]
-    const info = await inspectTracks(tracks, settings.signal)
+    const decodeTimeline = createDecodeTimeline(tracks)
+    const info = await inspectTracks(tracks, settings.signal, decodeTimeline)
 
-    return await writeSegments(tracks, singleSegment(tracks, info), settings)
+    return await writeSegments(
+      tracks,
+      singleSegment(tracks, info),
+      settings,
+      decodeTimeline.trackTimings(),
+    )
   } finally {
     for (const input of inputs) {
       input.dispose()

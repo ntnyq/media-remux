@@ -22,6 +22,11 @@ export type PacketType = 'key' | 'delta';
  */
 export type EncodedPacketSideData = {
     /**
+     * Original MP4 decode duration in seconds. Presentation duration may differ
+     * for reordered samples; remuxing must not substitute it for the stts/trun delta.
+     */
+    decodeDuration?: number | undefined;
+    /**
      * An encoded alpha frame, encoded with the same codec as the packet. Typically used for transparent videos, where
      * the alpha information is stored separately from the color information.
      */
@@ -107,6 +112,10 @@ export class EncodedPacket {
         }
         if (sideData !== undefined && (typeof sideData !== 'object' || !sideData)) {
             throw new TypeError('sideData, when provided, must be an object.');
+        }
+        if (sideData?.decodeDuration !== undefined
+            && (!Number.isFinite(sideData.decodeDuration) || sideData.decodeDuration < 0)) {
+            throw new TypeError('sideData.decodeDuration must be a non-negative finite number.');
         }
         if (sideData?.alpha !== undefined && !(sideData.alpha instanceof Uint8Array)) {
             throw new TypeError('sideData.alpha, when provided, must be a Uint8Array.');

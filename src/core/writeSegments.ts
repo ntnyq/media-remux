@@ -12,6 +12,7 @@ import {
 } from '../vendor/mediabunny/src/media-source'
 import { Output } from '../vendor/mediabunny/src/output'
 import { Mp4OutputFormat } from '../vendor/mediabunny/src/output-format'
+import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
 import { EncodedPacket } from '../vendor/mediabunny/src/packet'
 import { StreamTarget } from '../vendor/mediabunny/src/target'
 import type { PacketTrack } from './input/mediaInput'
@@ -157,6 +158,7 @@ interface TrackWriter {
  * and tracks matching the baseline's order and configurations.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback. Track selection is already applied.
+ * @param trackTimings - Preflight timing keyed by one-based output track ID.
  * @returns A promise resolving to the total duration in seconds, output MIME
  * type, and copied encoded payload bytes excluding container overhead.
  * @throws {Error} If a baseline kind disagrees with its decoder configuration.
@@ -167,6 +169,7 @@ export async function writeSegments(
   baseline: PacketTrack[],
   segments: AsyncIterable<{ tracks: PacketTrack[]; info: SegmentInfo }>,
   options: RemuxOptions,
+  trackTimings: ReadonlyMap<number, IsobmffTrackTiming>,
 ): Promise<RemuxResult> {
   checkAbort(options.signal)
 
@@ -177,6 +180,7 @@ export async function writeSegments(
       minimumFragmentDuration: 2,
       _fragmentIndexStore: storage.fragmentIndex,
       _fragmentSampleStore: storage.fragmentSamples,
+      _fragmentTrackTimings: trackTimings,
     }),
     target: new StreamTarget(options.writable, {
       chunked: true,

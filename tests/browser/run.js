@@ -24,6 +24,41 @@ async function listNames(directory) {
   return names.toSorted()
 }
 
+async function playbackTiming(file) {
+  const video = document.createElement('video')
+  video.muted = true
+  document.body.append(video)
+  const url = URL.createObjectURL(file)
+  let timer
+  let callback
+  try {
+    const { promise: frame, resolve, reject } = Promise.withResolvers()
+    timer = setTimeout(
+      () => reject(new Error('Playback frame timeout')),
+      10_000,
+    )
+    callback = video.requestVideoFrameCallback((_, metadata) =>
+      resolve(metadata.mediaTime),
+    )
+    video.addEventListener(
+      'error',
+      () => reject(new Error(video.error?.message ?? 'Playback failed')),
+      { once: true },
+    )
+    video.src = url
+    const [firstFrame] = await Promise.all([frame, video.play()])
+    return { firstFrame, duration: video.duration }
+  } finally {
+    clearTimeout(timer)
+    video.cancelVideoFrameCallback(callback)
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    video.remove()
+    URL.revokeObjectURL(url)
+  }
+}
+
 async function run() {
   const root = await navigator.storage.getDirectory()
   const directoryName = `media-remux-browser-test-${crypto.randomUUID()}`
@@ -78,6 +113,40 @@ async function run() {
         size: result.file.size,
         duration: result.duration,
       })
+    }
+    const vfr = await fixture('vfr-bframes.mp4')
+    const vfrFlv = await fixture('vfr-bframes.flv')
+    for (const [label, job, firstFrame] of [
+      ['cfr-av', { operation: 'combine', video, audio }, 1024 / 48_000],
+      [
+        'vfr-av',
+        { operation: 'combine', video: vfr, audio },
+        0.4 + 1024 / 48_000,
+      ],
+      [
+        'vfr-flv-av',
+        { operation: 'combine', video: vfrFlv, audio },
+        0.4 + 1024 / 48_000,
+      ],
+      ['vfr-remux', { operation: 'remux', input: vfr }, 0],
+      ['vfr-mp4-flv', { operation: 'concat', inputs: [vfr, vfrFlv] }, 0],
+      ['vfr-flv-mp4', { operation: 'concat', inputs: [vfrFlv, vfr] }, 0],
+    ]) {
+      const result = await runMediaJob(job, { createWorker, directory })
+      try {
+        const actual = await playbackTiming(result.file)
+        assert(
+          Math.abs(actual.firstFrame - firstFrame) < 0.00005,
+          `${label}: first-frame timestamp shifted`,
+        )
+        assert(
+          Math.abs(actual.duration - result.duration) < 0.001,
+          `${label}: browser duration lost the presentation tail`,
+        )
+        checks.push({ playback: label, ...actual })
+      } finally {
+        await result.dispose()
+      }
     }
     for (const mutation of [
       'inputs',

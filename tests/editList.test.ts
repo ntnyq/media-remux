@@ -106,15 +106,18 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
   const original = Buffer.from(await target.blob().arrayBuffer())
   const moovStart = original.indexOf('moov') - 4
   const trakStart = original.indexOf('trak') - 4
-  const trakEnd = trakStart + original.readUInt32BE(trakStart)
+  const edtsStartOriginal = original.indexOf('edts') - 4
+  expect(edtsStartOriginal).toBeGreaterThan(trakStart)
+  const originalEditSize = original.readUInt32BE(edtsStartOriginal)
+  const originalElst = original.indexOf('elst')
+  expect(original[originalElst + 4]).toBe(0)
+  const mediaTime = original.readInt32BE(originalElst + 16)
   const mvhd = original.indexOf('mvhd')
   const movieTimescale = original.readUInt32BE(
     mvhd + (original[mvhd + 4] === 1 ? 24 : 16),
   )
   const edited = Buffer.from(
-    await (
-      await editedMedia([{ duration, mediaTime: 0 }], version)
-    ).arrayBuffer(),
+    await (await editedMedia([{ duration, mediaTime }], version)).arrayBuffer(),
   )
   const edtsStart = edited.lastIndexOf('edts') - 4
   expect(edtsStart).toBeGreaterThan(0)
@@ -131,12 +134,15 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
   // Fragment payloads use moof-relative offsets and move with their moofs.
   // Discard the optional TFRA index, whose absolute offsets would be stale.
   const bytes = Buffer.concat([
-    original.subarray(0, trakEnd),
+    original.subarray(0, edtsStartOriginal),
     edts,
-    original.subarray(trakEnd),
+    original.subarray(edtsStartOriginal + originalEditSize),
   ])
   for (const offset of [moovStart, trakStart]) {
-    bytes.writeUInt32BE(bytes.readUInt32BE(offset) + edts.length, offset)
+    bytes.writeUInt32BE(
+      bytes.readUInt32BE(offset) + edts.length - originalEditSize,
+      offset,
+    )
   }
   const mfra = bytes.lastIndexOf('mfra')
   expect(mfra).toBeGreaterThan(0)

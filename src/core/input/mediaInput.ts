@@ -151,15 +151,24 @@ export async function openMediaInput(
            * @throws If packet reading fails or the cancellation signal is aborted.
            */
           async *packets(metadataOnly = false) {
-            let packet = await sink.getFirstPacket({ metadataOnly })
-
-            while (packet) {
+            try {
               checkAbort(signal)
-              yield packet
-              packet = await sink.getNextPacket(packet, { metadataOnly })
-            }
+              let packet = await sink.getFirstPacket({ metadataOnly })
 
-            checkAbort(signal)
+              while (packet) {
+                checkAbort(signal)
+                yield packet
+                checkAbort(signal)
+                packet = await sink.getNextPacket(packet, { metadataOnly })
+              }
+
+              checkAbort(signal)
+            } catch (error) {
+              // Abort disposes the parser, which can reject an in-flight read.
+              // Keep the caller's cancellation reason instead of that cleanup error.
+              checkAbort(signal)
+              throw error
+            }
           },
         })
       }

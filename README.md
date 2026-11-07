@@ -376,7 +376,8 @@ Pass this adapter as `storage.fragmentSamples` alongside a fresh `createDiskFrag
 - Video sample aspect ratios remain exact across repeated remuxes. Compatibility compares reduced display aspect ratios, so proportional display dimensions match. Explicit MP4 `pasp` signaling takes precedence over SPS metadata regardless of box order.
 - Each segment's earliest selected presentation timestamp becomes the preceding segment's presentation end, preserving internal A/V offsets and gaps. Single remux/combine also normalize earliest PTS to zero, including negative AAC pre-roll. Delay/padding remains; gapless audio is not guaranteed.
 - Packet order stays decode order. B-frame PTS is not sorted before copying. Output timestamps round to their container timescale.
-- Sample durations must fit unsigned 32-bit output track units; composition offsets must fit signed 32-bit output track units. Values outside these ranges reject the operation instead of wrapping.
+- Preflight plans each track's decode lead across all segments. Output uses nonnegative composition offsets and media edits to preserve the shared presentation origin in players; header durations include the complete presentation tail.
+- Sample durations and nonnegative composition offsets must fit unsigned 32-bit output track units. Values outside these ranges reject the operation instead of wrapping.
 - FLV DTS must increase within a track; rollover/discontinuities require separate segments. Video duration comes from the next DTS/end marker; the final frame uses the previous interval, or 1/30 second for a lone frame without an end marker. AAC duration comes from its configuration.
 - Progress phases are `inspect`, `remux`, and `finalize`. `bytesProcessed` counts encoded payload, excluding container overhead. Worker packet progress is throttled to 250 ms; phase transitions always report. Inspection scans timing metadata before output is created.
 

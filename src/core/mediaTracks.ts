@@ -3,6 +3,7 @@ import { checkAbort } from '../abort'
 import type { RemuxOptions } from '../types'
 import { simplifyRational } from '../vendor/mediabunny/src/misc'
 import type { Rational } from '../vendor/mediabunny/src/misc'
+import type { DecodeTimeline } from './decodeTimeline'
 import type { MediaInput, PacketTrack } from './input/mediaInput'
 
 /**
@@ -129,6 +130,7 @@ export function trackSignature(track: PacketTrack): string {
  *
  * @param tracks - Selected tracks whose metadata iterators can be consumed.
  * @param signal - Optional cancellation signal checked for each packet.
+ * @param decodeTimeline - Optional output decode-clock planner shared across segments.
  * @returns A promise resolving to the earliest presentation timestamp and the
  * duration through the latest packet end, both measured in seconds.
  * @throws {Error} If timing or packet size is invalid, a track is empty, a video
@@ -139,11 +141,12 @@ export function trackSignature(track: PacketTrack): string {
 export async function inspectTracks(
   tracks: PacketTrack[],
   signal?: AbortSignal,
+  decodeTimeline?: DecodeTimeline,
 ): Promise<SegmentInfo> {
   let start = Infinity
   let end = -Infinity
 
-  for (const track of tracks) {
+  for (const [index, track] of tracks.entries()) {
     let count = 0
     let maxTimestamp = -Infinity
     let maxTimestampBeforeLastKeyPacket = -Infinity
@@ -174,6 +177,7 @@ export async function inspectTracks(
         )
       }
       maxTimestamp = Math.max(maxTimestamp, packet.timestamp)
+      decodeTimeline?.addPacket(index, packet)
 
       // B-frame presentation timestamps can arrive out of order. Inspect every
       // packet rather than treating the first decoded packet as the start.
@@ -191,5 +195,7 @@ export async function inspectTracks(
     throw new Error('Media segment has no positive duration.')
   }
 
-  return { start, duration: end - start }
+  const info = { start, duration: end - start }
+  decodeTimeline?.finishSegment(info)
+  return info
 }

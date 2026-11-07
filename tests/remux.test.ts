@@ -621,7 +621,12 @@ test('produces files independently accepted and decoded by FFmpeg when available
   }
   const directory = await mkdtemp(join(tmpdir(), 'media-remux-decode-'))
   try {
-    for (const name of ['progressive.mp4', 'progressive.flv']) {
+    for (const name of [
+      'progressive.mp4',
+      'progressive.flv',
+      'vfr-bframes.mp4',
+      'subtitle-first.mp4',
+    ]) {
       const target = memoryTarget()
       const input = await fixture(name)
       await concatMedia([input, input], {
@@ -633,6 +638,7 @@ test('produces files independently accepted and decoded by FFmpeg when available
       const { stderr } = await exec('ffmpeg', [
         '-v',
         'error',
+        '-xerror',
         '-i',
         path,
         '-f',

@@ -355,7 +355,7 @@ export async function openFlvInput(
          * Converts a media tag to a packet and advances this iterator's sequence.
          *
          * @param tag - Media tag whose payload and composition offset to preserve.
-         * @param duration - Packet presentation duration in seconds.
+         * @param duration - Decode duration in seconds, also used as a presentation estimate.
          * @returns An encoded packet with the next decode sequence number.
          */
         function packet(tag: FlvTag, duration: number) {
@@ -366,6 +366,7 @@ export async function openFlvInput(
             duration,
             sequence++,
             tag.size,
+            { decodeDuration: duration },
           )
         }
 

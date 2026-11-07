@@ -2,6 +2,42 @@
 
 ## mediabunny@1.62.1
 
+Regular and fragmented MP4 packets carry their original decode duration in
+internal packet side data, separately from their presentation duration. The
+disk-backed muxer preserves these sample deltas and accumulates decode time in
+integer track units; composition offsets retain the normalized presentation
+timeline, including gaps. It writes each fragment's first decode timestamp to
+`tfdt` rather than its minimum presentation timestamp. Packets without decode
+duration metadata retain the existing timestamp reconstruction path. This avoids
+changing VFR B-frame tail durations during remuxing, concatenation and repeated
+remuxing without changing the public storage record format.
+
+Core preflight now supplies `_fragmentTrackTimings` for all output tracks. It
+scans every segment with the same carried decode-duration rounding as the muxer,
+retaining only per-track clocks and presentation bounds. Initial decode times
+leave enough lead for every reordered packet, including later segments. The
+stored muxer moves negative decode origins into media edits and writes version-0
+`trun` composition offsets as unsigned 32-bit values. This avoids reader-specific
+shifts caused by negative composition offsets, preserving absolute PTS and the
+shared A/V origin. Unrepresentable offsets still reject instead of wrapping;
+the compatibility path without preflight timing keeps signed offsets.
+
+Preflight presentation spans populate media durations, while movie/track headers
+and media edits use each track's complete presentation end. This keeps browser
+duration from dropping a reordered presentation tail. FLV readers supply decode
+duration side data too, including their documented final-interval estimate.
+Regression coverage checks FLV/MP4 concatenation in both orders, repeated remux,
+absolute FFprobe PTS/duration, and Chromium first-frame timing and duration in
+`tests/browser/run.js`. MP4 packet iteration also preserves the signal's reason
+when parser disposal interrupts an asynchronous metadata read.
+
+Unsupported fragment tracks still have their `tfhd` defaults and `trun` sample
+layouts scanned through the bounded fragment table reader. Their payloads are
+never read or exposed, but their data end advances the implicit base used by the
+next `traf`. This preserves audio following an ignored subtitle track. Real
+FFmpeg fixtures and round-trip regressions are in `tests/remuxTiming.test.ts`;
+independent decoding is checked in `tests/remux.test.ts` when FFmpeg is available.
+
 The browser remuxer writes fragmented MP4/M4A and supplies an internal
 `_fragmentIndexStore` to the pinned muxer patch. Each completed fragment appends
 one packed 28-byte TFRA v1 record per track that has a sync sample. The muxer

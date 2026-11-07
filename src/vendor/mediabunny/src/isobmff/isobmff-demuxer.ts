@@ -207,6 +207,12 @@ export class IsobmffDemuxer extends Demuxer {
     boxParserQueue: Promise<unknown> = Promise.resolve();
     sampleTablePromises = new WeakMap<InternalTrack, Promise<SampleTable>>();
     currentTrack: InternalTrack | null = null;
+    private ignoredFragmentTrack: {
+        state: FragmentTrackState;
+        samples: FragmentSampleTable | null;
+        time: number;
+        offset: number;
+    } | null = null;
     tracks: InternalTrack[] = [];
     idToTrack = new Map<number, InternalTrack>();
     metadataPromise: Promise<void> | null = null;
@@ -1763,6 +1769,7 @@ export class IsobmffDemuxer extends Demuxer {
                         break;
                     }
                     this.isReadingTraf = true;
+                    this.ignoredFragmentTrack = null;
                     this.trafStart = contentStartPos;
                     this.trafEnd = boxEndPos;
                     try {
@@ -1770,6 +1777,7 @@ export class IsobmffDemuxer extends Demuxer {
                     }
                     finally {
                         this.isReadingTraf = false;
+                        this.ignoredFragmentTrack = null;
                     }
                     // It is possible that there is no current track, for example when we don't care about the track
                     // referenced in the track fragment header.
@@ -1821,7 +1829,7 @@ export class IsobmffDemuxer extends Demuxer {
             case 'tfhd':
                 {
                     // Only the first tfhd of a traf counts; anywhere else, there'd be no traf to finish the track data
-                    if (!this.currentFragment || !this.isReadingTraf || this.currentTrack) {
+                    if (!this.currentFragment || !this.isReadingTraf || this.currentTrack || this.ignoredFragmentTrack) {
                         break;
                     }
                     slice.skip(1); // Version
@@ -1835,16 +1843,12 @@ export class IsobmffDemuxer extends Demuxer {
                     const defaultBaseIsMoof = Boolean(flags & 0x020000);
                     const trackId = readU32Be(slice);
                     const track = this.idToTrack.get(trackId);
-                    if (!track) {
-                        // We don't care about this track
-                        break;
-                    }
                     if (this.currentFragment.trackData.has(trackId)) {
                         throw new Error(`Unsupported MP4 fragment: multiple traf boxes for track ${trackId} in the same moof.`);
                     }
                     const defaults = this.fragmentTrackDefaults.get(trackId);
-                    this.currentTrack = track;
-                    track.currentFragmentState = {
+                    this.currentTrack = track ?? null;
+                    const state: FragmentTrackState = {
                         baseDataOffset: this.currentFragment.implicitBaseDataOffset,
                         sampleDescriptionIndex: defaults?.defaultSampleDescriptionIndex ?? null,
                         defaultSampleDuration: defaults?.defaultSampleDuration ?? null,
@@ -1854,26 +1858,30 @@ export class IsobmffDemuxer extends Demuxer {
                         encryptionAuxInfo: null,
                     };
                     if (baseDataOffsetPresent) {
-                        track.currentFragmentState.baseDataOffset = readU64Be(slice);
+                        state.baseDataOffset = readU64Be(slice);
                     }
                     else if (defaultBaseIsMoof) {
-                        track.currentFragmentState.baseDataOffset = this.currentFragment.moofOffset;
+                        state.baseDataOffset = this.currentFragment.moofOffset;
                     }
                     if (sampleDescriptionIndexPresent) {
-                        track.currentFragmentState.sampleDescriptionIndex = readU32Be(slice);
+                        state.sampleDescriptionIndex = readU32Be(slice);
                     }
                     if (defaultSampleDurationPresent) {
-                        track.currentFragmentState.defaultSampleDuration = readU32Be(slice);
+                        state.defaultSampleDuration = readU32Be(slice);
                     }
                     if (defaultSampleSizePresent) {
-                        track.currentFragmentState.defaultSampleSize = readU32Be(slice);
+                        state.defaultSampleSize = readU32Be(slice);
                     }
                     if (defaultSampleFlagsPresent) {
-                        track.currentFragmentState.defaultSampleFlags = readU32Be(slice);
+                        state.defaultSampleFlags = readU32Be(slice);
                     }
                     if (durationIsEmpty) {
-                        track.currentFragmentState.defaultSampleDuration = 0;
+                        state.defaultSampleDuration = 0;
                     }
+                    if (track)
+                        track.currentFragmentState = state;
+                    else
+                        this.ignoredFragmentTrack = { state, samples: null, time: 0, offset: state.baseDataOffset };
                 }
                 ;
                 break;
@@ -1892,6 +1900,18 @@ export class IsobmffDemuxer extends Demuxer {
                 break;
             case 'trun':
                 {
+                    const ignored = this.ignoredFragmentTrack;
+                    if (ignored && this.currentFragment) {
+                        // Unsupported tracks still determine the implicit base of the next traf.
+                        // Reuse the bounded table scanner; no ignored payload is loaded or exposed.
+                        ignored.samples ??= new FragmentSampleTable(this.reader, null, this.trafStart,
+                            this.trafEnd, ignored.state.baseDataOffset, ignored.state);
+                        const result = await ignored.samples.addRun(startPos, ignored.time, ignored.offset);
+                        ignored.time = result.time;
+                        ignored.offset = result.offset;
+                        this.currentFragment.implicitBaseDataOffset = result.offset;
+                        break;
+                    }
                     const track = this.currentTrack;
                     if (!track?.currentFragmentState || !this.currentFragment)
                         break;
@@ -2661,7 +2681,8 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         const timestamp = (sampleInfo.presentationTimestamp - this.internalTrack.editListOffset)
             / this.internalTrack.timescale;
         const duration = sampleInfo.duration / this.internalTrack.timescale;
-        const packet = new EncodedPacket(data, sampleInfo.isKeyFrame ? 'key' : 'delta', timestamp, duration, sampleIndex, sampleInfo.sampleSize);
+        const packet = new EncodedPacket(data, sampleInfo.isKeyFrame ? 'key' : 'delta', timestamp, duration, sampleIndex, sampleInfo.sampleSize,
+            { decodeDuration: sampleInfo.decodeDuration / this.internalTrack.timescale });
         this.packetToSampleIndex.set(packet, sampleIndex);
         return packet;
     }
@@ -2697,7 +2718,8 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         const timestamp = (fragmentSample.presentationTimestamp - this.internalTrack.editListOffset)
             / this.internalTrack.timescale;
         const duration = fragmentSample.duration / this.internalTrack.timescale;
-        const packet = new EncodedPacket(data, fragmentSample.isKeyFrame ? 'key' : 'delta', timestamp, duration, fragment.moofOffset + sampleIndex, fragmentSample.byteSize);
+        const packet = new EncodedPacket(data, fragmentSample.isKeyFrame ? 'key' : 'delta', timestamp, duration, fragment.moofOffset + sampleIndex, fragmentSample.byteSize,
+            { decodeDuration: fragmentSample.decodeDuration / this.internalTrack.timescale });
         this.packetToFragmentLocation.set(packet, { fragment, sampleIndex });
         return packet;
     }
@@ -3406,12 +3428,12 @@ class FragmentSampleTable {
     aux: SampleEncryptionAuxInfo | null = null;
     private pending: Promise<unknown> = Promise.resolve();
     private reader: Reader;
-    private track: InternalTrack;
+    private track: InternalTrack | null;
     private start: number;
     private end: number;
     private base: number;
     private defaults: FragmentTrackState;
-    constructor(reader: Reader, track: InternalTrack, start: number, end: number, base: number, defaults: FragmentTrackState) {
+    constructor(reader: Reader, track: InternalTrack | null, start: number, end: number, base: number, defaults: FragmentTrackState) {
         this.reader = reader;
         this.track = track;
         this.start = start;
@@ -3950,7 +3972,7 @@ class FragmentSampleTable {
         this.encryptionCheckpoints = null;
     }
     private async encryption(index: number): Promise<SampleEncryptionInfo | null> {
-        const info = this.track.encryptionInfo;
+        const info = this.track?.encryptionInfo;
         if (!info)
             return null;
         const aux = this.aux;
@@ -4035,6 +4057,7 @@ class FragmentSampleTable {
             return {
                 ...raw,
                 presentationTimestamp: raw.presentationTimestamp + this.timestampOffset,
+                decodeDuration: raw.duration,
                 duration: await this.duration(index, raw),
                 encryption: encrypted ? await this.encryption(index) : null,
             };
@@ -4402,7 +4425,7 @@ class SampleTable {
         if (!Number.isSafeInteger(sampleOffset) || !Number.isSafeInteger(sampleOffset + sampleSize)) {
             throw new RangeError('Unsafe sample byte offset.');
         }
-        return { presentationTimestamp, duration, sampleOffset, sampleSize, chunkOffset,
+        return { presentationTimestamp, duration, decodeDuration: this.pcm ? duration : timing.value, sampleOffset, sampleSize, chunkOffset,
             isKeyFrame: await this.keyIndex(index) === index };
     }
 }

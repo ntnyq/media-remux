@@ -3,7 +3,10 @@
 Small synthetic FFmpeg-generated H.264/AAC fixtures migrated from the originating extension's remux tests. They contain generated test patterns/tones, not third-party recordings.
 
 - `video.mp4`: H.264 with B frames, video only.
+- `vfr-bframes.mp4`: seven H.264 frames with variable frame rate and reordered B frames. The final presented frame is not the final decoded frame. Generated with `ffmpeg -f lavfi -i testsrc2=size=64x64:rate=10 -frames:v 7 -vf 'setpts=N*N' -fps_mode vfr -c:v libx264 -x264-params 'bframes=2:b-adapt=0:keyint=100:min-keyint=100:scenecut=0' -video_track_timescale 1000 -use_editlist 0 vfr-bframes.mp4`.
+- `vfr-bframes.flv`: the same variable-rate H.264 payloads in FLV, retaining decode timestamps and composition offsets. Generated with `ffmpeg -i vfr-bframes.mp4 -c copy -f flv vfr-bframes.flv`.
 - `audio.m4a`: AAC with encoder pre-roll, audio only.
+- `subtitle-first.mp4`: fragmented MP4 with a `mov_text` subtitle track before unchanged AAC from `audio.m4a`. The audio `traf` uses the preceding subtitle data's end as its implicit base. Generated with `ffmpeg -i audio.m4a -f srt -i subtitle.srt -map 1 -map 0 -c:a copy -c:s mov_text -movflags empty_moov+frag_keyframe+omit_tfhd_offset subtitle-first.mp4`, using one SRT cue containing `remux regression` from `00:00:00,000` to `00:00:01,000`.
 - `progressive.mp4`, `progressive.flv`: progressive H.264/AAC.
 - `long-gop.mp4`: H.264 for fragment/sample processing.
 - `leading-delta.mp4`: H.264 stream copy cut between keyframes, retaining leading dependent frames. Generated from `video.mp4` with `ffmpeg -i video.mp4 -ss 0.1 -copyinkf -c copy -avoid_negative_ts make_zero leading-delta.mp4`.

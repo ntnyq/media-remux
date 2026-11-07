@@ -5,6 +5,28 @@ import { openMediaInput } from '../src/core/input/mediaInput'
 import { trackSignature } from '../src/core/mediaTracks'
 import { fixture, packets, diskStorage, memoryTarget } from './helpers/media'
 
+test.each([false, true])(
+  'retains VFR decode durations in FLV packets (metadataOnly=%s)',
+  async metadataOnly => {
+    const input = await openMediaInput(await fixture('vfr-bframes.flv'))
+    try {
+      const durations = []
+      for await (const packet of input.tracks[0]!.packets(metadataOnly)) {
+        durations.push(packet.sideData.decodeDuration)
+        expect(packet.data.length === 0).toBe(metadataOnly)
+      }
+      // The end tag shares the final DTS, so the last packet reuses the previous interval.
+      const expected = [0.1, 0.3, 0.1, 0.3, 0.5, 0.7, 0.7]
+      expect(durations).toHaveLength(expected.length)
+      for (const [index, duration] of durations.entries()) {
+        expect(duration).toBeCloseTo(expected[index]!, 8)
+      }
+    } finally {
+      input.dispose()
+    }
+  },
+)
+
 test.each([
   { name: 'interlaced.flv', width: 320, height: 240, aspectWidth: 320 },
   { name: 'anamorphic.flv', width: 320, height: 240, aspectWidth: 640 },

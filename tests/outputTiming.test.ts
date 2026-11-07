@@ -1,7 +1,67 @@
 import { expect, test } from 'vitest'
-import { remuxMedia } from '../src'
+import { concatMedia, remuxMedia } from '../src'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 import { indexedMp4 } from './helpers/mp4Index'
+
+test('plans decode lead before writing an earlier segment with no reordering', async () => {
+  const first = (
+    await indexedMp4({ samples: 3, keyInterval: 3, compositionOffsets: [0] })
+  ).blob()
+  const second = (
+    await indexedMp4({
+      samples: 3,
+      keyInterval: 3,
+      cttsVersion: 1,
+      compositionOffsets: [0, 1024, -1024],
+    })
+  ).blob()
+  const target = memoryTarget()
+  const result = await concatMedia([first, second], {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const bytes = Buffer.from(await target.blob().arrayBuffer())
+  const edit = bytes.indexOf('elst')
+  expect(edit).toBeGreaterThan(0)
+  expect(bytes[edit + 4]).toBe(0)
+  // The later B-frame needs decode lead even though the first segment did not.
+  expect(bytes.readInt32BE(edit + 16)).toBeGreaterThanOrEqual(1024)
+  const actual = await packets(target.blob(), 'audio')
+  const expected = [0, 1024, 2048, 3072, 5120, 4096]
+  expect(actual).toHaveLength(expected.length)
+  for (const [index, packet] of actual.entries()) {
+    expect(packet.timestamp).toBeCloseTo(expected[index]! / 48_000, 8)
+  }
+  expect(result.duration).toBeCloseTo(6144 / 48_000, 8)
+})
+
+test('keeps fractional decode ticks aligned across fragments and segment boundaries', async () => {
+  const count = 300
+  const indexed = await indexedMp4({
+    samples: count,
+    keyInterval: 100,
+    compositionOffsets: [0],
+  })
+  const bytes = Buffer.from(await indexed.blob().arrayBuffer())
+  const mdhd = bytes.indexOf('mdhd')
+  expect(mdhd).toBeGreaterThan(0)
+  // Input deltas become 1024 * 48000 / 44100 output ticks, requiring a carried remainder.
+  bytes.writeUInt32BE(44_100, mdhd + 16)
+  const input = new Blob([bytes])
+  const target = memoryTarget()
+  const result = await concatMedia([input, input, input], {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const actual = await packets(target.blob(), 'audio')
+  expect(actual).toHaveLength(count * 3)
+  for (const [index, packet] of actual.entries()) {
+    expect(
+      Math.abs(packet.timestamp - (index * 1024) / 44_100),
+    ).toBeLessThanOrEqual(0.51 / 48_000)
+  }
+  expect(result.duration).toBeCloseTo((count * 3 * 1024) / 44_100, 8)
+})
 
 /**
  * Gives a real single-frame fragmented MP4 a caller-selected decode duration.
@@ -71,10 +131,10 @@ test.each([
 )
 
 test.each([
-  { name: 'positive', offsets: [2 ** 30 + 4096, 0, 0] },
+  { name: 'positive', offsets: [2 ** 31 - 1, 0, -2048] },
   { name: 'negative', offsets: [2 ** 30 - 1, 2 ** 31 - 2 - 1024, -2048] },
 ])(
-  'rejects $name composition offsets that overflow signed output trun fields',
+  'rejects $name source composition offsets that overflow unsigned output trun fields',
   async ({ offsets }) => {
     const indexed = await indexedMp4({
       samples: 3,
@@ -101,6 +161,7 @@ test.each([
 )
 
 test.each([
+  { name: 'unsigned maximum', offsets: [2 ** 32 - 1, 0, 0], version: 0 },
   { name: 'maximum', offsets: [2 ** 31 - 1 + 1024, 0, 0], version: 0 },
   {
     name: 'minimum',
@@ -108,7 +169,7 @@ test.each([
     version: 1,
   },
 ] as const)(
-  'preserves the signed composition offset $name boundary',
+  'preserves the source composition offset $name boundary',
   async ({ offsets, version }) => {
     const indexed = await indexedMp4({
       samples: offsets.length,

@@ -36,6 +36,8 @@ export type Sample = {
     size: number;
     type: PacketType;
     timescaleUnitsToNextSample: number;
+    /** Only needed until the sample is assigned to a stored GOP. */
+    hasDecodeDuration?: boolean;
 };
 type Chunk = {
     /** The lowest presentation timestamp in this chunk */
@@ -75,6 +77,8 @@ export type IsobmffTrackData = {
     storedQueueEnd: number;
     storedGopStart: number;
     storedGopCount: number;
+    storedGopHasDecodeDurations?: boolean;
+    decodeDurationRemainder?: number;
     currentChunk: Chunk | null;
     compactlyCodedChunkTable: {
         firstChunk: number;
@@ -156,6 +160,10 @@ export const intoTimescale = (timeInSeconds: number, timescale: number, round = 
     return round ? Math.round(value) : value;
 };
 export const presentationSpan = (trackData: IsobmffTrackData) => {
+    const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
+    if (timing) {
+        return timing.presentationEnd - timing.presentationStart;
+    }
     if (trackData.samples.length === 0) {
         return 0;
     }
@@ -572,7 +580,7 @@ export class IsobmffMuxer extends Muxer {
                 packetData = concatNalUnitsInLengthPrefixed(nalUnits, 4);
             }
             this.validateTimestamp(trackData.track, packet.timestamp, packet.type === 'key');
-            const internalSample = this.createSampleForTrack(trackData, packetData, packet.timestamp, packet.duration, packet.type);
+            const internalSample = this.createSampleForTrack(trackData, packetData, packet.timestamp, packet.duration, packet.type, packet.sideData.decodeDuration);
             await this.registerSample(trackData, internalSample);
         }
         finally {
@@ -616,7 +624,7 @@ export class IsobmffMuxer extends Muxer {
                 }
                 trackData.info.expectedNextPcmPacketTimestamp = timestamp + duration;
             }
-            const internalSample = this.createSampleForTrack(trackData, packetData, timestamp, duration, packet.type);
+            const internalSample = this.createSampleForTrack(trackData, packetData, timestamp, duration, packet.type, packet.sideData.decodeDuration);
             await this.registerSample(trackData, internalSample);
         }
         finally {
@@ -715,7 +723,16 @@ export class IsobmffMuxer extends Muxer {
             trackData.lastCueEndTimestamp = sampleEnd;
         }
     }
-    private createSampleForTrack(trackData: IsobmffTrackData, data: Uint8Array, timestamp: number, duration: number, type: PacketType) {
+    private createSampleForTrack(trackData: IsobmffTrackData, data: Uint8Array, timestamp: number, duration: number, type: PacketType, decodeDuration?: number) {
+        let decodeUnits = intoTimescale(duration, trackData.timescale);
+        if (decodeDuration !== undefined) {
+            // Carry sub-tick precision across samples instead of rounding every
+            // source delta independently (e.g. 30000/1001 fps into 57600 Hz).
+            const preciseUnits = intoTimescale(decodeDuration, trackData.timescale, false)
+                + (trackData.decodeDurationRemainder ?? 0);
+            decodeUnits = Math.round(preciseUnits);
+            trackData.decodeDurationRemainder = preciseUnits - decodeUnits;
+        }
         const sample: Sample = {
             timestamp,
             decodeTimestamp: timestamp, // This may be refined later
@@ -723,7 +740,8 @@ export class IsobmffMuxer extends Muxer {
             data,
             size: data.byteLength,
             type,
-            timescaleUnitsToNextSample: intoTimescale(duration, trackData.timescale), // Will be refined
+            timescaleUnitsToNextSample: decodeUnits,
+            hasDecodeDuration: decodeDuration !== undefined,
         };
         return sample;
     }
@@ -732,11 +750,25 @@ export class IsobmffMuxer extends Muxer {
             return;
         const store = this.formatOptions._fragmentSampleStore!;
         await store.sort(track.track.id, track.storedGopStart, track.storedGopCount);
-        track.startTimestampOffset ??= Math.min(await store.sorted(track.track.id, 0), 0);
+        const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.track.id)?.decodeStart;
+        track.startTimestampOffset ??= Math.min(decodeStart ?? await store.sorted(track.track.id, 0), 0);
         for (let at = 0; at < track.storedGopCount; at++) {
             const id = track.storedGopStart + at;
             const row = await store.get(track.track.id, id);
             const sample: Sample = { ...row, data: null, storeId: id };
+            if (track.storedGopHasDecodeDurations) {
+                // Keep source decode deltas, including the presentation-last sample's
+                // duration. Sorted PTS deltas are not decode deltas for VFR B-frames.
+                // Pack decode time continuously; composition offsets preserve PTS gaps.
+                const units = track.lastSample
+                    ? Math.round(track.lastTimescaleUnits!) + track.lastSample.timescaleUnitsToNextSample
+                    : intoTimescale(decodeStart ?? await store.sorted(track.track.id, 0), track.timescale);
+                sample.decodeTimestamp = units / track.timescale;
+                track.lastTimescaleUnits = units;
+                await store.set(track.track.id, id, { ...sample, mediaOffset: sample.mediaOffset! });
+                track.lastSample = sample;
+                continue;
+            }
             sample.decodeTimestamp = await store.sorted(track.track.id, at);
             const units = intoTimescale(sample.decodeTimestamp, track.timescale, false);
             if (track.lastTimescaleUnits !== null) {
@@ -756,7 +788,7 @@ export class IsobmffMuxer extends Muxer {
         }
         track.storedGopCount = 0;
         const lastSample = track.lastSample!;
-        if (nextSample && lastSample.timescaleUnitsToNextSample === 0) {
+        if (!track.storedGopHasDecodeDurations && nextSample && lastSample.timescaleUnitsToNextSample === 0) {
             lastSample.timescaleUnitsToNextSample = Math.round(intoTimescale(nextSample.timestamp, track.timescale, false) - track.lastTimescaleUnits!);
             await store.set(track.track.id, lastSample.storeId!, { ...lastSample, mediaOffset: lastSample.mediaOffset! });
         }
@@ -765,6 +797,7 @@ export class IsobmffMuxer extends Muxer {
         const store = this.formatOptions._fragmentSampleStore!;
         const indexStore = this.formatOptions._fragmentIndexStore!;
         const writer = this.writer!;
+        const unsignedComposition = this.formatOptions._fragmentTrackTimings !== undefined;
         const sampleFlags = (sample: Sample) => sample.type === 'key' ? 0x02000000 : 0x01010000;
         const summaries = [];
         for (const track of tracks) {
@@ -799,8 +832,10 @@ export class IsobmffMuxer extends Muxer {
                 if (at > 0)
                     sameFollowingFlags &&= flags === referenceFlags;
                 const composition = intoTimescale(sample.timestamp - sample.decodeTimestamp, track.timescale);
-                if (!Number.isSafeInteger(composition) || composition < -(2 ** 31) || composition > 2 ** 31 - 1) {
-                    throw new RangeError('MP4 composition offset exceeds the signed 32-bit field range.');
+                if (!Number.isSafeInteger(composition)
+                    || composition < (unsignedComposition ? 0 : -(2 ** 31))
+                    || composition > (unsignedComposition ? 0xffffffff : 2 ** 31 - 1)) {
+                    throw new RangeError(`MP4 composition offset exceeds the ${unsignedComposition ? 'unsigned' : 'signed'} 32-bit field range.`);
                 }
                 compositionPresent ||= composition !== firstComposition;
                 if (syncIndex === -1 && sample.type === 'key') {
@@ -870,11 +905,13 @@ export class IsobmffMuxer extends Muxer {
             writer.write(tfhd.bytes);
             const tfdt = box(20, 'tfdt');
             tfdt.view.setUint32(8, 0x01000000);
-            tfdt.view.setBigUint64(12, BigInt(intoTimescale(chunk.startTimestamp - track.startTimestampOffset!, track.timescale)));
+            tfdt.view.setBigUint64(12, BigInt(intoTimescale(summary.first.decodeTimestamp, track.timescale)));
             writer.write(tfdt.bytes);
             const trun = box(summary.firstFlagsPresent ? 24 : 20, 'trun');
             trun.view.setUint32(0, summary.trunSize);
-            trun.view.setUint32(8, 0x01000000 | summary.flags);
+            // Decode origins were planned before moov: use unsigned, nonnegative
+            // composition offsets so readers do not introduce a per-track DTS shift.
+            trun.view.setUint32(8, (unsignedComposition ? 0 : 0x01000000) | summary.flags);
             trun.view.setUint32(12, summary.count);
             trun.view.setInt32(16, summary.absolute ? 0 : summary.offset - moofOffset);
             if (summary.firstFlagsPresent)
@@ -904,7 +941,7 @@ export class IsobmffMuxer extends Muxer {
                         used += 4;
                     }
                     if (summary.compositionPresent) {
-                        view.setInt32(used, intoTimescale(sample.timestamp - sample.decodeTimestamp, track.timescale));
+                        view.setUint32(used, intoTimescale(sample.timestamp - sample.decodeTimestamp, track.timescale));
                         used += 4;
                     }
                 }
@@ -1089,8 +1126,13 @@ export class IsobmffMuxer extends Muxer {
             sample.storeId = await store.append(trackData.track.id, sample, sample.data);
             sample.data = null;
             trackData.storedQueueEnd = sample.storeId + 1;
-            if (trackData.storedGopCount++ === 0)
+            if (trackData.storedGopCount++ === 0) {
                 trackData.storedGopStart = sample.storeId;
+                trackData.storedGopHasDecodeDurations = sample.hasDecodeDuration === true;
+            }
+            else if (trackData.storedGopHasDecodeDurations !== (sample.hasDecodeDuration === true)) {
+                throw new Error('Decode duration metadata must be consistent within a GOP.');
+            }
             await this.interleaveSamples();
             return;
         }

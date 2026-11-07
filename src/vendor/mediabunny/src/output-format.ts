@@ -120,6 +120,12 @@ export type IsobmffSampleStore = {
     readMedia: (trackId: number, offset: number, length: number) => MaybePromise<Uint8Array>;
     release: (trackId: number, before: number) => MaybePromise<void>;
 };
+/** @internal Timing computed from every selected packet before writing moov. */
+export type IsobmffTrackTiming = {
+    decodeStart: number;
+    presentationStart: number;
+    presentationEnd: number;
+};
 /**
  * ISOBMFF-specific output options.
  * @group Output formats
@@ -175,6 +181,8 @@ export type IsobmffOutputFormatOptions = {
     } | undefined;
     /** @internal Disk-backed GOP descriptors, sorting and interleave queues. */
     _fragmentSampleStore?: IsobmffSampleStore | undefined;
+    /** @internal Complete preflight timing in seconds, keyed by output track ID. */
+    _fragmentTrackTimings?: ReadonlyMap<number, IsobmffTrackTiming> | undefined;
     /**
      * When using `fastStart: 'fragmented'`, this field controls the minimum duration of each fragment, in seconds.
      * New fragments will only be created when the current fragment is longer than this value. Defaults to 1 second.
@@ -264,6 +272,14 @@ export abstract class IsobmffOutputFormat extends OutputFormat {
                 options._fragmentSampleStore.readMedia, options._fragmentSampleStore.release]
                 .some(method => typeof method !== 'function'))) {
             throw new TypeError('_fragmentSampleStore requires fragmented output, an index store, its storage methods and no whole-fragment callbacks.');
+        }
+        if (options._fragmentTrackTimings !== undefined && (!options._fragmentSampleStore
+            || !(options._fragmentTrackTimings instanceof Map)
+            || [...options._fragmentTrackTimings].some(([id, timing]) => !Number.isInteger(id) || id < 1
+                || !timing || !Number.isFinite(timing.decodeStart) || timing.decodeStart > 0
+                || !Number.isFinite(timing.presentationStart) || timing.presentationStart < 0
+                || !Number.isFinite(timing.presentationEnd) || timing.presentationEnd < timing.presentationStart))) {
+            throw new TypeError('_fragmentTrackTimings requires a sample store and finite decode/presentation timing.');
         }
         if (options.onFtyp !== undefined && typeof options.onFtyp !== 'function') {
             throw new TypeError('options.onFtyp, when provided, must be a function.');
@@ -362,7 +378,7 @@ export class Mp4OutputFormat extends IsobmffOutputFormat {
  * @group Output formats
  * @public
  */
-export type CmafOutputFormatOptions = Omit<IsobmffOutputFormatOptions, 'fastStart' | '_fragmentIndexStore' | '_fragmentMediaStore' | '_fragmentSampleStore'> & {
+export type CmafOutputFormatOptions = Omit<IsobmffOutputFormatOptions, 'fastStart' | '_fragmentIndexStore' | '_fragmentMediaStore' | '_fragmentSampleStore' | '_fragmentTrackTimings'> & {
     /**
      * Controls the minimum duration of each fragment, in seconds. New fragments will only be created when the current
      * fragment is longer than this value. Defaults to `Infinity`, meaning the file will contain only one fragment.

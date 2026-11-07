@@ -297,13 +297,19 @@ export const moov = (muxer: IsobmffMuxer) => {
         udta(muxer),
     ]);
 };
+/** Complete presentation end on the movie clock, including any track delay. */
+const movieTrackDuration = (trackData: IsobmffTrackData) => {
+    const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
+    if (timing) {
+        return intoTimescale(timing.presentationEnd, GLOBAL_TIMESCALE);
+    }
+    // Round separately to match the edit list
+    return Math.max(0, intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
+        + intoTimescale(trackData.startTimestampOffset ?? 0, GLOBAL_TIMESCALE));
+};
 /** Movie Header Box: Used to specify the characteristics of the entire movie, such as timescale and duration. */
 export const mvhd = (creationTime: number, trackDatas: IsobmffTrackData[]) => {
-    const duration = Math.max(0, ...trackDatas
-        .map(trackData => (
-    // Round separately to match the edit list
-    Math.max(0, intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
-        + intoTimescale(trackData.startTimestampOffset ?? 0, GLOBAL_TIMESCALE)))));
+    const duration = Math.max(0, ...trackDatas.map(movieTrackDuration));
     const nextTrackId = Math.max(0, ...trackDatas.map(x => x.track.id)) + 1;
     // Conditionally use u64 if u32 isn't enough
     const needsU64 = !isU32(creationTime) || !isU32(duration);
@@ -345,8 +351,7 @@ export const trak = (trackData: IsobmffTrackData, creationTime: number) => {
 /** Track Header Box: Specifies the characteristics of a single track within a movie. */
 export const tkhd = (trackData: IsobmffTrackData, creationTime: number) => {
     // Round separately to match the edit list
-    const durationInGlobalTimescale = Math.max(0, intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
-        + intoTimescale(trackData.startTimestampOffset ?? 0, GLOBAL_TIMESCALE));
+    const durationInGlobalTimescale = movieTrackDuration(trackData);
     const needsU64 = !isU32(creationTime) || !isU32(durationInGlobalTimescale);
     const u32OrU64 = needsU64 ? u64 : u32;
     let matrix: TransformationMatrix;
@@ -421,10 +426,9 @@ export const edts = (trackData: IsobmffTrackData) => {
         // Negative offset: the negative section of the media is trimmed off
         const mediaTime = intoTimescale(-offset, trackData.timescale);
         // Not the entire media is visible.
-        // For fragmented files, this value is zero, which simply means "unknown duration" in this case. Spec:
+        // Without preflight timing, fragmented files use zero (unknown duration). Spec:
         // "the segment_duration of this edit may be zero"
-        const mediaDuration = Math.max(0, intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
-            + intoTimescale(offset, GLOBAL_TIMESCALE));
+        const mediaDuration = movieTrackDuration(trackData);
         const needs64Bits = !isI32(mediaTime) || !isU32(mediaDuration);
         const u32OrU64 = needs64Bits ? u64 : u32;
         const i32OrI64 = needs64Bits ? i64 : i32;
