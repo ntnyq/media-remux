@@ -13,9 +13,14 @@ import { openFlvInput } from './flvInput'
  */
 export interface PacketTrack {
   /**
-   * Media kind, corresponding to H.264 video or AAC audio.
+   * Media kind of the selected track.
    */
   kind: 'video' | 'audio'
+
+  /**
+   * Validated codec family used by the encoded packet source.
+   */
+  codec: 'avc' | 'hevc' | 'av1' | 'aac'
 
   /**
    * Decoder configuration matching kind, including codec initialization bytes.
@@ -60,7 +65,7 @@ export interface MediaInput {
 }
 
 /**
- * Opens the selected primary H.264/AAC tracks from an MP4 or FLV Blob.
+ * Opens the selected primary encoded tracks from an MP4 or FLV Blob.
  * Detects FLV by its leading signature and otherwise attempts MP4 parsing.
  * Packet iterators read in decode order and can omit encoded payloads during
  * metadata inspection. The caller must dispose the returned input after use.
@@ -125,8 +130,15 @@ export async function openMediaInput(
         }
 
         const codec = await track.getCodec()
-        if (codec !== 'avc' && codec !== 'aac') {
-          throw new Error(`Unsupported codec: ${codec}. Expected H.264 or AAC.`)
+        if (
+          codec !== 'avc' &&
+          codec !== 'hevc' &&
+          codec !== 'av1' &&
+          codec !== 'aac'
+        ) {
+          throw new Error(
+            `Unsupported codec: ${codec}. Expected H.264, HEVC, AV1, or AAC.`,
+          )
         }
 
         const config = await track.getDecoderConfig()
@@ -134,9 +146,19 @@ export async function openMediaInput(
           throw new Error('Missing decoder configuration.')
         }
 
+        if (
+          (codec === 'hevc' || codec === 'av1') &&
+          !config.description?.byteLength
+        ) {
+          throw new Error(
+            `Missing ${codec === 'hevc' ? 'hvcC' : 'av1C'} configuration in MP4 video track.`,
+          )
+        }
+
         const sink = new EncodedPacketSink(track)
         tracks.push({
           kind: track.isVideoTrack() ? 'video' : 'audio',
+          codec,
           config,
           ...(track.isVideoTrack()
             ? { matrix: await track.getTransformationMatrix() }

@@ -116,7 +116,7 @@ async function run() {
     }
     const vfr = await fixture('vfr-bframes.mp4')
     const vfrFlv = await fixture('vfr-bframes.flv')
-    for (const [label, job, firstFrame] of [
+    const playbackCases = [
       ['cfr-av', { operation: 'combine', video, audio }, 1024 / 48_000],
       [
         'vfr-av',
@@ -131,7 +131,19 @@ async function run() {
       ['vfr-remux', { operation: 'remux', input: vfr }, 0],
       ['vfr-mp4-flv', { operation: 'concat', inputs: [vfr, vfrFlv] }, 0],
       ['vfr-flv-mp4', { operation: 'concat', inputs: [vfrFlv, vfr] }, 0],
-    ]) {
+    ]
+    if (
+      document
+        .createElement('video')
+        .canPlayType('video/mp4; codecs="av01.0.00M.10"')
+    ) {
+      playbackCases.push([
+        'av1-av',
+        { operation: 'combine', video: await fixture('av1-main10.mp4'), audio },
+        1024 / 48_000,
+      ])
+    }
+    for (const [label, job, firstFrame] of playbackCases) {
       const result = await runMediaJob(job, { createWorker, directory })
       try {
         const actual = await playbackTiming(result.file)

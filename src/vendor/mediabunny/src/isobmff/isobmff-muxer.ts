@@ -254,6 +254,7 @@ export class IsobmffMuxer extends Muxer {
             this.initBoxWriter = new IsobmffBoxWriter(initWriter);
         }
         const holdsAvc = this.output.tracks.some(x => x.isVideoTrack() && x.source._codec === 'avc');
+        const holdsAv1 = this.output.tracks.some(x => x.isVideoTrack() && x.source._codec === 'av1');
         // Write the header
         {
             const boxWriter = this.initBoxWriter ?? this.boxWriter;
@@ -263,7 +264,8 @@ export class IsobmffMuxer extends Muxer {
             }
             boxWriter.writeBox(ftyp({
                 isQuickTime: this.isQuickTime,
-                holdsAvc: holdsAvc,
+                holdsAvc,
+                holdsAv1,
                 fragmented: this.isFragmented,
                 cmaf: this.isCmaf,
             }));
@@ -401,6 +403,7 @@ export class IsobmffMuxer extends Muxer {
             });
         // Kicks for ProRes 4444.
         const hasAlphaChannel = decoderConfig.codec === 'ap4h' || decoderConfig.codec === 'ap4x';
+        const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart;
         const newTrackData: IsobmffVideoTrackData = {
             muxer: this,
             track,
@@ -421,7 +424,9 @@ export class IsobmffMuxer extends Muxer {
             compositionTimeOffsetTable: [],
             lastTimescaleUnits: null,
             lastSample: null,
-            startTimestampOffset: this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart ?? null,
+            // A delayed video track starts at a positive tfdt. Only decode
+            // preroll needs a media edit to shift the stored clock.
+            startTimestampOffset: decodeStart === undefined ? null : Math.min(decodeStart, 0),
             finalizedChunks: [],
             fragmentIndexCount: 0,
             storedQueueStart: 0, storedQueueEnd: 0, storedGopStart: 0, storedGopCount: 0,
@@ -752,6 +757,7 @@ export class IsobmffMuxer extends Muxer {
             return;
         const store = this.formatOptions._fragmentSampleStore!;
         const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.track.id)?.decodeStart;
+        const usesAv1Clock = decodeStart !== undefined && track.track.source._codec === 'av1';
         if (!track.storedGopHasDecodeDurations || (decodeStart === undefined && !track.lastSample)) {
             await store.sort(track.track.id, track.storedGopStart, track.storedGopCount);
         }
@@ -768,6 +774,14 @@ export class IsobmffMuxer extends Muxer {
                     ? Math.round(track.lastTimescaleUnits!) + track.lastSample.timescaleUnitsToNextSample
                     : intoTimescale(decodeStart ?? await store.sorted(track.track.id, 0), track.timescale);
                 sample.decodeTimestamp = units / track.timescale;
+                if (usesAv1Clock) {
+                    // AV1 forbids composition offsets. Preflight allows only
+                    // the one-tick rounding difference between PTS and DTS.
+                    if (Math.abs(intoTimescale(sample.timestamp, track.timescale) - units) > 1) {
+                        throw new Error('AV1 timeline requires composition offsets or a decode discontinuity.');
+                    }
+                    sample.timestamp = sample.decodeTimestamp;
+                }
                 track.lastTimescaleUnits = units;
                 await store.set(track.track.id, id, { ...sample, mediaOffset: sample.mediaOffset! });
                 track.lastSample = sample;

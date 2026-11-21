@@ -1,8 +1,11 @@
 # Media fixtures
 
-Small synthetic FFmpeg-generated H.264/AAC fixtures migrated from the originating extension's remux tests. They contain generated test patterns/tones, not third-party recordings.
+Small synthetic FFmpeg-generated media fixtures. They contain generated test patterns/tones, not third-party recordings.
 
 - `video.mp4`: H.264 with B frames, video only.
+- `hevc-hvc1.mp4`: Regular MP4 with HEVC B frames and configuration in `hvcC`. Generated with `ffmpeg -f lavfi -i testsrc2=size=96x64:rate=24:duration=1 -an -c:v libx265 -x265-params pools=1:frame-threads=1:log-level=error:open-gop=0:keyint=8 -tag:v hvc1 hevc-hvc1.mp4`.
+- `hevc-hev1.mp4`: Fragmented HEVC with in-band parameter sets. Use the `hevc-hvc1.mp4` command with `:repeat-headers=1` appended to the x265 parameters, `-tag:v hev1` and `-movflags +frag_keyframe+empty_moov+default_base_moof`.
+- `av1-main10.mp4`: 10-bit Main profile video at 30000/1001 fps, with a sequence header OBU in `av1C`. Generated with `ffmpeg -f lavfi -i testsrc2=size=96x64:rate=30000/1001:duration=1 -an -pix_fmt yuv420p10le -c:v libsvtav1 -preset 11 -g 10 -svtav1-params lp=1 av1-main10.mp4`.
 - `vfr-bframes.mp4`: seven H.264 frames with variable frame rate and reordered B frames. The final presented frame is not the final decoded frame. Generated with `ffmpeg -f lavfi -i testsrc2=size=64x64:rate=10 -frames:v 7 -vf 'setpts=N*N' -fps_mode vfr -c:v libx264 -x264-params 'bframes=2:b-adapt=0:keyint=100:min-keyint=100:scenecut=0' -video_track_timescale 1000 -use_editlist 0 vfr-bframes.mp4`.
 - `vfr-bframes.flv`: the same variable-rate H.264 payloads in FLV, retaining decode timestamps and composition offsets. Generated with `ffmpeg -i vfr-bframes.mp4 -c copy -f flv vfr-bframes.flv`.
 - `fractional-av.mp4`: H.264 at 30000/1001 fps and AAC at 44.1 kHz, used to check edit-list rounding across concatenation and repeated remux. Generated with `ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30000/1001:duration=6.13 -f lavfi -i sine=frequency=440:sample_rate=44100:duration=6.13 -c:v libx264 -g 24 -keyint_min 24 -sc_threshold 0 -c:a aac -b:a 24k fractional-av.mp4`.

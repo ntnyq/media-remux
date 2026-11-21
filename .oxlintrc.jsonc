@@ -67,7 +67,13 @@
     // Source modules use camelCase; class modules use PascalCase.
     "unicorn/filename-case": [
       "warn",
-      { "cases": { "camelCase": true, "pascalCase": true, "kebabCase": true } },
+      {
+        "cases": {
+          "camelCase": true,
+          "pascalCase": true,
+          "kebabCase": true,
+        },
+      },
     ],
     // Function declarations are hoisted, including mutually recursive listeners.
     "no-use-before-define": ["warn", { "functions": false }],
@@ -78,12 +84,21 @@
     "unicorn/prefer-spread": "off",
     "unicorn/max-nested-calls": "off",
     "curly": ["warn", "all"],
-    "func-style": ["warn", "declaration", { "allowArrowFunctions": true }],
+    "func-style": [
+      "warn",
+      "declaration",
+      {
+        "allowArrowFunctions": true,
+      },
+    ],
     "no-duplicate-imports": [
       "warn",
-      { "includeExports": false, "allowSeparateTypeImports": true },
+      {
+        "includeExports": false,
+        "allowSeparateTypeImports": true,
+      },
     ],
-    "one-var": ["warn", "never"],
+    "one-var": ["error", "never"],
   },
   "overrides": [
     {

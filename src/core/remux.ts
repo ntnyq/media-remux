@@ -28,7 +28,7 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
 }
 
 /**
- * Remuxes selected primary H.264/AAC tracks from one MP4 or FLV Blob to fMP4/M4A.
+ * Remuxes selected primary tracks from one MP4 or FLV Blob to fMP4/M4A.
  * The output stream is closed on success and aborted on a write-stage failure.
  * Temporary stores remain owned by the caller; each job needs fresh stores.
  *
@@ -155,12 +155,12 @@ export async function concatMedia(
 }
 
 /**
- * Combines the primary H.264 video and AAC audio from separate MP4/FLV Blobs.
+ * Combines the primary video and AAC audio from separate MP4/FLV Blobs.
  * Existing relative timestamps are preserved and the earliest PTS becomes zero.
  * Success closes the output stream; write-stage failures attempt cancellation.
  * The caller must supply fresh temporary stores and dispose them after the job.
  *
- * @param video - Nonempty MP4/FLV Blob supplying the primary H.264 video track.
+ * @param video - Nonempty MP4 or FLV Blob supplying the primary video track.
  * @param audio - Nonempty MP4/FLV Blob supplying the primary AAC audio track.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback.

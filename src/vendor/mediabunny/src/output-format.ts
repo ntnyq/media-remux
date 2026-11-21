@@ -276,7 +276,7 @@ export abstract class IsobmffOutputFormat extends OutputFormat {
         if (options._fragmentTrackTimings !== undefined && (!options._fragmentSampleStore
             || !(options._fragmentTrackTimings instanceof Map)
             || [...options._fragmentTrackTimings].some(([id, timing]) => !Number.isInteger(id) || id < 1
-                || !timing || !Number.isFinite(timing.decodeStart) || timing.decodeStart > 0
+                || !timing || !Number.isFinite(timing.decodeStart) || timing.decodeStart > timing.presentationStart
                 || !Number.isFinite(timing.presentationStart) || timing.presentationStart < 0
                 || !Number.isFinite(timing.presentationEnd) || timing.presentationEnd < timing.presentationStart))) {
             throw new TypeError('_fragmentTrackTimings requires a sample store and finite decode/presentation timing.');

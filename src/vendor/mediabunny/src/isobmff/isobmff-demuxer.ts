@@ -1364,8 +1364,12 @@ export class IsobmffDemuxer extends Demuxer {
                         break;
                     }
                     track.info.codecDescription = readBytes(slice, boxInfo.contentSize);
-                    const sps = deserializeHevcDecoderConfigurationRecord(track.info.codecDescription)
-                        ?.arrays.find(x => x.nalUnitType === HevcNalUnitType.SPS_NUT)?.nalUnits[0];
+                    const config = deserializeHevcDecoderConfigurationRecord(track.info.codecDescription);
+                    if (config?.configurationVersion !== 1) {
+                        track.unsupportedTrackFeature ??= 'Invalid hvcC configuration in MP4 video track.';
+                        break;
+                    }
+                    const sps = config.arrays.find(x => x.nalUnitType === HevcNalUnitType.SPS_NUT)?.nalUnits[0];
                     const spsInfo = sps && parseHevcSps(sps);
                     if (spsInfo && !track.info.hasPixelAspectRatioBox) {
                         applyPixelAspectRatio(track, spsInfo.pixelAspectRatio);
@@ -1408,11 +1412,16 @@ export class IsobmffDemuxer extends Demuxer {
                     if (!track || track.info?.type !== 'video') {
                         break;
                     }
-                    slice.skip(1); // Marker + version
-                    const secondByte = readU8(slice);
+                    const description = readBytes(slice, boxInfo.contentSize);
+                    if (description.length < 4 || description[0] !== 0x81) {
+                        track.unsupportedTrackFeature ??= 'Invalid av1C configuration in MP4 video track.';
+                        break;
+                    }
+                    track.info.codecDescription = description;
+                    const secondByte = description[1]!;
                     const profile = secondByte >> 5;
                     const level = secondByte & 0b11111;
-                    const thirdByte = readU8(slice);
+                    const thirdByte = description[2]!;
                     const tier = thirdByte >> 7;
                     const highBitDepth = (thirdByte >> 6) & 1;
                     const twelveBit = (thirdByte >> 5) & 1;
@@ -1422,9 +1431,8 @@ export class IsobmffDemuxer extends Demuxer {
                     const chromaSamplePosition = thirdByte & 0b11;
                     // Logic from https://aomediacodec.github.io/av1-spec/av1-spec.pdf
                     const bitDepth = profile === 2 && highBitDepth ? (twelveBit ? 12 : 10) : (highBitDepth ? 10 : 8);
-                    slice.skip(1); // Reserved bits + initial presentation delay
-                    // Parse config OBUs if there are any
-                    const configObus = readBytes(slice, boxInfo.contentSize - 4);
+                    // Retain the complete record, including delay and config OBUs.
+                    const configObus = description.subarray(4);
                     const configObuInfo = extractAv1CodecInfoFromPacket(configObus);
                     track.info.av1CodecInfo = {
                         profile,
@@ -2943,7 +2951,13 @@ class IsobmffVideoTrackBacking extends IsobmffTrackBacking implements InputVideo
                 const firstPacket = await this.getFirstPacket({});
                 const packetInfo = firstPacket && extractAv1CodecInfoFromPacket(firstPacket.data);
                 if (packetInfo) {
-                    this.internalTrack.info.av1CodecInfo = packetInfo;
+                    this.internalTrack.info.av1CodecInfo = {
+                        ...(this.internalTrack.info.av1CodecInfo ?? packetInfo),
+                        videoFullRangeFlag: packetInfo.videoFullRangeFlag,
+                        colourPrimaries: packetInfo.colourPrimaries,
+                        transferCharacteristics: packetInfo.transferCharacteristics,
+                        matrixCoefficients: packetInfo.matrixCoefficients,
+                    };
                 }
             }
             else if (this.internalTrack.info.codec === 'prores' && !this.internalTrack.info.proresCodecInfo) {
@@ -2959,8 +2973,13 @@ class IsobmffVideoTrackBacking extends IsobmffTrackBacking implements InputVideo
                 this.internalTrack.info.colorSpace.matrix ??= colorSpace.matrix ?? null;
                 this.internalTrack.info.colorSpace.fullRange ??= colorSpace.fullRange ?? null;
             }
+            let codec = extractVideoCodecString(this.internalTrack.info);
+            if (this.internalTrack.info.codec === 'hevc' && this.internalTrack.internalCodecId?.toLowerCase() === 'hvc1') {
+                // The codec string helper defaults to hev1. Preserve the MP4 sample entry.
+                codec = `hvc1${codec.slice(4)}`;
+            }
             const config: VideoDecoderConfig = {
-                codec: extractVideoCodecString(this.internalTrack.info),
+                codec,
                 codedWidth: this.internalTrack.info.width,
                 codedHeight: this.internalTrack.info.height,
                 ...(this.internalTrack.info.codecDescription ? { description: this.internalTrack.info.codecDescription } : {}),

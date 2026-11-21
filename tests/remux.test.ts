@@ -674,6 +674,9 @@ test('produces files independently accepted and decoded by FFmpeg when available
       'progressive.flv',
       'vfr-bframes.mp4',
       'subtitle-first.mp4',
+      'hevc-hvc1.mp4',
+      'hevc-hev1.mp4',
+      'av1-main10.mp4',
     ]) {
       const target = memoryTarget()
       const input = await fixture(name)

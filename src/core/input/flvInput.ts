@@ -333,6 +333,7 @@ export async function openFlvInput(
       kind === 'video' ? videoConfig(description) : audioConfig(description)
     tracks.push({
       kind,
+      codec: kind === 'video' ? 'avc' : 'aac',
       config,
 
       /**

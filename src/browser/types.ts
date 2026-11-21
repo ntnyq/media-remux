@@ -2,7 +2,7 @@ import type { RemuxProgress, RemuxResult } from '../types'
 
 /**
  * One isolated Worker operation, discriminated by operation. Inputs are MP4 or
- * FLV Blobs containing H.264 video and/or AAC audio; no re-encoding is performed.
+ * FLV Blobs containing supported encoded video and/or AAC audio.
  */
 export type MediaJob =
   | {
@@ -28,7 +28,7 @@ export type MediaJob =
       operation: 'combine'
 
       /**
-       * Nonempty MP4 or FLV Blob supplying the primary H.264 video track.
+       * Nonempty MP4 or FLV Blob supplying the primary video track.
        */
       video: Blob
 

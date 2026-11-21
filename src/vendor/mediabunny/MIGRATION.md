@@ -8,7 +8,7 @@ The input was the 1.62.1 source with the existing browser extension's disk-backe
 
 Roots: `Input`, `MP4`, `BlobSource`, `EncodedPacketSink`, `EncodedPacket`, `Output`, `Mp4OutputFormat`, `StreamTarget`, `EncodedVideoPacketSource`, and `EncodedAudioPacketSource`, plus output store contracts. Referenced top-level declarations/imports were retained transitively; unused declarations/imports were removed.
 
-Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 boxes, and stream targets remain where required by this graph. Internal codec helpers cover more than the public H.264/AAC subset; that does not expose those codecs as package features. Raw sample encoding/decoding, conversion, custom decoder registration, HLS, unrelated container readers/writers, Node filesystem implementations, and the upstream public index are excluded. `InputTrack.canDecode` methods were removed because this package never decodes samples.
+Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 boxes, and stream targets remain where required by this graph. Internal codec helpers cover more than the public MP4 H.264/HEVC/AV1/AAC subset; that does not expose those codecs as package features. Raw sample encoding/decoding, conversion, custom decoder registration, HLS, unrelated container readers/writers, Node filesystem implementations, and the upstream public index are excluded. `InputTrack.canDecode` methods were removed because this package never decodes samples.
 
 ## Preserved patch behavior
 
@@ -41,6 +41,7 @@ Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 bo
 - Hybrid MP4 inputs continue from ordinary samples into movie fragments for packet/keyframe traversal and timestamp lookup. Missing fragment decode times start after the ordinary sample table's decode duration. Inconsistent size, timing, and chunk sample counts reject during inspection.
 - AVC SPS height includes the interlaced frame factor before cropping. The FLV adapter preserves the SPS pixel aspect ratio in output decoder configuration and MP4 `pasp` metadata.
 - MP4 tracks retain the exact sample aspect ratio from SPS or `pasp` separately from rounded square-pixel dimensions. Decoder display ratios use reduced integer factors, preserving `pasp` across repeated remuxes. Explicit `pasp` overrides SPS regardless of box order.
+- HEVC MP4 retains the original `hvc1` or `hev1` sample entry and `hvcC`. AV1 retains the complete `av1C` record and declares `av01` in the compatible brands. Planned AV1 tracks use a common integer PTS/DTS clock without composition offsets, with a positive `tfdt` for a delayed video start.
 - Vendor files use independent formatting and are fully typechecked. No `@ts-nocheck` suppression is used.
 
 Modified sources here are authoritative and ship in published artifacts. Verify packet/timestamp parity, paging, cancellation, and stream lifecycle when changing them. Do not replace them with an unpatched npm dependency.

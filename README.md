@@ -11,8 +11,8 @@ Disk-backed browser media remuxing, track combining, and segment concatenation w
 
 ## Features
 
-- `remuxMedia`: MP4/FLV primary H.264/AAC tracks → fragmented MP4; select AAC alone for M4A.
-- `combineTracks`: combine H.264 video and AAC audio from separate files.
+- `remuxMedia`: MP4/FLV primary tracks → fragmented MP4; select AAC alone for M4A.
+- `combineTracks`: combine supported video and AAC audio from separate files.
 - `concatMedia`: join compatible segments in order, checking configurations/timelines before writing output.
 - `runMediaJob`: dedicated Worker execution with OPFS, progress, cancellation, and temporary-file cleanup.
 - Paged MP4 tables/TFRA/moof records; output descriptors, payloads, and fragment indexes on disk.
@@ -151,7 +151,7 @@ function runMediaJob(
 | `operation` | Required fields              | Optional fields | Behavior                                                                                        |
 | ----------- | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------- |
 | `'remux'`   | `input: Blob`                | `tracks`        | Copy selected primary tracks from one input.                                                    |
-| `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary H.264 video from `video` and primary AAC audio from `audio`.                   |
+| `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary video from `video` and primary AAC audio from `audio`.                         |
 | `'concat'`  | `inputs: readonly Blob[]`    | `tracks`        | Join a nonempty list in playback order; selected layouts and decoder configurations must match. |
 
 `tracks` is `'all'`, `'audio'`, or `'video'`, defaulting to `'all'`. `'all'` retains the available supported primary tracks; it does not require both audio and video. An explicit selection with no matching track fails. Combine jobs do not accept `tracks`.
@@ -195,7 +195,7 @@ function concatMedia(
 | Argument  | Used by         | Description                                                                                                                                            |
 | --------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV `Blob` or `File`; selected primary tracks are copied without re-encoding.                                               |
-| `video`   | `combineTracks` | MP4/FLV input supplying primary H.264 video; any audio in this input is ignored.                                                                       |
+| `video`   | `combineTracks` | MP4/FLV input supplying the primary video track; any audio in this input is ignored.                                                                   |
 | `audio`   | `combineTracks` | MP4/FLV input supplying primary AAC audio; any video in this input is ignored.                                                                         |
 | `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
 | `options` | All three       | Output stream, fresh stores, and optional hooks described below.                                                                                       |
@@ -367,7 +367,9 @@ Pass this adapter as `storage.fragmentSamples` alongside a fresh `createDiskFrag
 <summary>Track limits, segment compatibility, and timestamp rules</summary>
 
 - Only primary tracks are used. Remux/concat accept `tracks: 'all' | 'audio' | 'video'` (default `all`). Combine selects video from its first input and audio from its second.
-- MP4 supports H.264/AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and changing FLV sequence headers are rejected. A selected MP4 track must have a single sample description.
+- MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), and AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and changing FLV sequence headers are rejected. A selected MP4 track must have a single sample description.
+- HEVC and AV1 MP4 tracks require their codec configuration boxes (`hvcC` or `av1C`). The output preserves their sample entry type and configuration bytes.
+- AV1 uses a continuous decode clock aligned with presentation time. A delayed start uses `tfdt`. Timelines that would require composition offsets or a decode discontinuity are rejected before writing, including AV1 concatenations that create a gap between video segments.
 - MP4 edit lists support leading empty edits followed by a single media edit at rate 1. Empty-only lists, additional edits after the media edit, non-unit media rates, video prefix edits hiding whole frames, and finite media edits that trim a sample's presentation end are rejected during preflight for selected tracks instead of silently changing playback. A zero-duration media edit remains open-ended; movie-timescale rounding is tolerated.
 - Multiple track fragments (`traf`) for the same track within one `moof` are rejected during preflight instead of silently dropping packets.
 - Jobs capture the submitted segment list and top-level job/options fields. Later changes to the caller's arrays or option fields do not alter an active job; the referenced signal and storage resources remain live.

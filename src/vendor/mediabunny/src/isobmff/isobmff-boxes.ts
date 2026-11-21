@@ -203,6 +203,7 @@ export const fullBox = (type: string, version: number, flags: number, contents?:
 export const ftyp = (details: {
     isQuickTime: boolean;
     holdsAvc: boolean;
+    holdsAv1: boolean;
     fragmented: boolean;
     cmaf: boolean;
 }) => {
@@ -227,6 +228,7 @@ export const ftyp = (details: {
                 ascii('iso5'),
                 ascii('iso6'),
                 ascii('mp41'),
+                details.holdsAv1 ? ascii('av01') : [],
                 ascii('cmfc'),
                 ascii('dash'),
             ]);
@@ -239,6 +241,7 @@ export const ftyp = (details: {
                 ascii('iso5'),
                 ascii('iso6'),
                 ascii('mp41'),
+                details.holdsAv1 ? ascii('av01') : [],
             ]);
         }
     }
@@ -248,6 +251,7 @@ export const ftyp = (details: {
         // Compatible brands
         ascii('isom'),
         details.holdsAvc ? ascii('avc1') : [],
+        details.holdsAv1 ? ascii('av01') : [],
         ascii('mp41'),
     ]);
 };
@@ -601,7 +605,7 @@ export const videoSampleDescription = (compressionType: string, trackData: Isobm
 ], [
     VIDEO_CODEC_TO_CONFIGURATION_BOX[trackData.track.source._codec]?.(trackData) ?? null,
     pasp(trackData),
-    colorSpaceIsEmpty(trackData.info.decoderConfig.colorSpace)
+    trackData.track.source._codec !== 'av1' && colorSpaceIsEmpty(trackData.info.decoderConfig.colorSpace)
         ? null
         : colr(trackData),
     btrt(trackData),
@@ -696,7 +700,8 @@ export const vpcC = (trackData: IsobmffVideoTrackData) => {
 };
 /** AV1 Configuration Box: Provides additional information to the decoder. */
 export const av1C = (trackData: IsobmffVideoTrackData) => {
-    return box('av1C', generateAv1CodecConfigurationFromCodecString(trackData.info.decoderConfig.codec));
+    const { description, codec } = trackData.info.decoderConfig;
+    return box('av1C', description ? [...toUint8Array(description)] : generateAv1CodecConfigurationFromCodecString(codec));
 };
 /** Sound Sample Description Box: Contains information that defines how to interpret sound media data. */
 export const soundSampleDescription = (compressionType: string, trackData: IsobmffAudioTrackData) => {
@@ -1633,7 +1638,7 @@ const dataStringBoxLong = (value: string) => {
 const videoCodecToBoxName = (codec: VideoCodec, fullCodecString: string) => {
     switch (codec) {
         case 'avc': return fullCodecString.startsWith('avc3') ? 'avc3' : 'avc1';
-        case 'hevc': return 'hvc1';
+        case 'hevc': return fullCodecString.startsWith('hev1.') ? 'hev1' : 'hvc1';
         case 'vp8': return 'vp08';
         case 'vp9': return 'vp09';
         case 'av1': return 'av01';

@@ -1303,6 +1303,9 @@ export const deserializeHevcDecoderConfigurationRecord = (data: Uint8Array): Hev
             for (let j = 0; j < numNalus; j++) {
                 const nalUnitLength = view.getUint16(offset, false);
                 offset += 2;
+                if (offset + nalUnitLength > data.length) {
+                    return null;
+                }
                 nalUnits.push(data.subarray(offset, offset + nalUnitLength));
                 offset += nalUnitLength;
             }

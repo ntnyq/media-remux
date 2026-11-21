@@ -16,6 +16,7 @@ function videoTrack(
 ): PacketTrack {
   return {
     kind: 'video',
+    codec: 'avc',
     config: {
       codec: 'avc1.64000a',
       codedWidth: 64,

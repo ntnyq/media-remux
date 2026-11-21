@@ -158,7 +158,7 @@ interface TrackWriter {
  * Success finalizes and closes the output; failures attempt output cancellation.
  * The caller owns input disposal and temporary store disposal.
  *
- * @param baseline - Ordered output tracks defining H.264/AAC configurations and
+ * @param baseline - Ordered output tracks defining codec configurations and
  * optional video transforms; kinds must match their decoder configurations.
  * @param segments - Segments in playback order, with validated timing in seconds
  * and tracks matching the baseline's order and configurations.
@@ -290,9 +290,13 @@ export async function writeSegments(
 
   try {
     for (const track of baseline) {
-      if (track.kind === 'video' && !('sampleRate' in track.config)) {
-        const { config } = track
-        const source = new EncodedVideoPacketSource('avc')
+      if (
+        track.kind === 'video' &&
+        track.codec !== 'aac' &&
+        !('sampleRate' in track.config)
+      ) {
+        const { codec, config } = track
+        const source = new EncodedVideoPacketSource(codec)
 
         output.addVideoTrack(source, {
           decoderConfig: config,
@@ -301,7 +305,7 @@ export async function writeSegments(
 
         writers.push({
           /**
-           * Adds a normalized H.264 packet with the baseline decoder configuration.
+           * Adds a normalized video packet with the baseline decoder configuration.
            *
            * @param packet - Encoded video packet to copy into the output.
            * @returns A promise resolving when the video source accepts the packet.
@@ -315,7 +319,11 @@ export async function writeSegments(
            */
           close: () => source.close(),
         })
-      } else if (track.kind === 'audio' && 'sampleRate' in track.config) {
+      } else if (
+        track.kind === 'audio' &&
+        track.codec === 'aac' &&
+        'sampleRate' in track.config
+      ) {
         const { config } = track
         const source = new EncodedAudioPacketSource('aac')
 
