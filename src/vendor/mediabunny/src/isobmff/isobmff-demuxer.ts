@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { type TrackType } from '../output';
 import { parseAacAudioSpecificConfig } from '../../shared/aac-misc';
 import { type AacCodecInfo, type AudioCodec, DTS_FOURCCS, type DtsFourCc, extractAudioCodecString, extractColorSpace, extractVideoCodecString, type MediaCodec, OPUS_SAMPLE_RATE, parsePcmCodec, PCM_AUDIO_CODECS, type PcmAudioCodec, PRORES_FOURCCS, type ProresFourCc, type VideoCodec } from '../codec';
@@ -87,6 +87,7 @@ type InternalTrack = {
         colorSpace: VideoColorSpaceInit;
         containerColorInformation?: IsobmffColorInformation;
         avcType: 1 | 3 | null;
+        hevcType: 'hev1' | 'hvc1' | null;
         avcCodecInfo: AvcDecoderConfigurationRecord | null;
         hevcCodecInfo: HevcDecoderConfigurationRecord | null;
         vp9CodecInfo: Vp9CodecInfo | null;
@@ -130,6 +131,7 @@ type FragmentLookupTableEntry = {
     trunNumber: number; // 1-indexed
     sampleNumber: number; // 1-indexed
 };
+// Maintained for every track, even the ones we don't care about
 type FragmentTrackState = {
     baseDataOffset: number;
     sampleDescriptionIndex: number | null;
@@ -139,6 +141,7 @@ type FragmentTrackState = {
     startTimestamp: number | null;
     encryptionAuxInfo: SampleEncryptionAuxInfo | null;
 };
+// Maintained only for the tracks we care about
 type FragmentTrackData = {
     track: InternalTrack;
     // Kept as state for the presence of multiple trun boxes
@@ -907,6 +910,9 @@ export class IsobmffDemuxer extends Demuxer {
                         track.timescale = readU32Be(slice);
                         track.durationInMediaTimescale = readU64Be(slice);
                     }
+                    if (track.durationInMediaTimescale === 2 ** (version === 1 ? 64 : 32) - 1) {
+                        track.durationInMediaTimescale = -1; // An all-ones duration is unknown.
+                    }
                     if (track.timescale === 0) {
                         throw new Error('Invalid mdhd box: timescale must not be 0.');
                     }
@@ -946,6 +952,7 @@ export class IsobmffDemuxer extends Demuxer {
                             codecDescription: null,
                             colorSpace: { ...EMPTY_COLOR_SPACE },
                             avcType: null,
+                            hevcType: null,
                             avcCodecInfo: null,
                             hevcCodecInfo: null,
                             vp9CodecInfo: null,
@@ -1029,6 +1036,7 @@ export class IsobmffDemuxer extends Demuxer {
                             }
                             else if (codecName === 'hvc1' || codecName === 'hev1') {
                                 track.info.codec = 'hevc';
+                                track.info.hevcType = codecName;
                             }
                             else if (codecName === 'vp08') {
                                 track.info.codec = 'vp8';
@@ -1078,7 +1086,7 @@ export class IsobmffDemuxer extends Demuxer {
                                 }
                             }
                             track.info.numberOfChannels = channelCount;
-                            track.info.sampleRate = sampleRate;
+                            track.info.sampleRate = sampleRate || track.timescale;
                             track.frmaCodecString = null;
                             await this.readContiguousBoxes(slice.slice(slice.filePos, (sampleBoxStartPos + sampleBoxInfo.totalSize) - slice.filePos));
                             const codecName = lowercaseBoxName === 'enca'
@@ -2016,9 +2024,10 @@ export class IsobmffDemuxer extends Demuxer {
                         Logging._warn('Multiple saio entries are not supported; using the first offset only.');
                     }
                     let offset = version === 0 ? readU32Be(slice) : Number(readU64Be(slice));
-                    // Per ISO/IEC 23001-7: when saio is inside a moof, offsets are relative to the start of the moof box.
+                    // Fragment auxiliary offsets are relative to the track fragment base.
                     if (this.currentFragment) {
-                        offset += this.currentFragment.moofOffset;
+                        assert(track.currentFragmentState);
+                        offset += track.currentFragmentState.baseDataOffset;
                     }
                     const aux = getOrCreateEncryptionAuxInfo(track);
                     aux.offset = offset;
@@ -2477,6 +2486,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         if (track.durationInMediaTimescale <= 0) {
             // The duration is often zero for fragmented files for example; return `null` to signal that the duration
             // must be computed instead.
+            return null;
+        }
+        if (track.demuxer.isFragmented && (await track.demuxer.getSampleTableForTrack(track)).sampleCount > 0) {
+            // The duration only covers the samples in the moov box and not the fragments that follow
             return null;
         }
         assert(track.trackBacking);
@@ -2982,11 +2995,7 @@ class IsobmffVideoTrackBacking extends IsobmffTrackBacking implements InputVideo
                 this.internalTrack.info.colorSpace.matrix ??= colorSpace.matrix ?? null;
                 this.internalTrack.info.colorSpace.fullRange ??= colorSpace.fullRange ?? null;
             }
-            let codec = extractVideoCodecString(this.internalTrack.info);
-            if (this.internalTrack.info.codec === 'hevc' && this.internalTrack.internalCodecId?.toLowerCase() === 'hvc1') {
-                // The codec string helper defaults to hev1. Preserve the MP4 sample entry.
-                codec = `hvc1${codec.slice(4)}`;
-            }
+            const codec = extractVideoCodecString(this.internalTrack.info);
             const config: VideoDecoderConfig = {
                 codec,
                 codedWidth: this.internalTrack.info.width,

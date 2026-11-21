@@ -5,8 +5,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
-import { assert, AsyncMutex, EventEmitter, isIso639Dash2LanguageCode, isThenable, type MaybePromise, type Rotation, toArray, type TransformationMatrix } from './misc';
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
+import { assert, AsyncMutex, EventEmitter, isIso639Dash2LanguageCode, isThenable, type MaybePromise, type Rotation, promiseWithResolvers, toArray, type TransformationMatrix } from './misc';
 import { type MetadataTags, type TrackDisposition, validateMetadataTags, validateTrackDisposition } from './metadata';
 import { Muxer } from './muxer';
 import { OutputFormat } from './output-format';
@@ -193,6 +193,7 @@ export type BaseTrackMetadata = {
      * - For audio codecs, there is one packet for each "audio chunk", the duration of which depends on the codec. For
      * simplicity, you can assume each packet is roughly 10 ms or 512 samples long, whichever is shorter.
      * - For subtitles, assume each cue and each gap in the subtitles adds a packet.
+     * - Depending on the format, gaps in audio may also add a packet each, as they are filled with silence.
      *
      * If you're not fully sure, make sure to add a buffer of around 33% to make sure you stay below the maximum.
      */
@@ -437,6 +438,7 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
         }
         const rootTargetResult = this._getRootTarget();
         if (isThenable(rootTargetResult)) {
+            rootTargetResult.catch(() => { });
             throw new TypeError(errorMessage);
         }
         return rootTargetResult;
@@ -499,12 +501,11 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
         assert(this._target instanceof PathedTarget);
         const target = await this._getTargetValidated(request);
         this._emit('target', { target, request, isRoot: request.isRoot });
-        if (this.state === 'canceled') {
+        if (this._targetsClosed) {
             await target._close();
+            throw new Error(this.state === 'canceled' ? 'Output has been canceled.' : 'Output has already been finalized.');
         }
-        else {
-            this._rememberTarget(target);
-        }
+        this._rememberTarget(target);
         return target;
     }
     /** @internal */
@@ -519,7 +520,10 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
             return this._initTarget;
         }
         const target = await this._initTarget();
-        if (this.state === 'canceled') {
+        if (!(target instanceof Target)) {
+            throw new TypeError('initTarget must return or resolve to a Target.');
+        }
+        if (this._targetsClosed) {
             await target._close();
         }
         else {
@@ -551,9 +555,9 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
         };
         const result = this._getTargetValidated(request);
         const handleResult = (target: T) => {
-            if (this.state === 'canceled') {
+            if (this._targetsClosed) {
                 // Promise thrown away here, but no way to surface it to the user really
-                void target._close();
+                target._close().catch(() => { });
             }
             else {
                 this._rememberTarget(target);
@@ -685,7 +689,7 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
         }
         const maxTotalCount = supportedTrackCounts.total.max;
         if (this.tracks.length === maxTotalCount) {
-            throw new Error(`${this.format._name} does not support more than ${maxTotalCount} tracks`
+            throw new Error(`${this.format._name} does not support more than ${maxTotalCount} track`
                 + `${maxTotalCount === 1 ? '' : 's'} in total.`);
         }
         if (track.isVideoTrack()) {
@@ -775,7 +779,7 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
                 : (`${this.format._name} requires at least ${totalMinCount} track`
                     + `${totalMinCount === 1 ? '' : 's'}.`));
         }
-        if (this.state === 'canceled') {
+        if (this._cancelPromise || this.state === 'canceled') {
             throw new Error('Output has been canceled.');
         }
         if (this._startPromise) {
@@ -787,22 +791,34 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
             // We want to call muxer.start immediately, so we avoid using an await here
             const releasePromise = this._mutex.acquire();
             try {
-                await this._muxer.start();
-                const promises = this.tracks.map(track => track.source._start());
-                await Promise.all(promises);
+                try {
+                    await this._muxer.start();
+                    const promises = this.tracks.map(track => track.source._start());
+                    await Promise.all(promises);
+                }
+                finally {
+                    (await releasePromise)();
+                }
             }
-            finally {
-                (await releasePromise)();
+            catch (error) {
+                await this.cancel().catch(() => { });
+                throw error;
             }
         })();
     }
     /**
      * Resolves with the full MIME type of the output file, including track codecs.
      *
-     * The returned promise will resolve only once the precise codec strings of all tracks are known.
+     * The returned promise will resolve only once the precise codec strings of all tracks are known. If the output is
+     * canceled before that, the promise rejects.
      */
     getMimeType() {
-        return this._muxer.getMimeType();
+        return Promise.race([
+            this._muxer.getMimeType(),
+            this._canceled.promise.then(() => {
+                throw new Error('Output has been canceled.');
+            }),
+        ]);
     }
     /**
      * Cancels the creation of the output file, releasing internal resources like encoders and preventing further
@@ -811,23 +827,24 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
      * @returns A promise that resolves once all internal resources have been released.
      */
     async cancel() {
-        if (this.state === 'canceled') {
-            return this._cancelPromise ?? undefined;
+        if (this._cancelPromise) {
+            return this._cancelPromise;
         }
-        else if (this.state === 'finalizing' || this.state === 'finalized') {
-            // Don't wanna warn when finalizing since that shows a warning when finalization fails and then cancel
-            // is called
-            if (this.state === 'finalized') {
-                Logging._warn('Output has already been finalized.');
-            }
+        if (this._finalizePromise) {
+            await this._finalizePromise.catch(() => { });
+            return;
+        }
+        if (this.state === 'canceled') {
             return;
         }
         return this._cancelPromise = (async () => {
             this.state = 'canceled';
+            this._canceled.resolve();
             const release = await this._mutex.acquire();
             try {
                 const promises = this.tracks.map(x => x.source._flushOrWaitForOngoingClose(true)); // Force close
                 const sourceResults = await Promise.allSettled(promises);
+                this._targetsClosed = true;
                 const targetResults = await Promise.allSettled([...this._unfinalizedTargets].map(target => target._close()));
                 this._unfinalizedTargets.clear();
                 const failure = [...sourceResults, ...targetResults].find(result => result.status === 'rejected');
@@ -848,7 +865,7 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
         if (this.state === 'pending') {
             throw new Error('Cannot finalize before starting.');
         }
-        if (this.state === 'canceled') {
+        if (this._cancelPromise || this.state === 'canceled') {
             throw new Error('Cannot finalize after canceling.');
         }
         if (this._finalizePromise) {
@@ -856,9 +873,9 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
             return this._finalizePromise;
         }
         return this._finalizePromise = (async () => {
-            this.state = 'finalizing';
             const release = await this._mutex.acquire();
             try {
+                this.state = 'finalizing';
                 const promises = this.tracks.map(x => x.source._flushOrWaitForOngoingClose(false));
                 // Keep resources alive until every track has stopped, even if another close fails.
                 const results = await Promise.allSettled(promises);
@@ -881,13 +898,19 @@ export class Output<F extends OutputFormat = OutputFormat, T extends Target = Ta
             }
             catch (error) {
                 this.state = 'canceled';
+                this._canceled.resolve();
                 throw error;
             }
             finally {
+                this._targetsClosed = true;
                 await Promise.all([...this._unfinalizedTargets].map(target => target._close().catch(() => { })));
                 this._unfinalizedTargets.clear();
                 release();
             }
         })();
     }
+    /** @internal */
+    _targetsClosed = false;
+    /** @internal */
+    _canceled = promiseWithResolvers();
 }

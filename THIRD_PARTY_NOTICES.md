@@ -1,8 +1,8 @@
 # Third-party notices
 
-## Mediabunny 1.62.1 (modified source subset)
+## Mediabunny 1.66.2 (modified source subset)
 
-- Upstream: https://github.com/Vanilagy/mediabunny/tree/v1.62.1
+- Upstream: https://github.com/Vanilagy/mediabunny/tree/v1.66.2
 - Copyright (c) 2026-present, Vanilagy and contributors
 - License: Mozilla Public License, v. 2.0 (MPL-2.0)
 - License text: `src/vendor/mediabunny/LICENSE`

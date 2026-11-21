@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { SECOND_TO_MICROSECOND_FACTOR } from './misc';
 export const PLACEHOLDER_DATA = /* #__PURE__ */ new Uint8Array(0);
 /**
@@ -251,6 +251,6 @@ export class EncodedPacket {
         if (options?.sideData !== undefined && (typeof options.sideData !== 'object' || options.sideData === null)) {
             throw new TypeError('options.sideData, when provided, must be an object.');
         }
-        return new EncodedPacket(options?.data ?? this.data, options?.type ?? this.type, options?.timestamp ?? this.timestamp, options?.duration ?? this.duration, options?.sequenceNumber ?? this.sequenceNumber, this.byteLength, options?.sideData ?? this.sideData);
+        return new EncodedPacket(options?.data ?? this.data, options?.type ?? this.type, options?.timestamp ?? this.timestamp, options?.duration ?? this.duration, options?.sequenceNumber ?? this.sequenceNumber, options?.data?.byteLength ?? this.byteLength, options?.sideData ?? this.sideData);
     }
 }

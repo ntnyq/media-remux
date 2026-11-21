@@ -1,8 +1,8 @@
 # Mediabunny source migration
 
-Base: [Mediabunny v1.62.1](https://github.com/Vanilagy/mediabunny/tree/v1.62.1), MPL-2.0. All source files retain the upstream header. The original upstream LICENSE is included verbatim.
+The current base is [Mediabunny v1.66.2](https://github.com/Vanilagy/mediabunny/tree/v1.66.2) (commit `1f09bdd456b6e238fc53d1fa32b23bc9c49edacb`, MPL-2.0). The npm release supplies the TypeScript source and generated version. The matching Git tag supplies the shared helpers. The upstream source headers and license are included.
 
-The input was the 1.62.1 source with the existing browser extension's disk-backed MP4 patch applied. The upstream release supplied the `shared/` helpers absent from the installed npm source directory. No Mediabunny package is installed in this repository.
+The first migration used 1.62.1 with the existing browser extension’s disk-backed MP4 patch. The current migration reconciles retained declarations and class members against 1.62.1, local source, and 1.66.2. Mediabunny ships as source inside this repository.
 
 ## Included subset
 
@@ -14,12 +14,14 @@ Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 bo
 
 - Range traversal of `moov`, bounded regular sample-table pages/checkpoints.
 - Paged TFRA, bounded fragment summaries/anchors, serialized parsing.
+- When `tfdt` is missing, the reader recovers the fragment's decode origin from the exact sample referenced by TFRA. Without a usable reference, it scans contiguous fragments from a cached decode-time anchor or from the end of `moov`. In a hybrid MP4, that initial decode clock includes the ordinary sample table's decode duration.
 - Range traversal of `moof/trun`, bounded sample/duration caches and auxiliary encryption metadata pages.
+- The reader scans `tfhd` defaults and `trun` sample layouts for unsupported tracks as well. The end of the skipped data determines the next `traf`'s implicit base offset. The skipped track's media payload stays unread.
 - Output samples/media on disk, external timestamp sorting, incremental `moof/trun` and `mfra/tfra` writing.
 - Long-GOP handling, extended MDAT sizes, 64-bit offsets.
 - Per-sample sync flags when a fragment contains multiple keyframes.
 
-`PATCHES.md` preserves historical patch design notes. Its extension-specific adapter/test paths describe the originating repository, not this package's current API. Migrated regressions cover sparse large-file paging and real media round trips.
+Regression tests cover sparse large-file paging and real media round trips.
 
 ## Migration adaptations
 
@@ -45,9 +47,11 @@ Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 bo
 - HEVC MP4 retains the original `hvc1` or `hev1` sample entry and `hvcC`. AV1 retains the complete `av1C` record and declares `av01` in the compatible brands. Planned AV1 tracks use a common integer PTS/DTS clock without composition offsets, with a positive `tfdt` for a delayed video start.
 - Vendor files use independent formatting and are fully typechecked. No `@ts-nocheck` suppression is used.
 
-## Upstream backports
+## 1.66.2 reconciliation
 
-- [Mediabunny 1.63.0](https://github.com/Vanilagy/mediabunny/releases/tag/v1.63.0) introduced MP4 audio roll groups. The disk-backed AAC writer emits them in constant space, using one previous packet of decode pre-roll for samples that have a predecessor.
-- [Mediabunny 1.66.0](https://github.com/Vanilagy/mediabunny/releases/tag/v1.66.0) supplied the HEVC and AVC configuration parsing fixes, MP4 detection without `ftyp` and with extended-size `ftyp`, AAC-LC channel counts from program config elements, and iterative stream chunk writes.
+- The MP4 input probe uses the upstream match-position contract with bounded box traversal. AVC and HEVC configuration parsing, AAC program config parsing, packet read-ahead, and output lifecycle build on the upstream release.
+- The fragment reader keeps its paged sample tables, bounded caches, and serialized timestamp recovery.
+- The disk-backed AAC writer emits roll groups in constant space, using one previous packet of decode pre-roll for samples that have a predecessor. The compatibility path without an index store keeps one TFRA entry per indexed fragment.
+- The output target uses iterative chunk writes and retains job-specific backpressure and stream-abort handling. The packet copy path preserves the input sample set, including HEVC leading pictures.
 
 Modified sources here are authoritative and ship in published artifacts. Verify packet/timestamp parity, paging, cancellation, and stream lifecycle when changing them. Do not replace them with an unpatched npm dependency.

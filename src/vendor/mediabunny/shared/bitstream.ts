@@ -5,14 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
-/*!
- * Copyright (c) 2026-present, Vanilagy and contributors
- *
- * This Source Code Form is subject to the terms of the Mozilla Public
- * License, v. 2.0. If a copy of the MPL was not distributed with this
- * file, You can obtain one at https://mozilla.org/MPL/2.0/.
- */
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 export class Bitstream {
     /** Current offset in bits. */
     pos = 0;
@@ -36,9 +29,9 @@ export class Bitstream {
             return this.readBit();
         }
         let result = 0;
+        // Arithmetic instead of bit shifts, since those would overflow for values of 32 bits and wider
         for (let i = 0; i < n; i++) {
-            result <<= 1;
-            result |= this.readBit();
+            result = 2 * result + this.readBit();
         }
         return result;
     }
@@ -48,8 +41,9 @@ export class Bitstream {
             const byteIndex = Math.floor(i / 8);
             let byte = this.bytes[byteIndex]!;
             const bitIndex = 0b111 - (i & 0b111);
+            const bit = Math.floor(value / 2 ** (end - i - 1)) & 1;
             byte &= ~(1 << bitIndex);
-            byte |= ((value & (1 << (end - i - 1))) >> (end - i - 1)) << bitIndex;
+            byte |= bit << bitIndex;
             this.bytes[byteIndex] = byte;
         }
         this.pos = end;

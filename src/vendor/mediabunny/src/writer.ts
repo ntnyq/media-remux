@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { assert } from './misc';
 import { Target } from './target';
 export class Writer {
@@ -16,6 +16,9 @@ export class Writer {
     constructor(target: Target, isMonotonic: boolean) {
         if (target._writerAcquired) {
             throw new Error('Can\'t have multiple Writers for the same Target.');
+        }
+        if (target._closed) {
+            throw new Error('Can\'t create a Writer for a Target that has already been closed.');
         }
         this.target = target;
         target._setMonotonicity(isMonotonic);
@@ -66,7 +69,7 @@ export class Writer {
                 return;
             }
             data = data.subarray(this.trackedStart - pos);
-            pos = 0;
+            pos = this.trackedStart;
         }
         const neededSize = pos + data.byteLength - this.trackedStart;
         let newLength = this.trackedWrites.byteLength;

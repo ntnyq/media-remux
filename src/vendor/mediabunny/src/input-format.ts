@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { Demuxer } from './demuxer';
 import { Input } from './input';
 import { IsobmffDemuxer } from './isobmff/isobmff-demuxer';
@@ -19,7 +19,7 @@ import { isThenable, type MaybePromise } from './misc';
  */
 export abstract class InputFormat {
     /** @internal */
-    abstract _canReadInput(input: Input): Promise<boolean>;
+    abstract _getMatchPosition(input: Input): Promise<number | null>;
     /** @internal */
     abstract _createDemuxer(input: Input): Demuxer;
     /** Returns the name of the input format. */
@@ -87,10 +87,10 @@ export abstract class IsobmffInputFormat extends InputFormat {
  */
 export class Mp4InputFormat extends IsobmffInputFormat {
     /** @internal */
-    async _canReadInput(input: Input) {
+    async _getMatchPosition(input: Input) {
         const majorBrand = await this._getMajorBrand(input);
         if (majorBrand !== null) {
-            return majorBrand !== 'qt  ';
+            return majorBrand !== 'qt  ' ? 0 : null;
         }
         let pos = 0;
         for (let iter = 0; iter < 10; iter++) { // Bounded loop
@@ -98,7 +98,7 @@ export class Mp4InputFormat extends IsobmffInputFormat {
             if (isThenable(slice))
                 slice = await slice;
             if (!slice)
-                return false;
+                return null;
             let size = readU32Be(slice);
             let headerSize = 8;
             if (size === 1) {
@@ -106,18 +106,18 @@ export class Mp4InputFormat extends IsobmffInputFormat {
                 if (isThenable(sizeExtensionSlice))
                     sizeExtensionSlice = await sizeExtensionSlice;
                 if (!sizeExtensionSlice)
-                    return false;
+                    return null;
                 size = readU64Be(sizeExtensionSlice);
                 headerSize = 16;
             }
             const end = pos + size;
             const fileSize = input._reader.fileSizeNonStrict;
             if (size < headerSize || !Number.isSafeInteger(end) || (fileSize !== null && end > fileSize)) {
-                return false;
+                return null;
             }
             const fourCc = readAscii(slice, 4);
             if (fourCc === 'moof' || fourCc === 'sidx' || fourCc === 'moov' || fourCc === 'mdat') {
-                return true;
+                return 0;
             }
             else if (fourCc === 'emsg' || fourCc === 'prft' || fourCc === 'free'
                 || fourCc === 'skip' || fourCc === 'wide') {
@@ -125,10 +125,10 @@ export class Mp4InputFormat extends IsobmffInputFormat {
                 pos = end;
             }
             else {
-                return false;
+                return null;
             }
         }
-        return false;
+        return null;
     }
     get name() {
         return 'MP4';

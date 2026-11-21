@@ -9,6 +9,27 @@ import { temporaryFragmentSamples } from './helpers/fragmentSamples'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 import { indexedMp4 } from './helpers/mp4Index'
 
+test('releases the output stream when the muxer fails to start', async () => {
+  const target = memoryTarget()
+  const failure = new Error('could not emit ftyp')
+  const output = new Output({
+    format: new Mp4OutputFormat({
+      fastStart: 'fragmented',
+      onFtyp() {
+        throw failure
+      },
+    }),
+    target: new StreamTarget(target.writable),
+  })
+
+  output.addAudioTrack(new EncodedAudioPacketSource('aac'))
+
+  await expect(output.start()).rejects.toBe(failure)
+  expect(output.state).toBe('canceled')
+  expect(target.state.isAborted).toBe(true)
+  expect(target.writable.locked).toBe(false)
+})
+
 test.each([1, 16])(
   'closes a zero-buffer output after writing %i compatible segments',
   async count => {

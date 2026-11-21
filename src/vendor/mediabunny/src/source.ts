@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { assert, binarySearchLessOrEqual, clamp, closedIntervalsOverlap, type FilePath, isNumber, isThenable, isWebKit, type MaybePromise, promiseWithResolvers, toDataView, EventEmitter } from './misc';
 import { InputDisposedError } from './input';
 import { polyfillSymbolDispose } from './misc';
@@ -923,26 +923,23 @@ class ReadOrchestrator {
         // Trim the queued reads as well
         for (let i = 0; i < this.queuedReads.length; i++) {
             const queuedRead = this.queuedReads[i]!;
+            for (let j = 0; j < queuedRead.pendingSlices.length; j++) {
+                const slice = queuedRead.pendingSlices[j]!;
+                // If the slice itself is out of bounds, resolve it
+                if (slice.start + slice.bytes.length > size) {
+                    slice.resolve(null);
+                    queuedRead.pendingSlices.splice(j, 1);
+                    j--;
+                }
+            }
             if (queuedRead.hole.start >= size) {
                 // Entirely out of bounds
-                for (const slice of queuedRead.pendingSlices)
-                    slice.resolve(null);
                 this.queuedReads.splice(i, 1);
                 i--;
             }
-            else if (queuedRead.hole.end > size) {
-                // Partially out of bounds
-                queuedRead.hole.end = size;
+            else {
+                queuedRead.hole.end = Math.min(queuedRead.hole.end, size);
                 queuedRead.strictTarget = true;
-                for (let j = 0; j < queuedRead.pendingSlices.length; j++) {
-                    const slice = queuedRead.pendingSlices[j]!;
-                    // If the slice itself is out of bounds, resolve it
-                    if (slice.start >= size) {
-                        slice.resolve(null);
-                        queuedRead.pendingSlices.splice(j, 1);
-                        j--;
-                    }
-                }
             }
         }
     }
@@ -968,7 +965,10 @@ class ReadOrchestrator {
             this.supplyFileSize(worker.currentPos);
         }
         for (const pendingSlice of worker.pendingSlices) {
-            pendingSlice.resolve(null);
+            // Slices ending before this point are still being filled by other workers
+            if (pendingSlice.start + pendingSlice.bytes.length > worker.currentPos) {
+                pendingSlice.resolve(null);
+            }
         }
     }
     insertIntoCache(entry: CacheEntry) {
@@ -1098,30 +1098,31 @@ export class RangedSource extends Source {
     }
     /** @internal */
     override _getFileSize(): number | null | undefined {
+        if (this._length !== null) {
+            return this._length;
+        }
         const baseSize = this._baseSource._getFileSize();
-        if (baseSize === undefined) {
-            return this._length !== null
-                ? this._length
-                : undefined;
+        if (baseSize === undefined || baseSize === null) {
+            return baseSize;
         }
-        if (baseSize === null) {
-            if (this._length !== null) {
-                return this._length;
-            }
-            else {
-                return null;
-            }
-        }
-        return clamp(baseSize - this._offset, 0, this._length ?? Infinity);
+        return Math.max(baseSize - this._offset, 0);
     }
     /** @internal */
     override _read(start: number, end: number, minReadPosition: number, maxReadPosition: number): MaybePromise<ReadResult | null> {
         if (this._length !== null && end > this._length) {
             return null;
         }
-        const result = this._baseSource._read(this._offset + start, this._offset + end, this._offset + minReadPosition, this._offset + maxReadPosition);
+        const baseSize = this._baseSource._getFileSize();
+        const result = typeof baseSize === 'number' && this._offset + end > baseSize
+            ? null
+            : this._baseSource._read(this._offset + start, this._offset + end, this._offset + minReadPosition, this._offset + Math.min(maxReadPosition, this._length ?? Infinity));
         const processResult = (result: ReadResult | null) => {
             if (!result) {
+                if (this._length !== null) {
+                    // We reported the specified length as our size, so the data is expected to be there
+                    const expectedLength = this._offset + this._length;
+                    throw new Error(`Underlying data too short, expected a length of at least ${expectedLength} bytes.`);
+                }
                 return null;
             }
             result.offset -= this._offset;
@@ -1137,9 +1138,21 @@ export class RangedSource extends Source {
     /** @internal */
     override _dispose(): void {
         this._ref?.free();
+        this._removeReadListener?.();
     }
     override ref() {
-        this._ref ??= this._baseSource.ref();
+        if (!this._ref) {
+            this._ref = this._baseSource.ref();
+            this._removeReadListener = this._baseSource.on('read', ({ start, end }) => {
+                const sliceStart = Math.max(start - this._offset, 0);
+                const sliceEnd = Math.min(end - this._offset, this._length ?? Infinity);
+                if (sliceStart < sliceEnd) {
+                    this._dispatchRead(sliceStart, sliceEnd);
+                }
+            });
+        }
         return super.ref();
     }
+    /** @internal */
+    _removeReadListener: (() => void) | null = null;
 }

@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { Bitstream } from '../../shared/bitstream';
 import { aacFrequencyTable } from '../../shared/aac-misc';
 import { FileSlice, readBytes, readU16Be } from '../reader';
@@ -45,9 +45,6 @@ export const readAdtsFrameHeader = (slice: FileSlice): AdtsFrameHeader | null =>
     }
     bitstream.skipBits(1); // Private bit
     const channelConfiguration = bitstream.readBits(3);
-    if (channelConfiguration === 0) {
-        throw new Error('ADTS frames with channel configuration 0 are not supported.');
-    }
     bitstream.skipBits(1); // Originality
     bitstream.skipBits(1); // Home
     bitstream.skipBits(1); // Copyright ID bit
@@ -56,7 +53,7 @@ export const readAdtsFrameHeader = (slice: FileSlice): AdtsFrameHeader | null =>
     bitstream.skipBits(11); // Buffer fullness
     const numberOfAacFrames = bitstream.readBits(2) + 1;
     if (numberOfAacFrames !== 1) {
-        throw new Error('ADTS frames with more than one AAC frame are not supported.');
+        return null; // Not supported
     }
     let crcCheck: number | null = null;
     if (protectionAbsence === 0) { // CRC

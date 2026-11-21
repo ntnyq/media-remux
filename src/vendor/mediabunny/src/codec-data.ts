@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { AVC_LEVEL_TABLE, type DtsFourCc, type VideoCodec, VP9_LEVEL_TABLE } from './codec';
 import { assert, assertNever, getUint24, last, readExpGolomb, readSignedExpGolomb, type Rational, toDataView, toUint8Array, isChromium, popcount, setUint24 } from './misc';
 import { Logging } from './logging';
@@ -463,7 +463,7 @@ export const parseAvcSps = (sps: Uint8Array): AvcSpsInfo | null => {
                 readSignedExpGolomb(bitstream); // offset_for_ref_frame[i]
             }
         }
-        readExpGolomb(bitstream); // max_num_ref_frames
+        const maxNumRefFrames = readExpGolomb(bitstream);
         bitstream.skipBits(1); // gaps_in_frame_num_value_allowed_flag
         const picWidthInMbsMinus1 = readExpGolomb(bitstream);
         const picHeightInMapUnitsMinus1 = readExpGolomb(bitstream);
@@ -598,13 +598,15 @@ export const parseAvcSps = (sps: Uint8Array): AvcSpsInfo | null => {
                 const picWidthInMbs = picWidthInMbsMinus1 + 1;
                 const picHeightInMapUnits = picHeightInMapUnitsMinus1 + 1;
                 const frameHeightInMbs = (2 - frameMbsOnlyFlag) * picHeightInMapUnits;
-                const levelInfo = AVC_LEVEL_TABLE.find(x => x.level >= levelIdc) ?? last(AVC_LEVEL_TABLE)!;
+                const isLevel1b = levelIdc === 11 && (constraintFlags & 0x10) !== 0
+                    && (profileIdc === 66 || profileIdc === 77 || profileIdc === 88);
+                const levelInfo = AVC_LEVEL_TABLE.find(x => x.level >= (isLevel1b ? 10 : levelIdc)) ?? last(AVC_LEVEL_TABLE)!;
                 // "MaxDpbFrames is equal to
                 // Min( MaxDpbMbs / ( picWidthInMbs * frameHeightInMbs ), 16 ) and MaxDpbMbs is given in Table A-1."
                 const maxDpbFrames = Math.min(Math.floor(levelInfo.maxDpbMbs / (picWidthInMbs * frameHeightInMbs)), 16);
                 // "Otherwise, [...] the value of num_reorder_frames shall be inferred to be equal to MaxDpbFrames."
                 numReorderFrames = maxDpbFrames;
-                maxDecFrameBuffering = maxDpbFrames;
+                maxDecFrameBuffering = Math.min(Math.max(maxDpbFrames, maxNumRefFrames), 16);
             }
         }
         assert(maxDecFrameBuffering !== null);
@@ -848,7 +850,8 @@ export const extractHevcDecoderConfigurationRecord = (packetData: Uint8Array) =>
         const vpsUnits: Uint8Array[] = [];
         const spsUnits: Uint8Array[] = [];
         const ppsUnits: Uint8Array[] = [];
-        const seiUnits: Uint8Array[] = [];
+        const prefixSeiUnits: Uint8Array[] = [];
+        const suffixSeiUnits: Uint8Array[] = [];
         // The counts are capped at what the record can hold
         const MAX_NAL_UNITS_PER_ARRAY = 0xffff;
         for (const loc of iterateNalUnitsInAnnexB(packetData)) {
@@ -863,9 +866,13 @@ export const extractHevcDecoderConfigurationRecord = (packetData: Uint8Array) =>
             else if (type === HevcNalUnitType.PPS_NUT && ppsUnits.length < MAX_NAL_UNITS_PER_ARRAY) {
                 ppsUnits.push(nalUnit);
             }
-            else if ((type === HevcNalUnitType.PREFIX_SEI_NUT || type === HevcNalUnitType.SUFFIX_SEI_NUT)
-                && seiUnits.length < MAX_NAL_UNITS_PER_ARRAY) {
-                seiUnits.push(nalUnit);
+            else if (type === HevcNalUnitType.PREFIX_SEI_NUT
+                && prefixSeiUnits.length < MAX_NAL_UNITS_PER_ARRAY) {
+                prefixSeiUnits.push(nalUnit);
+            }
+            else if (type === HevcNalUnitType.SUFFIX_SEI_NUT
+                && suffixSeiUnits.length < MAX_NAL_UNITS_PER_ARRAY) {
+                suffixSeiUnits.push(nalUnit);
             }
         }
         if (spsUnits.length === 0 || ppsUnits.length === 0)
@@ -939,12 +946,22 @@ export const extractHevcDecoderConfigurationRecord = (packetData: Uint8Array) =>
                     },
                 ]
                 : []),
-            ...(seiUnits.length
+            // "array_completeness is 1 for arrays of all types of parameter sets, and 0 for all other arrays"
+            ...(prefixSeiUnits.length
                 ? [
                     {
-                        arrayCompleteness: 1,
-                        nalUnitType: extractNalUnitTypeForHevc(seiUnits[0]![0]!),
-                        nalUnits: seiUnits,
+                        arrayCompleteness: 0,
+                        nalUnitType: HevcNalUnitType.PREFIX_SEI_NUT,
+                        nalUnits: prefixSeiUnits,
+                    },
+                ]
+                : []),
+            ...(suffixSeiUnits.length
+                ? [
+                    {
+                        arrayCompleteness: 0,
+                        nalUnitType: HevcNalUnitType.SUFFIX_SEI_NUT,
+                        nalUnits: suffixSeiUnits,
                     },
                 ]
                 : []),
@@ -1432,6 +1449,10 @@ export const extractVp9CodecInfoFromPacket = (packet: Uint8Array): Vp9CodecInfo 
         // RGB is always 4:4:4
         chromaSubsampling = 3;
         videoFullRangeFlag = 1;
+        if (profile === 1 || profile === 3) {
+            // Skip reserved bit
+            bitstream.skipBits(1);
+        }
     }
     // Parse frame size
     const widthMinusOne = bitstream.readBits(16);
@@ -1759,7 +1780,7 @@ export type ProresCodecInfo = {
 export const extractProresCodecInfoFromPacket = (packet: Uint8Array): ProresCodecInfo | null => {
     // https://wiki.multimedia.cx/index.php/Apple_ProRes
     const frameHeaderStart = 8;
-    if (packet.length < frameHeaderStart + 28) {
+    if (packet.length < frameHeaderStart + 20) {
         return null;
     }
     const view = toDataView(packet);
@@ -1767,7 +1788,7 @@ export const extractProresCodecInfoFromPacket = (packet: Uint8Array): ProresCode
         return null;
     }
     const headerSize = view.getUint16(frameHeaderStart);
-    if (headerSize < 28) {
+    if (headerSize < 20) {
         return null;
     }
     return {
@@ -1789,7 +1810,7 @@ export const parseOpusIdentificationHeader = (bytes: Uint8Array) => {
     const channelMappingFamily = view.getUint8(18);
     let channelMappingTable: Uint8Array | null = null;
     if (channelMappingFamily) {
-        channelMappingTable = bytes.subarray(19, 19 + 2 + outputChannelCount);
+        channelMappingTable = bytes.subarray(19); // Family 3 has a demixing matrix in place of the channel mapping
     }
     return {
         outputChannelCount,
@@ -1935,7 +1956,8 @@ export const determineVideoPacketType = (codec: VideoCodec, decoderConfig: Video
                             return null;
                         }
                         const frameType = bitstream.readBits(2);
-                        return frameType === 0 ? 'key' : 'delta';
+                        const showFrame = bitstream.readBits(1);
+                        return frameType === 0 && showFrame === 1 ? 'key' : 'delta';
                     }
                 }
                 return null;
@@ -2104,11 +2126,47 @@ export const parseEac3SyncFrame = (data: Uint8Array): Eac3FrameInfo | null => {
         fs = EAC3_REDUCED_SAMPLE_RATES[fscod2]! / 1000;
     }
     const dataRate = Math.round(((frmsiz + 1) * fs) / (numblks * 16));
-    // These fields require parsing beyond the first frame.
-    // Defaults are correct for almost all content.
+    // This field sits deep within the BSI, past the mixing metadata. The default is correct for almost all content.
     const bsmod = 0;
-    const numDepSub = 0;
-    const chanLoc = 0;
+    // Any dependent substreams directly follow their independent substream within the same access unit
+    let numDepSub = 0;
+    let chanLoc = 0;
+    let offset = 2 * (frmsiz + 1);
+    while (offset + 2 <= data.length) {
+        bitstream.seekToByte(offset);
+        if (bitstream.readBits(16) !== 0x0b77 || bitstream.readBits(2) !== 1) { // syncword, strmtyp
+            break;
+        }
+        bitstream.skipBits(3); // substreamid
+        const dependentFrmsiz = bitstream.readBits(11);
+        bitstream.skipBits(2 + 2); // fscod, fscod2 or numblkscod
+        const dependentAcmod = bitstream.readBits(3);
+        bitstream.skipBits(1 + 5 + 5); // lfeon, bsid, dialnorm
+        if (bitstream.readBits(1)) { // compre
+            bitstream.skipBits(8); // compr
+        }
+        if (dependentAcmod === 0) {
+            bitstream.skipBits(5); // dialnorm2
+            if (bitstream.readBits(1)) { // compr2e
+                bitstream.skipBits(8); // compr2
+            }
+        }
+        if (bitstream.readBits(1)) { // chanmape
+            const chanmap = bitstream.readBits(16);
+            // chanmap numbers its locations from the most significant bit, chan_loc from the least significant one.
+            // chan_loc covers the Lc/Rc pair through Cvh, then skips the Lts/Rts pair to end with LFE2.
+            for (let i = 0; i < 8; i++) {
+                if (chanmap & (1 << (10 - i))) {
+                    chanLoc |= 1 << i;
+                }
+            }
+            if (chanmap & 0b10) {
+                chanLoc |= 1 << 8;
+            }
+        }
+        numDepSub++;
+        offset += 2 * (dependentFrmsiz + 1);
+    }
     const substream: Eac3SubstreamInfo = {
         fscod,
         fscod2,
@@ -2200,7 +2258,7 @@ export const getEac3ChannelCount = (config: Eac3FrameInfo): number => {
     if (sub.numDepSub > 0) {
         const CHAN_LOC_COUNTS = [2, 2, 1, 1, 2, 2, 2, 1, 1];
         for (let bit = 0; bit < 9; bit++) {
-            if (sub.chanLoc & (1 << (8 - bit))) {
+            if (sub.chanLoc & (1 << bit)) {
                 channels += CHAN_LOC_COUNTS[bit]!;
             }
         }
@@ -2279,6 +2337,8 @@ export type DtsCoreFrameInfo = {
     bitRate: number;
     /** Source PCM resolution in bits */
     pcmResolution: number;
+    /** EXT_AUDIO_ID of the extension inside the core frame, or null if there is none */
+    extAudioId: number | null;
 };
 export type DtsExssAssetInfo = {
     sampleRate: number;
@@ -2412,7 +2472,9 @@ export const parseDtsCoreFrameHeader = (data: Uint8Array): DtsCoreFrameInfo | nu
         return null; // A reserved bit that must be zero, so a cheap way to reject false sync words
     }
     bitstream.skipBits(1 + 1 + 1 + 1); // DYNF, TIMEF, AUXF, HDCD
-    bitstream.skipBits(3 + 1 + 1); // EXT_AUDIO_ID, EXT_AUDIO, ASPF
+    const extAudioId = bitstream.readBits(3);
+    const extAudio = bitstream.readBits(1);
+    bitstream.skipBits(1); // ASPF
     const lff = bitstream.readBits(2);
     if (lff === 3) {
         return null;
@@ -2437,6 +2499,7 @@ export const parseDtsCoreFrameHeader = (data: Uint8Array): DtsCoreFrameInfo | nu
         lfePresent,
         bitRate,
         pcmResolution,
+        extAudioId: extAudio ? extAudioId : null,
     };
 };
 /** Parse the header of an extension substream, along with its first audio asset descriptor. Section 7.4.1 */
@@ -2587,7 +2650,11 @@ export const buildDtsSpecificBox = (frameInfo: DtsFrameInfo) => {
     bytes[12] = frameInfo.pcmResolution;
     // The spec only defines codes for streams built out of a known set of substreams. Anything else is required
     // to be signaled as 0, meaning the construction is left unspecified.
-    const streamConstruction = frameInfo.core && !frameInfo.hasExtensions ? 1 : 0;
+    let streamConstruction = 0;
+    if (frameInfo.core && !frameInfo.hasExtensions) {
+        const { extAudioId } = frameInfo.core;
+        streamConstruction = extAudioId === null ? 1 : (DTS_CORE_EXTENSION_STREAM_CONSTRUCTIONS[extAudioId] ?? 0);
+    }
     const bitstream = new Bitstream(bytes);
     bitstream.seekToByte(13);
     bitstream.writeBits(2, Math.max(DTS_SPECIFIC_BOX_FRAME_DURATIONS.indexOf(frameInfo.sampleCount), 0));
@@ -2607,4 +2674,10 @@ export const buildDtsSpecificBox = (frameInfo: DtsFrameInfo) => {
 /** Count the channels in a DTS speaker layout mask, where some bits stand for a pair of speakers. */
 const getDtsChannelCount = (channelLayout: number) => {
     return popcount(channelLayout) + popcount(channelLayout & DTS_CHANNEL_LAYOUT_PAIR_MASK);
+};
+// Keyed by EXT_AUDIO_ID: XCh, X96 and XXCh inside the core frame. Table E-2
+const DTS_CORE_EXTENSION_STREAM_CONSTRUCTIONS: Record<number, number> = {
+    0: 2,
+    2: 4,
+    6: 3,
 };

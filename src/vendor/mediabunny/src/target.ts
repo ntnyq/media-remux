@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { assert, EventEmitter, type FilePath, isWebKit, type MaybePromise } from './misc';
 import { polyfillSymbolDispose } from './misc';
 polyfillSymbolDispose();
@@ -44,7 +44,10 @@ export abstract class Target extends EventEmitter<TargetEvents> {
     /** @internal */
     abstract _finalize(): Promise<void>;
     /** @internal */
-    abstract _close(): Promise<void>;
+    _close() {
+        this._closed = true;
+        return this._release();
+    }
     /**
      * Called each time data is written to the target. Will be called with the byte range into which data was written.
      *
@@ -80,6 +83,10 @@ export abstract class Target extends EventEmitter<TargetEvents> {
         }
         return new RangedTarget(this, offset);
     }
+    /** @internal */
+    _closed = false;
+    /** @internal */
+    abstract _release(): Promise<void>;
 }
 const ARRAY_BUFFER_INITIAL_SIZE = 2 ** 16;
 const ARRAY_BUFFER_MAX_SIZE = 2 ** 32;
@@ -108,9 +115,9 @@ export class BufferTarget extends Target {
     /** Stores the final output buffer. Until the output is finalized, this will be `null`. */
     buffer: ArrayBuffer | null = null;
     /** @internal */
-    _buffer: ArrayBuffer;
+    _buffer: ArrayBuffer | null;
     /** @internal */
-    _bytes: Uint8Array;
+    _bytes: Uint8Array | null;
     /** @internal */
     _maxPos = 0;
     /** @internal */
@@ -144,6 +151,8 @@ export class BufferTarget extends Target {
     }
     /** @internal */
     _ensureSize(size: number) {
+        assert(this._buffer);
+        assert(this._bytes);
         let newLength = this._buffer.byteLength;
         while (newLength < size)
             newLength *= 2;
@@ -171,6 +180,7 @@ export class BufferTarget extends Target {
     _start() { }
     /** @internal */
     _write(data: Uint8Array, pos: number) {
+        assert(this._bytes);
         this._ensureSize(pos + data.byteLength);
         this._bytes.set(data, pos);
         this._maxPos = Math.max(this._maxPos, pos + data.byteLength);
@@ -180,16 +190,23 @@ export class BufferTarget extends Target {
     async _flush() { }
     /** @internal */
     async _finalize() {
-        this.buffer = this._buffer.slice(0, this._maxPos);
+        assert(this._buffer);
+        const buffer = typeof this._buffer.transferToFixedLength === 'function'
+            ? this._buffer.transferToFixedLength(this._maxPos)
+            : this._buffer.slice(0, this._maxPos);
+        this.buffer = buffer;
+        this._buffer = null;
+        this._bytes = null;
         if (this._options.onFinalize) {
-            await this._options.onFinalize(this.buffer);
+            await this._options.onFinalize(buffer);
         }
         this._emit('finalized');
     }
     /** @internal */
-    async _close() { }
+    async _release() { }
     /** @internal */
     _getSlice(start: number, end: number) {
+        assert(this._bytes);
         return this._bytes.slice(start, end);
     }
 }
@@ -500,16 +517,19 @@ export class StreamTarget extends Target {
         }
         finally {
             this._streamWriter.releaseLock();
+            this._streamWriter = null;
         }
         this._emit('finalized');
     }
     /** @internal */
-    async _close() {
+    async _release() {
+        const writer = this._streamWriter;
+        this._streamWriter = null;
         try {
-            await this._streamWriter?.abort();
+            await writer?.abort();
         }
         finally {
-            this._streamWriter?.releaseLock();
+            writer?.releaseLock();
         }
     }
 }
@@ -546,7 +566,7 @@ export class RangedTarget extends Target {
         this._emit('finalized');
     }
     /** @internal */
-    async _close() { }
+    async _release() { }
     /** @internal */
     override _setMonotonicity(monotonicity: boolean): void {
         super._setMonotonicity(monotonicity);

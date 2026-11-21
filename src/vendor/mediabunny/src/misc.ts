@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { Bitstream } from '../shared/bitstream';
 export function assert(x: unknown): asserts x {
     if (!x) {
@@ -165,7 +165,8 @@ export const toDataView = (source: AllowSharedBufferSource): DataView => {
     }
 };
 // Include a polyfill for environments that don't have TextEncoder (like AudioWorkletGlobalScope)
-export const TextEncoder = typeof globalThis.TextEncoder !== 'undefined'
+// Include a polyfill for environments that don't have TextEncoder (like AudioWorkletGlobalScope)
+export const TextEncoder = /* #__PURE__ */ (() => typeof globalThis.TextEncoder !== 'undefined'
     ? globalThis.TextEncoder
     : class TextEncoder {
         readonly encoding = 'utf-8';
@@ -206,9 +207,10 @@ export const TextEncoder = typeof globalThis.TextEncoder !== 'undefined'
             }
             return bytes.slice(0, n);
         }
-    };
+    })();
 // Include a polyfill for environments that don't have TextEncoder (like AudioWorkletGlobalScope)
-export const TextDecoder = typeof globalThis.TextDecoder !== 'undefined'
+// Include a polyfill for environments that don't have TextEncoder (like AudioWorkletGlobalScope)
+export const TextDecoder = /* #__PURE__ */ (() => typeof globalThis.TextDecoder !== 'undefined'
     ? globalThis.TextDecoder
     : class TextDecoder {
         readonly encoding: 'utf-8' | 'utf-16le' | 'utf-16be';
@@ -303,6 +305,9 @@ export const TextDecoder = typeof globalThis.TextDecoder !== 'undefined'
                         }
                         else {
                             units.push(0xfffd);
+                            if (i + 1 === bytes.length) {
+                                i++; // Native decoders count a dangling odd byte after this as part of the same error
+                            }
                         }
                     }
                     else if (unit >= 0xdc00 && unit <= 0xdfff) {
@@ -322,7 +327,7 @@ export const TextDecoder = typeof globalThis.TextDecoder !== 'undefined'
             }
             return result;
         }
-    };
+    })();
 export const textDecoder = /* #__PURE__ */ new TextDecoder();
 export const textEncoder = /* #__PURE__ */ new TextEncoder();
 const invertObject = <K extends PropertyKey, V extends PropertyKey>(object: Record<K, V>) => {
@@ -362,7 +367,7 @@ export const colorSpaceIsComplete = (colorSpace: VideoColorSpaceInit | undefined
         && !!colorSpace.primaries
         && !!colorSpace.transfer
         && !!colorSpace.matrix
-        && colorSpace.fullRange !== undefined);
+        && colorSpace.fullRange != null);
 };
 export const colorSpaceIsEmpty = (colorSpace: VideoColorSpaceInit | undefined) => {
     return (!colorSpace
@@ -584,7 +589,7 @@ export const isChromium = () => {
  * @public
  */
 export type MaybePromise<T> = T | Promise<T>;
-const NativePromiseConstructor = /* #__PURE__ */ (async () => { })().constructor as PromiseConstructor;
+const NativePromiseConstructor = /* #__PURE__ */ (() => (async () => { })().constructor as PromiseConstructor)();
 /**
  * Needed to properly deal with custom Promise implementations and because this is closer to how the JS spec does it.
  */
@@ -659,7 +664,7 @@ export const arrayArgmin = <T>(array: T[], getValue: (item: T) => number): numbe
     let minValue = Infinity;
     for (let i = 0; i < array.length; i++) {
         const value = getValue(array[i]!);
-        if (value < minValue) {
+        if (minIndex === -1 || value < minValue) {
             minValue = value;
             minIndex = i;
         }
@@ -748,7 +753,15 @@ export class EventEmitter<TEvents extends Record<string, unknown>> {
         if (!listeners) {
             return;
         }
-        for (const entry of listeners) {
+        // Iterate over a snapshot so that listeners added during this emit only receive the next one
+        for (const entry of [...listeners]) {
+            if (!listeners.has(entry)) {
+                continue;
+            }
+            // Remove before calling
+            if (entry.once) {
+                listeners.delete(entry);
+            }
             try {
                 (entry.fn as (data: unknown) => void)(data);
             }
@@ -756,9 +769,6 @@ export class EventEmitter<TEvents extends Record<string, unknown>> {
                 // Deliberately not routed through Logging here: Logging emits via an EventEmitter, so a throwing
                 // log listener would recurse straight back into this handler.
                 console.error(error);
-            }
-            if (entry.once) {
-                listeners.delete(entry);
             }
         }
     }

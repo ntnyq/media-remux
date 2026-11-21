@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { AUDIO_CODECS, type AudioCodec, type MediaCodec, SUBTITLE_CODECS, type SubtitleCodec, VIDEO_CODECS, type VideoCodec } from './codec';
 import { OutputAudioTrack, OutputSubtitleTrack, OutputTrack, OutputVideoTrack } from './output';
 import { EncodedPacket } from './packet';
@@ -42,7 +42,7 @@ export abstract class MediaSource {
         if (this._connectedTrack.output.state === 'pending') {
             throw new Error('Output has not started.');
         }
-        if (this._closed) {
+        if (this._closingPromise) {
             throw new Error('Source is closed.');
         }
     }
@@ -81,10 +81,7 @@ export abstract class MediaSource {
     }
     /** @internal */
     async _flushOrWaitForOngoingClose(forceClose: boolean) {
-        return this._closingPromise ??= (async () => {
-            await this._flushAndClose(forceClose);
-            this._closed = true;
-        })();
+        return this._closingPromise ??= this._flushAndClose(forceClose);
     }
 }
 /**

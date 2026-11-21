@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { assert } from './misc';
 // Inspired in part by https://github.com/halloweeks/AES-128-CBC/blob/main/AES_128_CBC.h
 export const AES_128_BLOCK_SIZE = 16;

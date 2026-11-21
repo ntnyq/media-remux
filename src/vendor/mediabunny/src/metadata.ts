@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { isRecordStringString } from './misc';
 /**
  * Represents descriptive (non-technical) metadata about a media file, such as title, author, date, cover art, or other
@@ -28,35 +28,41 @@ import { isRecordStringString } from './misc';
  */
 export type MetadataTags = {
     /** Title of the media (e.g. Gangnam Style, Titanic, etc.) */
-    title?: string | undefined;
+    title?: string;
     /** Short description or subtitle of the media. */
-    description?: string | undefined;
+    description?: string;
     /** Primary artist(s) or creator(s) of the work. */
-    artist?: string | undefined;
+    artist?: string;
     /** Album, collection, or compilation the media belongs to. */
-    album?: string | undefined;
+    album?: string;
     /** Main credited artist for the album/collection as a whole. */
-    albumArtist?: string | undefined;
+    albumArtist?: string;
     /** Position of this track within its album or collection (1-based). */
-    trackNumber?: number | undefined;
+    trackNumber?: number;
     /** Total number of tracks in the album or collection. */
-    tracksTotal?: number | undefined;
+    tracksTotal?: number;
     /** Disc index if the release spans multiple discs (1-based). */
-    discNumber?: number | undefined;
+    discNumber?: number;
     /** Total number of discs in the release. */
-    discsTotal?: number | undefined;
+    discsTotal?: number;
     /** The beats per minute (BPM) of the media. */
-    beatsPerMinute?: number | undefined;
+    beatsPerMinute?: number;
     /** Genre or category describing the media's style or content (e.g. Metal, Horror, etc.) */
-    genre?: string | undefined;
-    /** Release, recording or creation date of the media. */
-    date?: Date | undefined;
+    genre?: string;
+    /** Release, recording or creation date of the media. Typically in UTC. */
+    date?: Date;
     /** Full text lyrics or transcript associated with the media. */
-    lyrics?: string | undefined;
+    lyrics?: string;
     /** Freeform notes, remarks or commentary about the media. */
-    comment?: string | undefined;
+    comment?: string;
     /** Embedded images such as cover art, booklet scans, artwork or preview frames. */
-    images?: AttachedImage[] | undefined;
+    images?: AttachedImage[];
+    /** The time at which the media file itself was created.
+     *
+     * When writing, leaving this field undefined will write the current date and time to the formats that support this
+     * field. If you don't want to write this info, set this field to `null` instead.
+     */
+    creationTime?: Date | null;
     /**
      * The raw, underlying metadata tags.
      *
@@ -74,7 +80,8 @@ export type MetadataTags = {
      * values. Additionally, all attached files (such as font files) are included here, where the key corresponds to
      * the FileUID and the value is an {@link AttachedFile}.
      * - MP3: The ID3v2 tags, or a single `'TAG'` key with the contents of the ID3v1 tag. The ID3v2 `'TXXX'`
-     * user-defined text frames are exposed as a `Record<string, string>`.
+     * user-defined text frames are exposed as a `Record<string, string>`. If a non-text frame exists more than once,
+     * a array of `Uint8Array` is used instead.
      * - ADTS: The ID3v2 tags, just like in MP3.
      * - Ogg: The key-value string pairs from the Vorbis-style comment header (see RFC 7845, Section 5.2).
      * Additionally, the `'vendor'` key refers to the vendor string within this header. If a key exists more than once,
@@ -86,7 +93,7 @@ export type MetadataTags = {
      * for MP3.
      * - MPEG-TS: Not supported.
     */
-    raw?: Record<string, string | string[] | Uint8Array | RichImageData | AttachedFile | Record<string, string> | null> | undefined;
+    raw?: Record<string, string | string[] | Uint8Array | Uint8Array[] | RichImageData | AttachedFile | Record<string, string> | null>;
 };
 /**
  * An embedded image such as cover art, booklet scan, artwork or preview frame.
@@ -209,6 +216,11 @@ export const validateMetadataTags = (tags: MetadataTags) => {
     if (tags.date !== undefined && (!(tags.date instanceof Date) || Number.isNaN(tags.date.getTime()))) {
         throw new TypeError('tags.date, when provided, must be a valid Date.');
     }
+    if (tags.creationTime !== undefined
+        && tags.creationTime !== null
+        && (!(tags.creationTime instanceof Date) || Number.isNaN(tags.creationTime.getTime()))) {
+        throw new TypeError('tags.creationTime, when provided, must be a valid Date or null.');
+    }
     if (tags.beatsPerMinute !== undefined
         && (!Number.isInteger(tags.beatsPerMinute) || tags.beatsPerMinute <= 0)) {
         throw new TypeError('tags.beatsPerMinute, when provided, must be a positive integer.');
@@ -233,6 +245,12 @@ export const validateMetadataTags = (tags: MetadataTags) => {
             if (!['coverFront', 'coverBack', 'unknown'].includes(image.kind)) {
                 throw new TypeError('Each image.kind must be \'coverFront\', \'coverBack\', or \'unknown\'.');
             }
+            if (image.name !== undefined && typeof image.name !== 'string') {
+                throw new TypeError('Each image.name, when provided, must be a string.');
+            }
+            if (image.description !== undefined && typeof image.description !== 'string') {
+                throw new TypeError('Each image.description, when provided, must be a string.');
+            }
         }
     }
     if (tags.comment !== undefined && typeof tags.comment !== 'string') {
@@ -247,11 +265,12 @@ export const validateMetadataTags = (tags: MetadataTags) => {
                 && typeof value !== 'string'
                 && !(Array.isArray(value) && value.every(x => typeof x === 'string'))
                 && !(value instanceof Uint8Array)
+                && !(Array.isArray(value) && value.every(x => x instanceof Uint8Array))
                 && !(value instanceof RichImageData)
                 && !(value instanceof AttachedFile)
                 && !isRecordStringString(value)) {
-                throw new TypeError('Each value in tags.raw must be a string, string array, Uint8Array, RichImageData, AttachedFile, '
-                    + 'Record<string, string>, or null.');
+                throw new TypeError('Each value in tags.raw must be a string, string array, Uint8Array, Uint8Array array,'
+                    + ' RichImageData, AttachedFile, Record<string, string>, or null.');
             }
         }
     }

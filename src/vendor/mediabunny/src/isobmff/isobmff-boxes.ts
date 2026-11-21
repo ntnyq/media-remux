@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { toUint8Array, assert, isI32, isU32, last, type TransformationMatrix, IDENTITY_MATRIX, centeredTransformationMatrix, multiplyMatrices, rotationMatrix, scaleMatrix, textEncoder, COLOR_PRIMARIES_MAP, TRANSFER_CHARACTERISTICS_MAP, MATRIX_COEFFICIENTS_MAP, colorSpaceIsEmpty, UNDETERMINED_LANGUAGE, assertNever, keyValueIterator } from '../misc';
 import { type AudioCodec, generateAv1CodecConfigurationFromCodecString, parsePcmCodec, PCM_AUDIO_CODECS, type PcmAudioCodec, type SubtitleCodec, type VideoCodec } from '../codec';
 import { formatSubtitleTimestamp } from '../subtitles';
@@ -269,10 +269,15 @@ export const styp = () => box('styp', [
 ]);
 /** Segment Index Box */
 export const sidx = (muxer: IsobmffMuxer, referencedSize: number) => {
+    assert(referencedSize < 2 ** 31);
     const earliestPresentationTime = Math.max(0, muxer.minWrittenTimestamp);
     let duration = Math.max(0, muxer.maxWrittenEndTimestamp - earliestPresentationTime);
     if (!Number.isFinite(duration)) {
         duration = 0;
+    }
+    const durationInTimescale = intoTimescale(duration, GLOBAL_TIMESCALE);
+    if (durationInTimescale >= 2 ** 32) {
+        throw new Error('CMAF segments must be shorter than 20.712612 hours.');
     }
     return fullBox('sidx', 1, 0, [
         u32(1), // Reference ID
@@ -281,8 +286,8 @@ export const sidx = (muxer: IsobmffMuxer, referencedSize: number) => {
         u64(0), // First offset
         u16(0), // Reserved
         u16(1), // Reference count
-        u32(referencedSize & 0x7fffffff), // Reference type (0) + referenced size
-        u32(intoTimescale(duration, GLOBAL_TIMESCALE)), // Subsegment duration
+        u32(referencedSize), // Reference type (0) + referenced size
+        u32(durationInTimescale), // Subsegment duration
         u32(0), // Starts with SAP + SAP type + SAP delta time (no information provided)
     ]);
 };
@@ -460,7 +465,7 @@ export const edts = (trackData: IsobmffTrackData) => {
 /** Media Box: Describes and define a track's media type and sample data. */
 export const mdia = (trackData: IsobmffTrackData, creationTime: number) => box('mdia', undefined, [
     mdhd(trackData, creationTime),
-    hdlr(true, TRACK_TYPE_TO_COMPONENT_SUBTYPE[trackData.type], TRACK_TYPE_TO_HANDLER_NAME[trackData.type]),
+    hdlr(true, TRACK_TYPE_TO_COMPONENT_SUBTYPE[trackData.type], TRACK_TYPE_TO_HANDLER_NAME[trackData.type], undefined, trackData.muxer.isQuickTime),
     minf(trackData),
 ]);
 /** Media Header Box: Specifies the characteristics of a media, including timescale and duration. */
@@ -489,13 +494,13 @@ const TRACK_TYPE_TO_HANDLER_NAME: Record<IsobmffTrackData['type'], string> = {
     subtitle: 'MediabunnyTextHandler',
 };
 /** Handler Reference Box. */
-export const hdlr = (hasComponentType: boolean, handlerType: string, name: string, manufacturer = '\0\0\0\0') => fullBox('hdlr', 0, 0, [
+export const hdlr = (hasComponentType: boolean, handlerType: string, name: string, manufacturer = '\0\0\0\0', isQuickTime = false) => fullBox('hdlr', 0, 0, [
     hasComponentType ? ascii('mhlr') : u32(0), // Component type
     ascii(handlerType), // Component subtype
     ascii(manufacturer), // Component manufacturer
     u32(0), // Component flags
     u32(0), // Component flags mask
-    ascii(name, true), // Component name
+    isQuickTime ? [u8(name.length), ascii(name)] : ascii(name, true), // Component name, a Pascal string for QuickTime
 ]);
 /**
  * Media Information Box: Stores handler-specific information for a track's media data. The media handler uses this
@@ -675,7 +680,7 @@ export const vpcC = (trackData: IsobmffVideoTrackData) => {
     const parts = decoderConfig.codec.split('.'); // We can derive the required values from the codec string
     const profile = Number(parts[1]);
     const level = Number(parts[2]);
-    const bitDepth = Number(parts[3]);
+    const bitDepth = parts[3] ? Number(parts[3]) : 8; // VP8 is always 8-bit
     const chromaSubsampling = parts[4] ? Number(parts[4]) : 1; // 4:2:0 colocated with luma (0,0)
     const videoFullRangeFlag = parts[8] ? Number(parts[8]) : Number(decoderConfig.colorSpace?.fullRange ?? 0);
     const thirdByte = (bitDepth << 4) + (chromaSubsampling << 1) + videoFullRangeFlag;
@@ -711,20 +716,31 @@ export const av1C = (trackData: IsobmffVideoTrackData) => {
 };
 /** Sound Sample Description Box: Contains information that defines how to interpret sound media data. */
 export const soundSampleDescription = (compressionType: string, trackData: IsobmffAudioTrackData) => {
-    let version = 0;
+    let version: 0 | 1 | 2 = 0;
     let contents: NestedNumberArray;
     let sampleSizeInBits = 16;
+    let sampleEntrySampleRate = trackData.info.sampleRate;
+    let configurationBox = audioCodecToConfigurationBox(trackData.track.source._codec, trackData.muxer.isQuickTime)?.(trackData) ?? null;
     const isPcmCodec = (PCM_AUDIO_CODECS as readonly AudioCodec[]).includes(trackData.track.source._codec);
     if (isPcmCodec) {
         const codec = trackData.track.source._codec as PcmAudioCodec;
         const { sampleSize } = parsePcmCodec(codec);
         sampleSizeInBits = 8 * sampleSize;
-        if (sampleSizeInBits > 16) {
-            version = 1;
+    }
+    else if (trackData.track.source._codec === 'flac') {
+        const description = trackData.info.decoderConfig?.description;
+        assert(description);
+        const bitstream = new Bitstream(toUint8Array(description));
+        bitstream.skipBits(167); // 'fLaC', block header, block and frame sizes, sample rate and channel count
+        sampleSizeInBits = bitstream.readBits(5) + 1; // The sample entry must state STREAMINFO's bit depth
+        // The FLAC mapping asks us to halve the rate until it fits (weird but sure)
+        while (sampleEntrySampleRate >= 2 ** 16) {
+            sampleEntrySampleRate = Math.floor(sampleEntrySampleRate / 2);
         }
     }
     if (trackData.muxer.isQuickTime) {
-        version = 1;
+        // Version 1 is only specified for mono and stereo, and can't represent sample rates of 2^16 and up
+        version = trackData.info.sampleRate < 2 ** 16 && trackData.info.numberOfChannels <= 2 ? 1 : 2;
     }
     if (version === 0) {
         contents = [
@@ -737,11 +753,11 @@ export const soundSampleDescription = (compressionType: string, trackData: Isobm
             u16(sampleSizeInBits), // Sample size (bits)
             u16(0), // Compression ID
             u16(0), // Packet size
-            u16(trackData.info.sampleRate < 2 ** 16 ? trackData.info.sampleRate : 0), // Sample rate (upper)
+            u16(sampleEntrySampleRate < 2 ** 16 ? sampleEntrySampleRate : 0), // Sample rate (upper)
             u16(0), // Sample rate (lower)
         ];
     }
-    else {
+    else if (version === 1) {
         const compressionId = isPcmCodec ? 0 : -2;
         contents = [
             Array(6).fill(0), // Reserved
@@ -769,8 +785,60 @@ export const soundSampleDescription = (compressionType: string, trackData: Isobm
             u32(2), // Bytes per sample (constant in FFmpeg)
         ];
     }
+    else if (version === 2) {
+        let formatSpecificFlags = 0;
+        if (isPcmCodec) {
+            const { dataType, littleEndian } = parsePcmCodec(trackData.track.source._codec as PcmAudioCodec);
+            if (dataType !== 'ulaw' && dataType !== 'alaw') {
+                // Linear PCM must use the lpcm format with version 2, which is fully described by these flags
+                compressionType = 'lpcm';
+                configurationBox = null;
+                formatSpecificFlags = (dataType === 'float' ? 1 : 0) // Float
+                    | (littleEndian ? 0 : 2) // Big-endian
+                    | (dataType === 'signed' ? 4 : 0) // Signed integer
+                    | 8; // Packed
+            }
+        }
+        contents = [
+            Array(6).fill(0), // Reserved
+            u16(1), // Data reference index
+            u16(version), // Version
+            u16(0), // Revision level
+            u32(0), // Vendor
+            u16(3), // Always 3
+            u16(16), // Always 16
+            i16(-2), // Always -2
+            u16(0), // Always 0
+            u32(0x10000), // Always 65536
+            u32(72), // Size of struct only
+            f64(trackData.info.sampleRate), // Sample rate
+            u32(trackData.info.numberOfChannels), // Number of channels
+            u32(0x7f000000), // Always 0x7f000000
+            isPcmCodec
+                ? [
+                    u32(sampleSizeInBits), // Constant bits per channel
+                    u32(formatSpecificFlags), // Format-specific flags
+                    u32(trackData.info.numberOfChannels * sampleSizeInBits / 8), // Constant bytes per audio packet
+                    u32(1), // Constant LPCM frames per audio packet
+                ]
+                : [
+                    u32(0), // Constant bits per channel (variable)
+                    u32(0), // Format-specific flags
+                    u32(0), // Constant bytes per audio packet (variable)
+                    u32(0), // Constant LPCM frames per audio packet (variable)
+                ],
+        ];
+    }
+    else {
+        assertNever(version);
+        assert(false);
+    }
     return box(compressionType, contents, [
-        audioCodecToConfigurationBox(trackData.track.source._codec, trackData.muxer.isQuickTime)?.(trackData) ?? null,
+        // For ipcm and fpcm, sample rates that don't fit into the sample entry go into their own box
+        (compressionType === 'ipcm' || compressionType === 'fpcm') && trackData.info.sampleRate >= 2 ** 16
+            ? srat(trackData)
+            : null,
+        configurationBox,
         btrt(trackData),
     ]);
 };
@@ -836,7 +904,11 @@ export const esds = (trackData: IsobmffAudioTrackData) => {
 export const wave = (trackData: IsobmffAudioTrackData) => {
     return box('wave', undefined, [
         frma(trackData),
-        enda(trackData),
+        trackData.track.source._codec === 'ac3'
+            ? dac3(trackData)
+            : trackData.track.source._codec === 'eac3'
+                ? dec3(trackData)
+                : enda(trackData),
         box('\x00\x00\x00\x00'), // NULL tag at the end
     ]);
 };
@@ -855,8 +927,7 @@ export const enda = (trackData: IsobmffAudioTrackData) => {
 /** Opus Specific Box. */
 export const dOps = (trackData: IsobmffAudioTrackData) => {
     let outputChannelCount = trackData.info.numberOfChannels;
-    // Default PreSkip, should be at least 80 milliseconds worth of playback, measured in 48000 Hz samples
-    let preSkip = 3840;
+    let preSkip = 312; // Default
     let inputSampleRate = trackData.info.sampleRate;
     let outputGain = 0;
     let channelMappingFamily = 0;
@@ -1076,12 +1147,15 @@ export const ctts = (trackData: IsobmffTrackData) => {
  * Composition to Decode Box: Stores information about the composition and display times of the media samples.
  */
 export const cslg = (trackData: IsobmffTrackData) => {
+    assert(trackData.compositionTimeOffsetTable.length > 0);
+    if (trackData.samples.length === 0) {
+        // Happens when the moov is measured before any samples have been added
+        return null;
+    }
     let leastDecodeToDisplayDelta = Infinity;
     let greatestDecodeToDisplayDelta = -Infinity;
     let compositionStartTime = Infinity;
     let compositionEndTime = -Infinity;
-    assert(trackData.compositionTimeOffsetTable.length > 0);
-    assert(trackData.samples.length > 0);
     for (let i = 0; i < trackData.compositionTimeOffsetTable.length; i++) {
         const entry = trackData.compositionTimeOffsetTable[i]!;
         leastDecodeToDisplayDelta = Math.min(leastDecodeToDisplayDelta, entry.sampleCompositionTimeOffset);
@@ -1264,28 +1338,17 @@ export const mfra = (trackDatas: IsobmffTrackData[]) => {
 /** Track Fragment Random Access Box: Provides pointers to sync samples within the file for random access. */
 export const tfra = (trackData: IsobmffTrackData) => {
     const version = 1; // Using this version allows us to use 64-bit time and offset values
-    const entries: NestedNumberArray[] = [];
-    for (const chunk of trackData.finalizedChunks) {
-        const sampleIndex = chunk.samples.findIndex(sample => sample.type === 'key');
-        if (sampleIndex === -1) {
-            // tfra must point to sync samples, so continue here. This should never happen in practice since all
-            // fragments begin with a sync sample for every track anyways.
-            continue;
-        }
-        const sample = chunk.samples[sampleIndex]!;
-        entries.push([
-            u64(intoTimescale(sample.timestamp, trackData.timescale)), // Time (in presentation time)
-            u64(chunk.moofOffset!), // moof offset
-            u32(chunk.trafIndex! + 1), // traf number
-            u32(1), // trun number
-            u32(sampleIndex + 1), // Sample number
-        ]);
-    }
     return fullBox('tfra', version, 0, [
         u32(trackData.track.id), // Track ID
         u32(0b111111), // This specifies that traf number, trun number and sample number are 32-bit ints
-        u32(entries.length), // Number of entries
-        entries,
+        u32(trackData.tfraEntries.length), // Number of entries
+        trackData.tfraEntries.map(entry => [
+            u64(intoTimescale(entry.timestamp, trackData.timescale)), // Time (in presentation time)
+            u64(entry.moofOffset), // moof offset
+            u32(entry.trafIndex + 1), // traf number
+            u32(1), // trun number
+            u32(entry.sampleIndex + 1), // Sample number
+        ]),
     ]);
 };
 /**
@@ -1397,6 +1460,12 @@ const addQuickTimeMetadataTagBoxes = (boxes: Box[], tags: MetadataTags) => {
             case 'raw':
                 {
                     // Handled later
+                }
+                ;
+                break;
+            case 'creationTime':
+                {
+                    // Written in the header boxes
                 }
                 ;
                 break;
@@ -1563,7 +1632,7 @@ const generateMetadataPairs = (tags: MetadataTags, isMdta: boolean) => {
                 {
                     if (!isMdta) {
                         // Only written for mdir
-                        pairs.push({ key: 'disc', value: box('data', [
+                        pairs.push({ key: 'disk', value: box('data', [
                                 u32(0), // 8 bytes empty
                                 u32(0),
                                 u16(0), // Empty
@@ -1588,13 +1657,21 @@ const generateMetadataPairs = (tags: MetadataTags, isMdta: boolean) => {
                 }
                 ;
                 break;
+            case 'creationTime':
+                {
+                    // Written in the header boxes
+                }
+                ;
+                break;
             default: assertNever(key);
         }
     }
     if (tags.raw) {
         for (const key in tags.raw) {
             const value = tags.raw[key];
-            if (value == null || (!isMdta && key.length !== 4) || pairs.some(x => x.key === key)) {
+            if (value == null
+                || (!isMdta && (key.length !== 4 || ILST_UNSAFE_RAW_KEYS.has(key)))
+                || pairs.some(x => x.key === key)) {
                 continue;
             }
             if (typeof value === 'string') {
@@ -1678,7 +1755,7 @@ const VIDEO_CODEC_TO_CONFIGURATION_BOX: Record<VideoCodec, ((trackData: IsobmffV
 const audioCodecToBoxName = (codec: AudioCodec, fullCodecString: string, isQuickTime: boolean): string => {
     switch (codec) {
         case 'aac': return 'mp4a';
-        case 'mp3': return 'mp4a';
+        case 'mp3': return isQuickTime ? '.mp3' : 'mp4a';
         case 'opus': return 'Opus';
         case 'vorbis': return 'mp4a';
         case 'flac': return 'fLaC';
@@ -1723,12 +1800,12 @@ const audioCodecToBoxName = (codec: AudioCodec, fullCodecString: string, isQuick
 const audioCodecToConfigurationBox = (codec: AudioCodec, isQuickTime: boolean) => {
     switch (codec) {
         case 'aac': return esds;
-        case 'mp3': return esds;
+        case 'mp3': return isQuickTime ? null : esds;
         case 'opus': return dOps;
         case 'vorbis': return esds;
         case 'flac': return dfLa;
-        case 'ac3': return dac3;
-        case 'eac3': return dec3;
+        case 'ac3': return isQuickTime ? wave : dac3;
+        case 'eac3': return isQuickTime ? wave : dec3;
         case 'dts': return ddts;
     }
     // Logic diverges here
@@ -1776,3 +1853,14 @@ const getLanguageCodeInt = (code: string) => {
     }
     return language;
 };
+const f64 = (value: number) => {
+    view.setFloat64(0, value, false);
+    return [bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]] as number[];
+};
+/** Sampling Rate Box */
+const srat = (trackData: IsobmffAudioTrackData) => fullBox('srat', 0, 0, [
+    u32(trackData.info.sampleRate), // Sampling rate
+]);
+// FFmpeg parses these assuming a udta layout even when they're not in udta, so we simply skip these if we'd write them
+// to ilst metadata
+const ILST_UNSAFE_RAW_KEYS = new Set(['HMMT', 'loci', 'chpl']);

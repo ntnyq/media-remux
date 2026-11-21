@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { AUDIO_CODECS, type AudioCodec, type MediaCodec, NON_PCM_AUDIO_CODECS, SUBTITLE_CODECS, type SubtitleCodec, VIDEO_CODECS, type VideoCodec } from './codec';
 import { IsobmffMuxer } from './isobmff/isobmff-muxer';
 import { Muxer } from './muxer';
@@ -146,7 +146,7 @@ export type IsobmffOutputFormatOptions = {
      * Use `'reserve'` to reserve space at the start of the file into which the metadata will be written later.	This
      * produces a file with Fast Start but requires knowledge about the expected length of the file beforehand. When
      * using this option, you must set the {@link BaseTrackMetadata.maximumPacketCount} field in the track metadata
-     * for all tracks.
+     * for all tracks. {@link Conversion} estimates this count automatically if no override is provided.
      *
      * Use `'fragmented'` to place metadata at the start of the file by creating a fragmented file (fMP4). In a
      * fragmented file, chunks of media and their metadata are written to the file in "fragments", eliminating the need

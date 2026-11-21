@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { parseAacAudioSpecificConfig } from '../shared/aac-misc';
 import { type Av1CodecInfo, av1CodecInfoHasColorInfo, type AvcDecoderConfigurationRecord, deserializeAvcDecoderConfigurationRecord, deserializeHevcDecoderConfigurationRecord, type HevcDecoderConfigurationRecord, HevcNalUnitType, parseAvcSps, parseHevcSps, type ProresCodecInfo, type Vp9CodecInfo } from './codec-data';
 import { COLOR_PRIMARIES_MAP, COLOR_PRIMARIES_MAP_INVERSE, MATRIX_COEFFICIENTS_MAP, MATRIX_COEFFICIENTS_MAP_INVERSE, TRANSFER_CHARACTERISTICS_MAP, TRANSFER_CHARACTERISTICS_MAP_INVERSE, assert, assertNever, bytesToHexString, isAllowSharedBufferSource, last, reverseBitsU32, toDataView } from './misc';
@@ -196,6 +196,7 @@ export const extractVideoCodecString = (trackInfo: {
     colorSpace: VideoColorSpaceInit | null;
     avcType: 1 | 3 | null;
     avcCodecInfo: AvcDecoderConfigurationRecord | null;
+    hevcType: 'hev1' | 'hvc1' | null;
     hevcCodecInfo: HevcDecoderConfigurationRecord | null;
     vp9CodecInfo: Vp9CodecInfo | null;
     av1CodecInfo: Av1CodecInfo | null;
@@ -218,6 +219,7 @@ export const extractVideoCodecString = (trackInfo: {
         return `avc${trackInfo.avcType}.${bytesToHexString(codecDescription.subarray(1, 4))}`;
     }
     else if (codec === 'hevc') {
+        assert(trackInfo.hevcType !== null);
         let generalProfileSpace: number;
         let generalProfileIdc: number;
         let compatibilityFlags: number;
@@ -248,7 +250,7 @@ export const extractVideoCodecString = (trackInfo: {
                 constraintFlags.push(view.getUint8(6 + i));
             }
         }
-        let codecString = 'hev1.';
+        let codecString = `${trackInfo.hevcType}.`;
         codecString += ['', 'A', 'B', 'C'][generalProfileSpace]! + generalProfileIdc;
         codecString += '.';
         codecString += compatibilityFlags.toString(16).toUpperCase();
@@ -268,21 +270,22 @@ export const extractVideoCodecString = (trackInfo: {
         return 'vp8'; // Easy, this one
     }
     else if (codec === 'vp9') {
-        if (!vp9CodecInfo) {
-            // Calculate level based on dimensions
-            const pictureSize = trackInfo.width * trackInfo.height;
-            let level = last(VP9_LEVEL_TABLE)!.level; // Default to highest level
-            for (const entry of VP9_LEVEL_TABLE) {
-                if (pictureSize <= entry.maxPictureSize) {
-                    level = entry.level;
-                    break;
-                }
+        // Calculate level based on dimensions
+        const pictureSize = trackInfo.width * trackInfo.height;
+        let levelFromSize = last(VP9_LEVEL_TABLE)!.level; // Default to highest level
+        for (const entry of VP9_LEVEL_TABLE) {
+            if (pictureSize <= entry.maxPictureSize) {
+                levelFromSize = entry.level;
+                break;
             }
+        }
+        if (!vp9CodecInfo) {
             // We don't really know better, so let's return a general-purpose, common codec string and hope for the best
-            return `vp09.00.${level.toString().padStart(2, '0')}.08`;
+            return `vp09.00.${levelFromSize.toString().padStart(2, '0')}.08`;
         }
         const profile = vp9CodecInfo.profile.toString().padStart(2, '0');
-        const level = vp9CodecInfo.level.toString().padStart(2, '0');
+        // Some writers write 0 for unknown
+        const level = (vp9CodecInfo.level === 0 ? levelFromSize : vp9CodecInfo.level).toString().padStart(2, '0');
         const bitDepth = vp9CodecInfo.bitDepth.toString().padStart(2, '0');
         const chromaSubsampling = vp9CodecInfo.chromaSubsampling.toString().padStart(2, '0');
         const colourPrimaries = vp9CodecInfo.colourPrimaries.toString().padStart(2, '0');
@@ -300,9 +303,11 @@ export const extractVideoCodecString = (trackInfo: {
         if (!av1CodecInfo) {
             // Calculate level based on dimensions
             const pictureSize = trackInfo.width * trackInfo.height;
-            let level = last(VP9_LEVEL_TABLE)!.level; // Default to highest level
-            for (const entry of VP9_LEVEL_TABLE) {
-                if (pictureSize <= entry.maxPictureSize) {
+            let level = last(AV1_LEVEL_TABLE)!.level; // Default to highest level
+            for (const entry of AV1_LEVEL_TABLE) {
+                if (pictureSize <= entry.maxPictureSize
+                    && trackInfo.width <= entry.maxHSize
+                    && trackInfo.height <= entry.maxVSize) {
                     level = entry.level;
                     break;
                 }
@@ -447,7 +452,9 @@ export const extractColorSpace = (info: {
                     return {
                         primaries: (COLOR_PRIMARIES_MAP_INVERSE[info.proresCodecInfo.colourPrimaries] as VideoColorPrimaries | undefined) ?? null,
                         transfer: (TRANSFER_CHARACTERISTICS_MAP_INVERSE[info.proresCodecInfo.transferCharacteristics] as VideoTransferCharacteristics | undefined) ?? null,
-                        matrix: (MATRIX_COEFFICIENTS_MAP_INVERSE[info.proresCodecInfo.matrixCoefficients] as VideoMatrixCoefficients | undefined) ?? null,
+                        matrix: info.proresCodecInfo.matrixCoefficients === 0
+                            ? null // ProRes maps zero to unknown.
+                            : (MATRIX_COEFFICIENTS_MAP_INVERSE[info.proresCodecInfo.matrixCoefficients] as VideoMatrixCoefficients | undefined) ?? null,
                         fullRange: info.proresCodecInfo.fullRange ?? null,
                     };
                 }
@@ -582,7 +589,7 @@ export const inferCodecFromCodecString = (codecString: string): MediaCodec | nul
     else if (codecString === 'vorbis') {
         return 'vorbis';
     }
-    else if (codecString === 'flac') {
+    else if (codecString === 'flac' || codecString === 'fLaC' /* HLS variant */) {
         return 'flac';
     }
     else if (codecString === 'ac-3' || codecString === 'ac3') {
@@ -778,7 +785,9 @@ export const validateAudioChunkMetadata = (metadata: EncodedAudioChunkMetadata |
         && metadata.decoderConfig.codec !== 'mp4a.6B'
         && metadata.decoderConfig.codec !== 'mp4a.6b') {
         // AAC-specific validation
-        const validStrings = ['mp4a.40.2', 'mp4a.40.02', 'mp4a.40.5', 'mp4a.40.05', 'mp4a.40.29', 'mp4a.67'];
+        const validStrings = [
+            'mp4a.40.2', 'mp4a.40.02', 'mp4a.40.5', 'mp4a.40.05', 'mp4a.40.29', 'mp4a.40.42', 'mp4a.67',
+        ];
         if (!validStrings.includes(metadata.decoderConfig.codec)) {
             throw new TypeError('Audio chunk metadata decoder configuration codec string for AAC must be a valid AAC codec string as'
                 + ' specified in https://www.w3.org/TR/webcodecs-aac-codec-registration/.');
@@ -879,3 +888,54 @@ export const validateSubtitleMetadata = (metadata: SubtitleMetadata | undefined)
         throw new TypeError('Subtitle metadata config description must be a string.');
     }
 };
+// https://en.wikipedia.org/wiki/AV1
+const AV1_LEVEL_TABLE = [
+    // Level 2.0 (Main Tier)
+    { maxPictureSize: 147456, maxHSize: 2048, maxVSize: 1152, maxBitrate: 1500000, tier: 'M', level: 0 },
+    // Level 2.1 (Main Tier)
+    { maxPictureSize: 278784, maxHSize: 2816, maxVSize: 1584, maxBitrate: 3000000, tier: 'M', level: 1 },
+    // Level 3.0 (Main Tier)
+    { maxPictureSize: 665856, maxHSize: 4352, maxVSize: 2448, maxBitrate: 6000000, tier: 'M', level: 4 },
+    // Level 3.1 (Main Tier)
+    { maxPictureSize: 1065024, maxHSize: 5504, maxVSize: 3096, maxBitrate: 10000000, tier: 'M', level: 5 },
+    // Level 4.0 (Main Tier)
+    { maxPictureSize: 2359296, maxHSize: 6144, maxVSize: 3456, maxBitrate: 12000000, tier: 'M', level: 8 },
+    // Level 4.0 (High Tier)
+    { maxPictureSize: 2359296, maxHSize: 6144, maxVSize: 3456, maxBitrate: 30000000, tier: 'H', level: 8 },
+    // Level 4.1 (Main Tier)
+    { maxPictureSize: 2359296, maxHSize: 6144, maxVSize: 3456, maxBitrate: 20000000, tier: 'M', level: 9 },
+    // Level 4.1 (High Tier)
+    { maxPictureSize: 2359296, maxHSize: 6144, maxVSize: 3456, maxBitrate: 50000000, tier: 'H', level: 9 },
+    // Level 5.0 (Main Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 30000000, tier: 'M', level: 12 },
+    // Level 5.0 (High Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 100000000, tier: 'H', level: 12 },
+    // Level 5.1 (Main Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 40000000, tier: 'M', level: 13 },
+    // Level 5.1 (High Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 160000000, tier: 'H', level: 13 },
+    // Level 5.2 (Main Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 60000000, tier: 'M', level: 14 },
+    // Level 5.2 (High Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 240000000, tier: 'H', level: 14 },
+    // Level 5.3 (Main Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 60000000, tier: 'M', level: 15 },
+    // Level 5.3 (High Tier)
+    { maxPictureSize: 8912896, maxHSize: 8192, maxVSize: 4352, maxBitrate: 240000000, tier: 'H', level: 15 },
+    // Level 6.0 (Main Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 60000000, tier: 'M', level: 16 },
+    // Level 6.0 (High Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 240000000, tier: 'H', level: 16 },
+    // Level 6.1 (Main Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 100000000, tier: 'M', level: 17 },
+    // Level 6.1 (High Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 480000000, tier: 'H', level: 17 },
+    // Level 6.2 (Main Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 160000000, tier: 'M', level: 18 },
+    // Level 6.2 (High Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 800000000, tier: 'H', level: 18 },
+    // Level 6.3 (Main Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 160000000, tier: 'M', level: 19 },
+    // Level 6.3 (High Tier)
+    { maxPictureSize: 35651584, maxHSize: 16384, maxVSize: 8704, maxBitrate: 800000000, tier: 'H', level: 19 },
+];

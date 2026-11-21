@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { Demuxer, type DurationMetadataRequestOptions } from './demuxer';
 import { InputFormat, type InputFormatOptions, validateInputFormatOptions } from './input-format';
 import { InputAudioTrack, type InputAudioTrackBacking, InputTrack, type InputTrackBacking, InputVideoTrack, type InputVideoTrackBacking, type InputTrackQuery, mergeInputTrackQueries, queryInputTracks, toValidatedInputTrackQuery, prefer, desc } from './input-track';
@@ -144,6 +144,9 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
     }
     /** @internal */
     get _rootSource() {
+        if (this._disposed) {
+            throw new InputDisposedError();
+        }
         return this._rootRef.source;
     }
     /** @internal */
@@ -157,7 +160,7 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
     _getSourceCached(request: SourceRequest, cacheGroup = DEFAULT_SOURCE_CACHE_GROUP): Promise<SourceRef> {
         const cachedEntry = this._sourceCache.find(x => x.cacheGroup === cacheGroup && sourceRequestsAreEqual(x.request, request));
         if (cachedEntry) {
-            cachedEntry.age++;
+            cachedEntry.age = this._nextSourceCacheAge++;
             return Promise.resolve(cachedEntry.sourceRef.source.ref());
         }
         const cachedPromiseEntry = this._sourceCachePromises.find(x => x.cacheGroup === cacheGroup && sourceRequestsAreEqual(x.request, request));
@@ -165,7 +168,16 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
             return cachedPromiseEntry.promise.then(x => x.sourceRef.source.ref());
         }
         const promise = (async () => {
-            const sourceRef = await this._getSourceUncached(request);
+            let sourceRef: SourceRef;
+            try {
+                sourceRef = await this._getSourceUncached(request);
+            }
+            finally {
+                // Also on failure, so that later requests for this source can try again
+                const promiseIndex = this._sourceCachePromises.findIndex(x => x.request === request);
+                assert(promiseIndex !== -1);
+                this._sourceCachePromises.splice(promiseIndex, 1);
+            }
             if (this._disposed) {
                 sourceRef.free();
                 throw new InputDisposedError();
@@ -181,9 +193,6 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
                 removeItem(this._sourceRefs, entry.sourceRef);
             }
             this._sourceRefs.push(sourceRef);
-            const promiseIndex = this._sourceCachePromises.findIndex(x => x.request === request);
-            assert(promiseIndex !== -1);
-            this._sourceCachePromises.splice(promiseIndex, 1);
             const cacheEntry: SourceCacheEntry = {
                 request,
                 sourceRef,
@@ -209,15 +218,25 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
         return this._demuxerPromise ??= (async () => {
             this._reader = new Reader(this._rootSource);
             this._emit('source', { source: this._rootSource, request: null, isRoot: true });
+            // The format whose data starts earliest wins
+            let bestFormat: InputFormat | null = null;
+            let bestMatchPosition = Infinity;
             for (const format of this._formats) {
-                const canRead = await format._canReadInput(this);
-                if (canRead) {
-                    this._format = format;
-                    this._onFormatDetermined?.(format);
-                    return format._createDemuxer(this);
+                const matchPosition = await format._getMatchPosition(this);
+                if (matchPosition !== null && matchPosition < bestMatchPosition) {
+                    bestFormat = format;
+                    bestMatchPosition = matchPosition;
+                    if (matchPosition === 0) {
+                        break; // Nothing can beat this
+                    }
                 }
             }
-            throw new UnsupportedInputFormatError();
+            if (!bestFormat) {
+                throw new UnsupportedInputFormatError();
+            }
+            this._format = bestFormat;
+            this._onFormatDetermined?.(bestFormat);
+            return bestFormat._createDemuxer(this);
         })();
     }
     /**
@@ -265,8 +284,8 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
             return 0;
         }
         // Only count the timestamps of tracks that have at least one packet
-        const firstPackets = await Promise.all(filtered.map(x => x._backing.getFirstPacket({ metadataOnly: true })));
-        const result = Math.min(...firstPackets.map(x => x?.timestamp ?? Infinity));
+        const firstTimestamps = await Promise.all(filtered.map(x => x.getFirstTimestampOrNull()));
+        const result = Math.min(...firstTimestamps.map(x => x ?? Infinity));
         return result === Infinity ? 0 : result;
     }
     /**
@@ -289,8 +308,10 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
         if (filtered.length === 0) {
             return 0;
         }
-        const tracksDurations = await Promise.all(filtered.map(x => x.computeDuration(options)));
-        return Math.max(...tracksDurations);
+        // Only count the durations of tracks that have at least one packet
+        const tracksDurations = await Promise.all(filtered.map(x => x.computeDurationOrNull(options)));
+        const result = Math.max(...tracksDurations.map(x => x ?? -Infinity));
+        return result === -Infinity ? 0 : result;
     }
     /**
      * Gets the duration (end timestamp) in seconds of the input file from metadata stored in the file. This value may
@@ -420,10 +441,15 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
             return;
         }
         this._disposed = true;
+        for (const callback of this._disposeCallbacks) {
+            callback();
+        }
+        this._disposeCallbacks.clear();
         for (const ref of this._sourceRefs) {
             ref.free();
         }
         this._sourceRefs.length = 0;
+        this._sourceCache.length = 0;
         if (this._demuxerPromise) {
             // The demuxer promise may already be rejected after failed format detection.
             void this._demuxerPromise
@@ -438,6 +464,8 @@ export class Input<S extends Source = Source> extends EventEmitter<InputEvents> 
     [Symbol.dispose]() {
         this.dispose();
     }
+    /** @internal */
+    _disposeCallbacks = new Set<() => void>();
 }
 /**
  * Thrown when trying to operate on an input that has an unsupported or unrecognizable format.

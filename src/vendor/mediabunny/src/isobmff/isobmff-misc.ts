@@ -5,7 +5,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
-// Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
+// Subset based on patched Mediabunny 1.66.2; see THIRD_PARTY_NOTICES.md at the package root.
 import { bytesToHexString, COLOR_PRIMARIES_MAP, MATRIX_COEFFICIENTS_MAP, toDataView, TRANSFER_CHARACTERISTICS_MAP, uint8ArraysAreEqual } from '../misc';
 /** Numeric color identifiers from an nclx or nclc box, including values outside WebCodecs. */
 export type IsobmffColorInformation = Readonly<{
@@ -94,5 +94,14 @@ export const parsePsshBoxContents = (contents: Uint8Array): PsshBox => {
         data: contents.slice(pos, pos + dataSize),
     };
 };
-export const psshBoxesAreEqual = (a: PsshBox, b: PsshBox) => (a.systemId === b.systemId
-    && uint8ArraysAreEqual(a.data, b.data));
+export const psshBoxesAreEqual = (a: PsshBox, b: PsshBox) => {
+    if (a.systemId !== b.systemId || !uint8ArraysAreEqual(a.data, b.data)) {
+        return false;
+    }
+    const aKeyIds = a.keyIds;
+    const bKeyIds = b.keyIds;
+    if (!aKeyIds || !bKeyIds) {
+        return aKeyIds === bKeyIds;
+    }
+    return aKeyIds.length === bKeyIds.length && aKeyIds.every((keyId, i) => keyId === bKeyIds[i]);
+};
