@@ -82,7 +82,6 @@ function av1FragmentStarts(data: Buffer) {
         if (boxPayload(children, 'tfhd').readUInt32BE(4) === 1) {
           const run = boxPayload(children, 'trun')
 
-          // oxlint-disable-next-line no-bitwise -- trun full-box flags.
           compositionFlags.push(run.readUIntBE(1, 3) & 0x08_00)
           starts.push(boxPayload(children, 'tfdt').readBigUInt64BE(4))
         }

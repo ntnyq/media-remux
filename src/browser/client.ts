@@ -76,7 +76,6 @@ async function removeJob(
 
       // Worker termination can precede release of its OPFS locks. Retry only
       // transient lock errors, with a bounded delay before each new attempt.
-      // oxlint-disable-next-line promise/avoid-new
       await new Promise(resolve => {
         setTimeout(resolve, 50 * (attempt + 1))
       })
@@ -174,7 +173,6 @@ export async function runMediaJob(
     const activeWorker = worker
 
     // Adapt Worker events to one completion promise, cleaning up every listener.
-    // oxlint-disable-next-line promise/avoid-new
     const result = await new Promise<RemuxResult>((resolve, reject) => {
       let isSettled = false
 

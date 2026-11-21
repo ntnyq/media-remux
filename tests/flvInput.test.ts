@@ -1,4 +1,3 @@
-/* oxlint-disable no-bitwise -- Binary media fields require masks, shifts, and flag manipulation. */
 import { expect, test } from 'vitest'
 import { concatMedia, remuxMedia } from '../src'
 import { openMediaInput } from '../src/core/input/mediaInput'

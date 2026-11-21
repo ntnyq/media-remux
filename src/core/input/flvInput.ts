@@ -1,4 +1,3 @@
-/* oxlint-disable no-bitwise -- Binary media fields require masks, shifts, and flag manipulation. */
 /* oxlint-disable no-await-in-loop -- FLV tags are read in file order with bounded memory. */
 import { checkAbort } from '../../abort'
 import { parseAacAudioSpecificConfig } from '../../vendor/mediabunny/shared/aac-misc'

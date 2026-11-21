@@ -42,7 +42,6 @@ test.each([1, 16])(
 test('propagates a null sink rejection and unlocks the stream', async () => {
   const writable = new WritableStream({
     async write() {
-      // oxlint-disable-next-line no-throw-literal -- Exercise an arbitrary WritableStream rejection reason.
       throw null
     },
   })
