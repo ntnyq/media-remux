@@ -10,6 +10,54 @@ import type { RemuxOptions, RemuxProgress, RemuxResult } from '../src'
 import { fixture, diskStorage, memoryTarget, packets } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
+test('checks multiple MP4 sample descriptions only on selected tracks', async () => {
+  const input = await fixture('progressive.mp4')
+  const original = Buffer.from(await input.arrayBuffer())
+  const moovStart = original.indexOf('moov') - 4
+  const moovEnd = moovStart + original.readUInt32BE(moovStart)
+  const stsd = original.indexOf('stsd', moovStart)
+  const entryStart = stsd + 12
+  const entry = original.subarray(
+    entryStart,
+    entryStart + original.readUInt32BE(entryStart),
+  )
+  // Add a second valid AVC sample entry and relocate moov to preserve stco.
+  for (const type of ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd']) {
+    const offset = original.indexOf(type, moovStart) - 4
+    original.writeUInt32BE(original.readUInt32BE(offset) + entry.length, offset)
+  }
+  original.writeUInt32BE(2, stsd + 8)
+  const moov = Buffer.concat([
+    original.subarray(moovStart, entryStart),
+    entry,
+    original.subarray(entryStart, moovEnd),
+  ])
+  original.writeUInt32BE(moovEnd - moovStart, moovStart)
+  original.write('free', moovStart + 4, 'ascii')
+  const multipleDescriptions = new Blob([original, moov])
+  const target = memoryTarget()
+  await remuxMedia(multipleDescriptions, {
+    tracks: 'audio',
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+
+  const source = await packets(input, 'audio')
+  const actual = await packets(target.blob(), 'audio')
+  expect(actual.map(packet => packet.data)).toStrictEqual(
+    source.map(packet => packet.data),
+  )
+  const videoTarget = memoryTarget()
+  await expect(
+    remuxMedia(multipleDescriptions, {
+      tracks: 'video',
+      storage: await diskStorage(),
+      writable: videoTarget.writable,
+    }),
+  ).rejects.toThrow(/Multiple MP4 sample descriptions/u)
+  expect(videoTarget.state.writes).toHaveLength(0)
+})
+
 test('keeps the submitted segment list when the caller clears its selection during progress', async () => {
   const video = await fixture('video.mp4')
   const inputs = [video, video]

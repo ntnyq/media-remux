@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { concatMedia, remuxMedia } from '../src'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 import { indexedMp4 } from './helpers/mp4Index'
@@ -23,9 +23,9 @@ test('plans decode lead before writing an earlier segment with no reordering', a
   const bytes = Buffer.from(await target.blob().arrayBuffer())
   const edit = bytes.indexOf('elst')
   expect(edit).toBeGreaterThan(0)
-  expect(bytes[edit + 4]).toBe(0)
+  expect(bytes[edit + 4]).toBe(1)
   // The later B-frame needs decode lead even though the first segment did not.
-  expect(bytes.readInt32BE(edit + 16)).toBeGreaterThanOrEqual(1024)
+  expect(bytes.readBigInt64BE(edit + 20)).toBeGreaterThanOrEqual(1024n)
   const actual = await packets(target.blob(), 'audio')
   const expected = [0, 1024, 2048, 3072, 5120, 4096]
   expect(actual).toHaveLength(expected.length)
@@ -33,6 +33,46 @@ test('plans decode lead before writing an earlier segment with no reordering', a
     expect(packet.timestamp).toBeCloseTo(expected[index]! / 48_000, 8)
   }
   expect(result.duration).toBeCloseTo(6144 / 48_000, 8)
+})
+
+test.each([2, 16])(
+  'can remux %s concatenated fractional-rate clips with AAC at a different timescale',
+  async count => {
+    const input = await fixture('fractional-av.mp4')
+    const target = memoryTarget()
+    const result = await concatMedia(
+      Array.from({ length: count }, () => input),
+      {
+        writable: target.writable,
+        storage: await diskStorage(),
+      },
+    )
+    // With 16 clips the first output page is flushed before moov is patched.
+    expect(target.state.writes[0] === 1024 * 1024).toBe(count === 16)
+
+    const repeated = memoryTarget()
+    const repeatedResult = await remuxMedia(target.blob(), {
+      writable: repeated.writable,
+      storage: await diskStorage(),
+    })
+    expect(repeatedResult.bytesProcessed).toBe(result.bytesProcessed)
+    expect(repeatedResult.duration).toBeCloseTo(result.duration, 4)
+    expect(repeated.state.isClosed).toBe(true)
+  },
+)
+
+test('uses planned decode timing without sorting the long GOP', async () => {
+  const input = await fixture('long-gop.mp4')
+  const storage = await diskStorage()
+  const sort = vi.spyOn(storage.fragmentSamples, 'sort')
+  const sorted = vi.spyOn(storage.fragmentSamples, 'sorted')
+  const target = memoryTarget()
+  await remuxMedia(input, { storage, writable: target.writable })
+  expect(sort).not.toHaveBeenCalled()
+  expect(sorted).not.toHaveBeenCalled()
+  await expect(packets(target.blob(), 'video')).resolves.toHaveLength(
+    (await packets(input, 'video')).length,
+  )
 })
 
 test('keeps fractional decode ticks aligned across fragments and segment boundaries', async () => {

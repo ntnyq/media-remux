@@ -148,6 +148,39 @@ async function run() {
         await result.dispose()
       }
     }
+    const fractionalAv = await fixture('fractional-av.mp4')
+    const concatenated = await runMediaJob(
+      {
+        operation: 'concat',
+        inputs: Array.from({ length: 16 }, () => fractionalAv),
+      },
+      { createWorker, directory },
+    )
+    try {
+      assert(
+        concatenated.file.size > 1024 * 1024,
+        'Fractional A/V output did not flush its initial OPFS page',
+      )
+      const repeated = await runMediaJob(
+        { operation: 'remux', input: concatenated.file },
+        { createWorker, directory },
+      )
+      try {
+        assert(
+          repeated.bytesProcessed === concatenated.bytesProcessed &&
+            Math.abs(repeated.duration - concatenated.duration) < 0.001,
+          'Fractional A/V changed during repeated remux',
+        )
+        checks.push({
+          operation: 'fractional-av-round-trip',
+          size: concatenated.file.size,
+        })
+      } finally {
+        await repeated.dispose()
+      }
+    } finally {
+      await concatenated.dispose()
+    }
     for (const mutation of [
       'inputs',
       'options',

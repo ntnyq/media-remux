@@ -77,8 +77,9 @@ export interface RemuxOptions {
   storage: RemuxStorage
 
   /**
-   * Optional cancellation signal checked during inspection, copying, and storage
-   * operations. Cancellation propagates the signal's original abort reason.
+   * Optional cancellation signal checked during inspection, copying, storage,
+   * and immediately before committing the output stream. Cancellation before
+   * commit propagates the signal's original abort reason.
    */
   signal?: AbortSignal
 

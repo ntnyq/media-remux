@@ -60,6 +60,8 @@ type InternalTrack = {
      * Zero duration is open-ended.
      */
     editListMediaEdit: { mediaTime: number; segmentDuration: number } | null;
+    /** Unsupported playback features affect only callers that read this track. */
+    unsupportedTrackFeature: string | null;
     /** Set when the track's samples are encrypted using a supported scheme (cenc/cens/cbcs), parsed from sinf/tenc. */
     encryptionInfo: TrackEncryptionInfo | null;
     /** For non-fragmented encrypted tracks: parsed saiz+saio from stbl; aux info is fetched lazily on first use. */
@@ -411,6 +413,7 @@ export class IsobmffDemuxer extends Demuxer {
                 editListPreviousSegmentDurations: foreignTrack.editListPreviousSegmentDurations,
                 editListOffset: foreignTrack.editListOffset,
                 editListMediaEdit: foreignTrack.editListMediaEdit,
+                unsupportedTrackFeature: foreignTrack.unsupportedTrackFeature,
                 encryptionInfo: foreignTrack.encryptionInfo,
                 encryptionAuxInfo: null,
                 frmaCodecString: null,
@@ -779,6 +782,7 @@ export class IsobmffDemuxer extends Demuxer {
                         editListPreviousSegmentDurations: 0,
                         editListOffset: 0,
                         editListMediaEdit: null,
+                        unsupportedTrackFeature: null,
                         encryptionInfo: null,
                         encryptionAuxInfo: null,
                         frmaCodecString: null,
@@ -863,14 +867,15 @@ export class IsobmffDemuxer extends Demuxer {
                             : readI32Be(slice);
                         const mediaRate = readFixed_16_16(slice);
                         if (relevantEntryFound) {
-                            throw new Error('Unsupported MP4 edit list: multiple edits after the first media edit.');
+                            track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list: multiple edits after the first media edit.';
+                            continue;
                         }
                         if (mediaTime === -1) {
                             previousSegmentDurations += segmentDuration;
                             continue;
                         }
                         if (mediaRate !== 1) {
-                            throw new Error('Unsupported MP4 edit list entry: media rate must be 1.');
+                            track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list entry: media rate must be 1.';
                         }
                         track.editListPreviousSegmentDurations = previousSegmentDurations;
                         track.editListOffset = mediaTime;
@@ -878,7 +883,7 @@ export class IsobmffDemuxer extends Demuxer {
                         relevantEntryFound = true;
                     }
                     if (entryCount > 0 && !relevantEntryFound) {
-                        throw new Error('Unsupported MP4 edit list: no media edit.');
+                        track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list: no media edit.';
                     }
                 }
                 ;
@@ -989,13 +994,18 @@ export class IsobmffDemuxer extends Demuxer {
                     const entries = readU32Be(slice);
                     // A remux track has one decoder configuration for its whole lifetime.
                     if (entries > 1) {
-                        throw new Error('Multiple MP4 sample descriptions are unsupported.');
+                        track.unsupportedTrackFeature ??= 'Multiple MP4 sample descriptions are unsupported.';
                     }
                     for (let i = 0; i < entries; i++) {
                         const sampleBoxStartPos = slice.filePos;
                         const sampleBoxInfo = readBoxHeader(slice);
-                        if (!sampleBoxInfo) {
-                            break;
+                        if (!sampleBoxInfo || sampleBoxStartPos + sampleBoxInfo.totalSize > boxEndPos) {
+                            throw new RangeError('Invalid MP4 sample description box.');
+                        }
+                        if (i > 0) {
+                            // Keep the first description for track discovery.
+                            slice.filePos = sampleBoxStartPos + sampleBoxInfo.totalSize;
+                            continue;
                         }
                         track.internalCodecId = sampleBoxInfo.name;
                         const lowercaseBoxName = sampleBoxInfo.name.toLowerCase();
@@ -2641,7 +2651,13 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             throw new Error('Unsupported MP4 edit list: media edit trims sample presentation.');
         }
     }
+    private assertSupportedTrack() {
+        if (this.internalTrack.unsupportedTrackFeature) {
+            throw new Error(this.internalTrack.unsupportedTrackFeature);
+        }
+    }
     private async fetchPacketForSampleIndex(sampleIndex: number, options: PacketRetrievalOptions) {
+        this.assertSupportedTrack();
         if (sampleIndex === -1) {
             return null;
         }
@@ -2687,6 +2703,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         return packet;
     }
     private async fetchPacketInFragment(fragment: Fragment, sampleIndex: number, options: PacketRetrievalOptions) {
+        this.assertSupportedTrack();
         if (sampleIndex === -1) {
             return null;
         }

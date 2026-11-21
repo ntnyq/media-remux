@@ -64,8 +64,9 @@ test.each([
     expect(bytes.toString('ascii', entry + 4, entry + 8)).toBe('avc1')
     expect(bytes.readUInt16BE(entry + 32)).toBe(width)
     expect(bytes.readUInt16BE(entry + 34)).toBe(height)
-    expect(bytes.readUInt32BE(tkhd + 80) / 65_536).toBe(width)
-    expect(bytes.readUInt32BE(tkhd + 84) / 65_536).toBe(height)
+    const dimensions = tkhd + (bytes[tkhd + 4] === 1 ? 92 : 80)
+    expect(bytes.readUInt32BE(dimensions) / 65_536).toBe(width)
+    expect(bytes.readUInt32BE(dimensions + 4) / 65_536).toBe(height)
     const pasp = bytes.indexOf('pasp')
     const pixelAspectRatio =
       pasp === -1

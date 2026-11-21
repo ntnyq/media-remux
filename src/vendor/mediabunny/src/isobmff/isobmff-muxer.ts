@@ -71,6 +71,7 @@ export type IsobmffTrackData = {
     lastTimescaleUnits: number | null;
     lastSample: Sample | null;
     startTimestampOffset: number | null;
+    writtenPresentationEnd?: number;
     finalizedChunks: Chunk[];
     fragmentIndexCount: number;
     storedQueueStart: number;
@@ -204,6 +205,7 @@ export class IsobmffMuxer extends Muxer {
     creationTime = Math.floor(Date.now() / 1000) + TIMESTAMP_OFFSET;
     private finalizedChunks: Chunk[] = [];
     private wroteFragmentedHeader = false;
+    private fragmentMovieHeader: { offset: number; size: number } | null = null;
     private nextFragmentNumber = 1;
     // Only relevant for fragmented files, to make sure new fragments start with the highest timestamp seen so far
     private maxWrittenTimestamp = -Infinity;
@@ -225,7 +227,7 @@ export class IsobmffMuxer extends Muxer {
         const release = await this.mutex.acquire();
         if (!this.isCmaf) {
             this.writer = await this.output._getRootWriter(target => (this.formatOptions.fastStart !== undefined
-                ? this.formatOptions.fastStart === 'fragmented'
+                ? this.formatOptions.fastStart === 'fragmented' && this.formatOptions._fragmentTrackTimings === undefined
                 : target instanceof BufferTarget // Since if this is the case we'll use 'in-memory'
             ));
             this.boxWriter = new IsobmffBoxWriter(this.writer);
@@ -419,7 +421,7 @@ export class IsobmffMuxer extends Muxer {
             compositionTimeOffsetTable: [],
             lastTimescaleUnits: null,
             lastSample: null,
-            startTimestampOffset: null,
+            startTimestampOffset: this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart ?? null,
             finalizedChunks: [],
             fragmentIndexCount: 0,
             storedQueueStart: 0, storedQueueEnd: 0, storedGopStart: 0, storedGopCount: 0,
@@ -501,7 +503,7 @@ export class IsobmffMuxer extends Muxer {
             compositionTimeOffsetTable: [],
             lastTimescaleUnits: null,
             lastSample: null,
-            startTimestampOffset: null,
+            startTimestampOffset: this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart ?? null,
             finalizedChunks: [],
             fragmentIndexCount: 0,
             storedQueueStart: 0, storedQueueEnd: 0, storedGopStart: 0, storedGopCount: 0,
@@ -541,7 +543,7 @@ export class IsobmffMuxer extends Muxer {
             compositionTimeOffsetTable: [],
             lastTimescaleUnits: null,
             lastSample: null,
-            startTimestampOffset: null,
+            startTimestampOffset: this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart ?? null,
             finalizedChunks: [],
             fragmentIndexCount: 0,
             storedQueueStart: 0, storedQueueEnd: 0, storedGopStart: 0, storedGopCount: 0,
@@ -749,8 +751,10 @@ export class IsobmffMuxer extends Muxer {
         if (!track.storedGopCount)
             return;
         const store = this.formatOptions._fragmentSampleStore!;
-        await store.sort(track.track.id, track.storedGopStart, track.storedGopCount);
         const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.track.id)?.decodeStart;
+        if (!track.storedGopHasDecodeDurations || (decodeStart === undefined && !track.lastSample)) {
+            await store.sort(track.track.id, track.storedGopStart, track.storedGopCount);
+        }
         track.startTimestampOffset ??= Math.min(decodeStart ?? await store.sorted(track.track.id, 0), 0);
         for (let at = 0; at < track.storedGopCount; at++) {
             const id = track.storedGopStart + at;
@@ -816,6 +820,10 @@ export class IsobmffMuxer extends Muxer {
             const firstFlags = sampleFlags(first);
             const referenceFlags = sampleFlags(reference);
             const firstComposition = intoTimescale(first.timestamp - first.decodeTimestamp, track.timescale);
+            const firstDecodeTime = intoTimescale(first.decodeTimestamp, track.timescale);
+            let decodeTime = firstDecodeTime;
+            let latestPresentationTime = -Infinity;
+            let latestPresentationEnd = -Infinity;
             let differentDurations = false, differentSizes = false, differentFlags = false;
             let sameFollowingFlags = true, compositionPresent = firstComposition !== 0;
             let syncIndex = -1, syncTimestamp = 0;
@@ -838,10 +846,21 @@ export class IsobmffMuxer extends Muxer {
                     throw new RangeError(`MP4 composition offset exceeds the ${unsignedComposition ? 'unsigned' : 'signed'} 32-bit field range.`);
                 }
                 compositionPresent ||= composition !== firstComposition;
+                const presentationTime = decodeTime + composition;
+                decodeTime += sample.timescaleUnitsToNextSample;
+                if (presentationTime >= latestPresentationTime) {
+                    latestPresentationTime = presentationTime;
+                    latestPresentationEnd = presentationTime + sample.timescaleUnitsToNextSample;
+                }
                 if (syncIndex === -1 && sample.type === 'key') {
                     syncIndex = at;
-                    syncTimestamp = sample.timestamp;
+                    syncTimestamp = presentationTime;
                 }
+            }
+            if (unsignedComposition) {
+                // Every other presentation duration ends at another PTS in the
+                // same fragment, while the last PTS uses its encoded sample delta.
+                track.writtenPresentationEnd = Math.max(track.writtenPresentationEnd ?? 0, latestPresentationEnd);
             }
             const firstFlagsPresent = firstFlags !== referenceFlags && sameFollowingFlags;
             const flagsPresent = differentFlags && !firstFlagsPresent;
@@ -852,7 +871,7 @@ export class IsobmffMuxer extends Muxer {
                 | (differentSizes ? 0x200 : 0) | (flagsPresent ? 0x400 : 0) | (compositionPresent ? 0x800 : 0);
             summaries.push({ track, chunk, count, start, sampleAt, first, reference, firstFlags,
                 differentDurations, differentSizes, flagsPresent, compositionPresent, firstFlagsPresent,
-                entrySize, trunSize, trafSize, flags, syncIndex, syncTimestamp, absolute: false, offset: 0 });
+                entrySize, trunSize, trafSize, flags, syncIndex, syncTimestamp, firstDecodeTime, absolute: false, offset: 0 });
         }
         let moofSize = summaries.reduce((sum, summary) => sum + summary.trafSize, 24);
         let relativeOffset = moofSize + 16 + 8 * summaries.length;
@@ -905,7 +924,7 @@ export class IsobmffMuxer extends Muxer {
             writer.write(tfhd.bytes);
             const tfdt = box(20, 'tfdt');
             tfdt.view.setUint32(8, 0x01000000);
-            tfdt.view.setBigUint64(12, BigInt(intoTimescale(summary.first.decodeTimestamp, track.timescale)));
+            tfdt.view.setBigUint64(12, BigInt(summary.firstDecodeTime));
             writer.write(tfdt.bytes);
             const trun = box(summary.firstFlagsPresent ? 24 : 20, 'trun');
             trun.view.setUint32(0, summary.trunSize);
@@ -966,7 +985,7 @@ export class IsobmffMuxer extends Muxer {
                 offset += length;
             }
             if (summary.syncIndex !== -1) {
-                const timestamp = intoTimescale(summary.syncTimestamp, summary.track.timescale);
+                const timestamp = summary.syncTimestamp;
                 if (!Number.isSafeInteger(timestamp) || timestamp < 0 || !Number.isSafeInteger(moofOffset) || moofOffset < 0)
                     throw new RangeError('Unsafe fragment index timestamp or offset.');
                 const entry = new Uint8Array(28), view = new DataView(entry.buffer);
@@ -1306,6 +1325,12 @@ export class IsobmffMuxer extends Muxer {
             this.ensureOneEnabledTrack();
             // Write the moov box now that we have all decoder configs
             const movieBox = moov(this);
+            if (this.formatOptions._fragmentTrackTimings) {
+                this.fragmentMovieHeader = {
+                    offset: boxWriter.writer.getPos(),
+                    size: boxWriter.measureBox(movieBox),
+                };
+            }
             boxWriter.writeBox(movieBox);
             if (this.formatOptions.onMoov) {
                 const { data, start } = boxWriter.writer.stopTrackingWrites();
@@ -1759,6 +1784,17 @@ export class IsobmffMuxer extends Muxer {
                 }
                 else if (this.formatOptions._fragmentIndexStore) {
                     await this.writeStoredFragmentIndex();
+                    if (this.fragmentMovieHeader) {
+                        // The first moov used inspected durations; the emitted integer
+                        // sample timing can round differently at a presentation tail.
+                        const { offset, size } = this.fragmentMovieHeader;
+                        const movieBox = moov(this);
+                        assert(this.boxWriter.measureBox(movieBox) === size);
+                        const end = this.writer.getPos();
+                        this.writer.seek(offset);
+                        this.boxWriter.writeBox(movieBox);
+                        this.writer.seek(end);
+                    }
                 }
                 else {
                     // Append the mfra box to the end of the file for better random access

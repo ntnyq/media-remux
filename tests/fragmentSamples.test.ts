@@ -97,11 +97,12 @@ function memoryFiles() {
     kind: string
     bytes: Uint8Array<ArrayBuffer>
     closed: number
+    bytesWritten: number
   }[] = []
   let fail: 'read' | 'write' | 'truncate' | 'close' | undefined
   const failure = new DOMException('disk unavailable', 'QuotaExceededError')
   const store = createDiskFragmentSamples(async (_track, kind) => {
-    const file = { kind, bytes: new Uint8Array(0), closed: 0 }
+    const file = { kind, bytes: new Uint8Array(0), closed: 0, bytesWritten: 0 }
     files.push(file)
     return {
       async read(data, position) {
@@ -125,6 +126,7 @@ function memoryFiles() {
           file.bytes = bytes
         }
         file.bytes.set(data.subarray(0, count), position)
+        file.bytesWritten += count
         return count
       },
       async truncate(length) {
@@ -152,6 +154,33 @@ function memoryFiles() {
     },
   }
 }
+
+test('releases a queued tail with linear write traffic and preserves logical offsets', async () => {
+  const { store, files } = memoryFiles()
+  const count = 128
+  const sampleSize = 1024
+  const payloadBytes = count * sampleSize
+  try {
+    for (let index = 0; index < count; index++) {
+      const payload = new Uint8Array(sampleSize).fill(index)
+      await store.append(1, sample(index, payload.length), payload)
+    }
+    for (let index = 0; index < count; index++) {
+      const offset = index * sampleSize
+      assert.equal((await store.get(1, index)).mediaOffset, offset)
+      assert.equal((await store.readMedia(1, offset, 1))[0], index)
+      await store.release(1, index + 1)
+    }
+    const media = files.find(file => file.kind === 'media')!
+    assert.equal(media.bytes.length, 0)
+    assert.ok(media.bytesWritten <= 2 * payloadBytes)
+    const records = files.find(file => file.kind === 'records')!
+    assert.equal(records.bytes.length, 0)
+    assert.ok(records.bytesWritten <= 2 * count * 56)
+  } finally {
+    await store.dispose()
+  }
+})
 
 test('retries partial positional I/O across media pages and sorts independent tracks', async () => {
   const { store, files } = memoryFiles()

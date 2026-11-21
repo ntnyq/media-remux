@@ -219,9 +219,13 @@ interface Track {
   pages: Page[]
   base: number
   end: number
+  /** Logical ID at physical file offset zero, including unreclaimed records. */
+  recordFileBase: number
   recordBytes: number
   mediaBase: number
   mediaEnd: number
+  /** Logical byte offset at physical file offset zero. */
+  mediaFileBase: number
   mediaBuffer: Uint8Array<ArrayBuffer>
   mediaUsed: number
   mediaWritten: number
@@ -399,9 +403,11 @@ export function createDiskFragmentSamples(
         pages: [],
         base: 0,
         end: 0,
+        recordFileBase: 0,
         recordBytes: 0,
         mediaBase: 0,
         mediaEnd: 0,
+        mediaFileBase: 0,
         mediaBuffer: new Uint8Array(IO_SIZE),
         mediaUsed: 0,
         mediaWritten: 0,
@@ -443,7 +449,7 @@ export function createDiskFragmentSamples(
 
     const length = Math.min(
       PAGE_SIZE,
-      (track.end - track.base) * RECORD_SIZE - page.index * PAGE_SIZE,
+      (track.end - track.recordFileBase) * RECORD_SIZE - page.index * PAGE_SIZE,
     )
     if (length > 0) {
       await transferFileBytes(
@@ -476,7 +482,7 @@ export function createDiskFragmentSamples(
       throw new RangeError('Invalid sample storage reference.')
     }
 
-    const index = Math.floor((id - track.base) / RECORDS_PER_PAGE)
+    const index = Math.floor((id - track.recordFileBase) / RECORDS_PER_PAGE)
     let page = track.pages.find(candidate => candidate.index === index)
     if (page) {
       track.pages.splice(track.pages.indexOf(page), 1)
@@ -516,7 +522,7 @@ export function createDiskFragmentSamples(
   /**
    * Creates a fixed-record view over an already located sample page.
    *
-   * @param track - Track supplying the retained logical base ID.
+   * @param track - Track supplying the physical file's logical base ID.
    * @param page - Cached page known to contain the sample.
    * @param id - Valid logical sample ID corresponding to this page.
    * @returns A DataView covering exactly one 56-byte descriptor record.
@@ -524,7 +530,7 @@ export function createDiskFragmentSamples(
   function getSampleView(track: Track, page: Page, id: number) {
     return new DataView(
       page.bytes.buffer,
-      ((id - track.base) % RECORDS_PER_PAGE) * RECORD_SIZE,
+      ((id - track.recordFileBase) % RECORDS_PER_PAGE) * RECORD_SIZE,
       RECORD_SIZE,
     )
   }
@@ -1030,7 +1036,7 @@ export function createDiskFragmentSamples(
         await transferFileBytes(
           track.files.media,
           bytes,
-          offset - track.mediaBase,
+          offset - track.mediaFileBase,
           false,
         )
 
@@ -1039,13 +1045,13 @@ export function createDiskFragmentSamples(
     },
 
     /**
-     * Discards a consumed sample prefix, compacts retained records and media,
-     * and clears sort results when the retained boundary advances.
+     * Discards a consumed sample prefix and clears cached sort results.
+     * Compacts each file when its discarded prefix is at least as large as its tail.
      *
      * @param trackId - Integer track identifier from 1 through 0xffffffff.
      * @param before - Exclusive logical sample ID boundary within the retained
      * range, including the next ID that append() would assign.
-     * @returns A promise resolving after compaction, or immediately for an unchanged base.
+     * @returns A promise resolving when the release completes, including any compaction.
      * @throws If the boundary is invalid or queued compaction and truncation fail.
      */
     release(trackId: number, before: number) {
@@ -1063,34 +1069,46 @@ export function createDiskFragmentSamples(
           return
         }
 
-        // Flush dirty pages before moving bytes; cached page indices refer to
-        // the old physical layout and must be discarded after the flush.
         const last = await get(track, before - 1)
+        const mediaBase = last.mediaOffset + last.size
+        const releasedRecords = before - track.recordFileBase
+        const retainedRecords = track.end - before
+        const releasedMediaBytes = mediaBase - track.mediaFileBase
+        const retainedMediaBytes = track.mediaEnd - mediaBase
 
-        for (const page of track.pages) {
-          await flushPage(track, page)
+        // Charge each moved byte to a byte discarded in this compaction.
+        // Releases below the threshold only advance the logical read bounds.
+        if (releasedRecords >= retainedRecords) {
+          for (const page of track.pages) {
+            await flushPage(track, page)
+          }
+
+          await compactFile(
+            track.files.records,
+            releasedRecords * RECORD_SIZE,
+            (track.end - track.recordFileBase) * RECORD_SIZE,
+          )
+          track.pages = []
+          track.recordFileBase = before
+          track.recordBytes = retainedRecords * RECORD_SIZE
         }
 
-        track.pages = []
-        await flushMedia(track)
-        await compactFile(
-          track.files.records,
-          (before - track.base) * RECORD_SIZE,
-          (track.end - track.base) * RECORD_SIZE,
-        )
-        const mediaBase = last.mediaOffset + last.size
-        await compactFile(
-          track.files.media,
-          mediaBase - track.mediaBase,
-          track.mediaEnd - track.mediaBase,
-        )
+        if (
+          releasedMediaBytes > 0 &&
+          releasedMediaBytes >= retainedMediaBytes
+        ) {
+          await flushMedia(track)
+          await compactFile(
+            track.files.media,
+            releasedMediaBytes,
+            track.mediaEnd - track.mediaFileBase,
+          )
+          track.mediaFileBase = mediaBase
+          track.mediaWritten = retainedMediaBytes
+        }
 
-        // Only physical file positions change. Retained sample IDs and media
-        // offsets stay logical, with the new bases translating them on access.
-        track.recordBytes = (track.end - before) * RECORD_SIZE
         track.base = before
         track.mediaBase = mediaBase
-        track.mediaWritten = track.mediaEnd - mediaBase
         track.sortedCount = 0
         track.sortedPage = undefined
         if (track.externalSort) {

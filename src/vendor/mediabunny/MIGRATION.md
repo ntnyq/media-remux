@@ -27,10 +27,11 @@ Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 bo
 - Enums use equivalent constant objects/type aliases; constructor parameter properties use explicit fields/assignments for `erasableSyntaxOnly`.
 - Optional internal fields admit `undefined` under `exactOptionalPropertyTypes`. Unknown WebCodecs color fields use `null`; absent decoder descriptions are omitted.
 - Required `Symbol.dispose` initialization precedes class definitions. Packet iterators implement `Symbol.asyncDispose` for current TypeScript contracts.
-- Stream cancellation aborts/unlocks its writer; successful finalization closes/unlocks it.
+- Stream cancellation aborts/unlocks its writer. After all writes settle, successful finalization checks cancellation before committing the stream.
 - Source close promises include asynchronous muxer work. Cancellation/finalization wait for every source before releasing targets, including when a source fails; cancellation attempts every target cleanup before propagating an error.
-- Disk-backed fragment output rejects sample durations outside unsigned 32-bit range and composition offsets outside signed 32-bit range before writing fragment headers, preventing silent field truncation.
-- Multiple MP4 sample descriptions are rejected: one output track has one configuration.
+- Disk-backed fragment output checks sample durations and composition offsets before writing fragment headers. Core jobs use unsigned 32-bit values for both fields. The compatibility path without preflight timing uses signed composition offsets.
+- Fragmented output patches movie and track durations before committing, using integer presentation ends from the written fragments to keep edit lists consistent with quantized samples. GOPs with an explicit decode origin and decode durations can skip timestamp sorting.
+- Selected tracks with multiple MP4 sample descriptions are rejected: one output track has one configuration. Unsupported edit lists and multiple sample descriptions on discarded tracks do not block extraction.
 - MP4 edit lists reject empty-only lists, additional entries after the first media edit, and non-unit media rates during preflight instead of logging a warning and silently changing playback. Edits also reject when they hide whole video frames at the start or trim a sample's presentation end, checked during regular and fragmented metadata-only packet inspection. Original media-edit timing is retained separately from adjusted offsets, preserving leading empty edits, AAC pre-roll, and movie-timescale rounding. Zero-duration media edits remain open-ended.
 - AAC configuration parsing exposes explicit and implicit SBR signaling so the FLV adapter can reject HE-AAC rather than infer AAC-LC packet duration from the SBR output sample rate.
 - Repeated track fragments for the same track within one moof reject during preflight instead of warning and skipping later samples.

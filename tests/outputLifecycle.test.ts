@@ -1,12 +1,13 @@
 import { setImmediate } from 'node:timers/promises'
 import { expect, test, vi } from 'vitest'
-import { remuxMedia } from '../src'
+import { combineTracks, remuxMedia } from '../src'
 import { EncodedAudioPacketSource } from '../src/vendor/mediabunny/src/media-source'
 import { Output } from '../src/vendor/mediabunny/src/output'
 import { Mp4OutputFormat } from '../src/vendor/mediabunny/src/output-format'
 import { StreamTarget } from '../src/vendor/mediabunny/src/target'
 import { temporaryFragmentSamples } from './helpers/fragmentSamples'
-import { diskStorage, fixture, memoryTarget } from './helpers/media'
+import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { indexedMp4 } from './helpers/mp4Index'
 
 test('a final progress failure leaves no background access after sample storage disposal', async () => {
   const samples = await temporaryFragmentSamples()
@@ -45,6 +46,100 @@ test('a final progress failure leaves no background access after sample storage 
   } finally {
     await samples.dispose()
     read.mockRestore()
+  }
+})
+
+test.each([
+  { phase: 'write', fails: false },
+  { phase: 'close', fails: false },
+  { phase: 'close', fails: true },
+] as const)(
+  'settles cancellation at the output commit boundary during $phase (close fails: $fails)',
+  async ({ phase, fails }) => {
+    const controller = new AbortController()
+    const reason = new Error('cancel output')
+    const closeFailure = new Error('output did not commit')
+    const state = { closed: false, aborted: false }
+    const writable = new WritableStream(
+      {
+        async write() {
+          if (phase === 'write') {
+            await setImmediate()
+            controller.abort(reason)
+          }
+        },
+        async close() {
+          if (phase === 'close') {
+            await setImmediate()
+            controller.abort(reason)
+          }
+          if (fails) {
+            throw closeFailure
+          }
+          state.closed = true
+        },
+        abort() {
+          state.aborted = true
+        },
+      },
+      { highWaterMark: 4 },
+    )
+    const result = remuxMedia(await fixture('vfr-bframes.mp4'), {
+      writable,
+      storage: await diskStorage(),
+      signal: controller.signal,
+    })
+    const outcome = await result
+      .then(({ mimeType }) => mimeType)
+      .catch((error: unknown) => error)
+    const expected = phase === 'write' ? reason : 'video/mp4'
+    expect(outcome).toBe(fails ? closeFailure : expected)
+    expect(state).toStrictEqual({
+      closed: phase === 'close' && !fails,
+      aborted: phase === 'write',
+    })
+    expect(writable.locked).toBe(false)
+  },
+)
+
+test('emits audio fragments as the final track continues after video ends', async () => {
+  const video = await fixture('bt709-full-range.flv')
+  const sampleCount = 640
+  const audio = (await indexedMp4({ samples: sampleCount })).blob()
+  const storage = await diskStorage()
+  const { append, release } = storage.fragmentSamples
+  let audioAppended = 0
+  let audioReleased = 0
+  let peakQueued = 0
+  const appendProbe = vi
+    .spyOn(storage.fragmentSamples, 'append')
+    .mockImplementation(async (...args) => {
+      const id = await append(...args)
+      if (args[0] === 2) {
+        audioAppended++
+        peakQueued = Math.max(peakQueued, audioAppended - audioReleased)
+      }
+      return id
+    })
+  const releaseProbe = vi
+    .spyOn(storage.fragmentSamples, 'release')
+    .mockImplementation(async (...args) => {
+      await release(...args)
+      if (args[0] === 2) {
+        ;[, audioReleased] = args
+      }
+    })
+  try {
+    const target = memoryTarget()
+    await combineTracks(video, audio, { storage, writable: target.writable })
+    expect(audioReleased).toBe(sampleCount)
+    expect(peakQueued).toBeLessThan(128)
+    await expect(packets(target.blob(), 'audio')).resolves.toHaveLength(
+      sampleCount,
+    )
+  } finally {
+    appendProbe.mockRestore()
+    releaseProbe.mockRestore()
   }
 })
 

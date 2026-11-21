@@ -119,8 +119,7 @@ export async function concatMedia(
    * Reopens inspected inputs one at a time and releases each after consumption.
    *
    * @returns An asynchronous generator that completes without a return value.
-   * @yields {{ tracks: PacketTrack[], info: SegmentInfo }} Selected tracks paired
-   * with the segment's validated timeline.
+   * @yields {{ tracks: PacketTrack[], info: SegmentInfo, isLast: boolean }} The selected tracks and timeline.
    * @throws If reopening, track selection, timeline lookup, or cancellation fails.
    */
   async function* segments() {
@@ -133,7 +132,11 @@ export async function concatMedia(
           throw new Error('Missing segment timeline.')
         }
 
-        yield { tracks: selectTracks(input, settings.tracks), info }
+        yield {
+          tracks: selectTracks(input, settings.tracks),
+          info,
+          isLast: index + 1 === blobs.length,
+        }
       } finally {
         input.dispose()
       }
@@ -221,9 +224,8 @@ export async function combineTracks(
  * @param tracks - Ordered video and audio tracks to emit together.
  * @param info - Validated shared presentation timeline in seconds.
  * @returns An asynchronous generator that completes without a return value.
- * @yields {{ tracks: PacketTrack[], info: SegmentInfo }} The supplied tracks and
- * timeline as a single segment.
+ * @yields {{ tracks: PacketTrack[], info: SegmentInfo, isLast: boolean }} The single output segment.
  */
 async function* singleSegment(tracks: PacketTrack[], info: SegmentInfo) {
-  yield { tracks, info }
+  yield { tracks, info, isLast: true }
 }

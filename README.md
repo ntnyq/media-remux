@@ -15,7 +15,7 @@ Disk-backed browser media remuxing, track combining, and segment concatenation w
 - `combineTracks`: combine H.264 video and AAC audio from separate files.
 - `concatMedia`: join compatible segments in order, checking configurations/timelines before writing output.
 - `runMediaJob`: dedicated Worker execution with OPFS, progress, cancellation, and temporary-file cleanup.
-- Paged MP4 tables/TFRA/moof records; output descriptors, payloads, timestamp sorting, and fragment indexes on disk.
+- Paged MP4 tables/TFRA/moof records; output descriptors, payloads, and fragment indexes on disk.
 
 Inputs are complete `Blob`/`File` objects. Downloading, authentication, manifests, quality selection, transcoding, filters, DRM, and frame-accurate editing remain outside this package.
 
@@ -208,7 +208,7 @@ function concatMedia(
 | `signal`             | `AbortSignal`                       | Optional           | Checked during inspection, packet copying, and storage operations. Rejection uses the original abort reason.                                               |
 | `onProgress`         | `(progress: RemuxProgress) => void` | Optional           | Synchronous notifications in the core API's execution context, without Worker throttling. Throwing fails the operation; returned promises are not awaited. |
 
-These APIs return a summary, not a `File`. The caller owns the output destination and temporary files. Successful processing closes/unlocks `writable`; write-stage failure aborts/unlocks it. Preflight failure leaves the supplied stream untouched, so the caller must close or abort it as needed. Store disposal closes handles but does not remove files.
+These APIs return a summary, not a `File`. The caller owns the output destination and temporary files. Successful processing closes/unlocks `writable`; write-stage failure aborts/unlocks it. Preflight failure leaves the supplied stream untouched, so the caller must close or abort it as needed. Cancellation can stop the job until the output stream starts closing. Once closing starts, the stream's commit result determines the outcome. Store disposal closes handles but does not remove files.
 
 Remux and combine normalize the earliest selected presentation timestamp to zero, preserving relative A/V offsets. Concat places each normalized segment after the preceding presentation end. Missing tracks, incompatible segment configurations, malformed media/timing, or video without an initial keyframe reject the promise. I/O and callback errors also propagate.
 
@@ -367,8 +367,8 @@ Pass this adapter as `storage.fragmentSamples` alongside a fresh `createDiskFrag
 <summary>Track limits, segment compatibility, and timestamp rules</summary>
 
 - Only primary tracks are used. Remux/concat accept `tracks: 'all' | 'audio' | 'video'` (default `all`). Combine selects video from its first input and audio from its second.
-- MP4 supports H.264/AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, multiple MP4 sample descriptions, and changing FLV sequence headers are rejected.
-- MP4 edit lists support leading empty edits followed by a single media edit at rate 1. Empty-only lists, additional edits after the media edit, non-unit media rates, video prefix edits hiding whole frames, and finite media edits that trim a sample's presentation end are rejected during preflight instead of silently changing playback. A zero-duration media edit remains open-ended; movie-timescale rounding is tolerated.
+- MP4 supports H.264/AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and changing FLV sequence headers are rejected. A selected MP4 track must have a single sample description.
+- MP4 edit lists support leading empty edits followed by a single media edit at rate 1. Empty-only lists, additional edits after the media edit, non-unit media rates, video prefix edits hiding whole frames, and finite media edits that trim a sample's presentation end are rejected during preflight for selected tracks instead of silently changing playback. A zero-duration media edit remains open-ended; movie-timescale rounding is tolerated.
 - Multiple track fragments (`traf`) for the same track within one `moof` are rejected during preflight instead of silently dropping packets.
 - Jobs capture the submitted segment list and top-level job/options fields. Later changes to the caller's arrays or option fields do not alter an active job; the referenced signal and storage resources remain live.
 - Selected encrypted MP4 tracks are rejected during preflight, including unsupported encryption schemes or missing sample encryption metadata. Unselected protected tracks can be discarded.

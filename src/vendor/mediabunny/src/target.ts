@@ -220,6 +220,8 @@ export type StreamTargetOptions = {
     chunked?: boolean | undefined;
     /** When using `chunked: true`, this specifies the maximum size of each chunk. Defaults to 16 MiB. */
     chunkSize?: number | undefined;
+    /** @internal Runs after buffered writes finish and immediately before committing the sink. */
+    _beforeClose?: (() => void) | undefined;
 };
 const DEFAULT_CHUNK_SIZE = 2 ** 24;
 const MAX_CHUNKS_AT_ONCE = 2;
@@ -260,6 +262,7 @@ export class StreamTarget extends Target {
     _streamWriter: WritableStreamDefaultWriter<StreamTargetChunk> | null = null;
     /** @internal */
     _writeError: unknown = null;
+    private pendingWrite: Promise<void> | null = null;
     // These variables regard chunked mode:
     /** @internal */
     _chunked: boolean;
@@ -363,7 +366,7 @@ export class StreamTarget extends Target {
                 if (this._monotonicity === true && chunk.start !== this._lastFlushEnd) {
                     throw new Error('Internal error: Monotonicity violation.');
                 }
-                void this._streamWriter.write({
+                this.pendingWrite = this._streamWriter.write({
                     type: 'write',
                     data: chunk.data,
                     position: chunk.start,
@@ -469,7 +472,7 @@ export class StreamTarget extends Target {
                 else {
                     data = chunk.data.subarray(section.start, section.end);
                 }
-                void this._streamWriter.write({
+                this.pendingWrite = this._streamWriter.write({
                     type: 'write',
                     data,
                     position,
@@ -486,13 +489,15 @@ export class StreamTarget extends Target {
         if (this._chunked) {
             this._tryToFlushChunks(true);
         }
+        // A stream may still be writing even if its high water mark leaves ready resolved.
+        await this.pendingWrite;
         if (this._writeError !== null) {
             // eslint-disable-next-line @typescript-eslint/only-throw-error
             throw this._writeError;
         }
         assert(this._streamWriter);
+        this._options._beforeClose?.();
         try {
-            await this._streamWriter.ready;
             await this._streamWriter.close();
         }
         finally {

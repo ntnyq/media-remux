@@ -128,6 +128,12 @@ function abortableStorage(
   }
 }
 
+interface OutputSegment {
+  tracks: PacketTrack[]
+  info: SegmentInfo
+  isLast: boolean
+}
+
 interface TrackWriter {
   /**
    * Sends a packet to its configured encoded media source.
@@ -167,12 +173,13 @@ interface TrackWriter {
  */
 export async function writeSegments(
   baseline: PacketTrack[],
-  segments: AsyncIterable<{ tracks: PacketTrack[]; info: SegmentInfo }>,
+  segments: AsyncIterable<OutputSegment>,
   options: RemuxOptions,
   trackTimings: ReadonlyMap<number, IsobmffTrackTiming>,
 ): Promise<RemuxResult> {
   checkAbort(options.signal)
 
+  let isCommitting = false
   const storage = abortableStorage(options.storage, options.signal)
   const output = new Output({
     format: new Mp4OutputFormat({
@@ -185,6 +192,10 @@ export async function writeSegments(
     target: new StreamTarget(options.writable, {
       chunked: true,
       chunkSize: 1024 * 1024,
+      _beforeClose() {
+        checkAbort(options.signal)
+        isCommitting = true
+      },
     }),
   })
 
@@ -213,19 +224,28 @@ export async function writeSegments(
    * @returns A promise resolving after every available packet has been copied.
    * @throws If packet iteration, writing, progress reporting, or cancellation fails.
    */
-  async function writeSegment(segment: {
-    tracks: PacketTrack[]
-    info: SegmentInfo
-  }) {
+  async function writeSegment(segment: OutputSegment) {
     const cursors = segment.tracks.map((track, index) => ({
       iterator: track.packets(),
       writer: writers[index],
       next: undefined as IteratorResult<EncodedPacket, void> | undefined,
     }))
 
+    /**
+     * Advances one track and closes its writer if no later segment can use it.
+     *
+     * @param cursor - Packet iterator and associated output writer.
+     */
+    async function advance(cursor: (typeof cursors)[number]) {
+      cursor.next = await cursor.iterator.next()
+      if (cursor.next.done && segment.isLast) {
+        cursor.writer?.close()
+      }
+    }
+
     try {
       for (const cursor of cursors) {
-        cursor.next = await cursor.iterator.next()
+        await advance(cursor)
       }
 
       while (true) {
@@ -261,7 +281,7 @@ export async function writeSegments(
         bytesProcessed += packet.byteLength
         progress('remux')
 
-        cursor.next = await cursor.iterator.next()
+        await advance(cursor)
       }
     } finally {
       await Promise.all(cursors.map(cursor => cursor.iterator.return()))
@@ -330,13 +350,8 @@ export async function writeSegments(
       segmentIndex++
     }
 
-    for (const writer of writers) {
-      writer.close()
-    }
-
     progress('finalize')
     await output.finalize()
-    checkAbort(options.signal)
 
     return {
       bytesProcessed,
@@ -352,7 +367,9 @@ export async function writeSegments(
       // Preserve the write failure; cancellation is best-effort cleanup.
     }
 
-    checkAbort(options.signal)
+    if (!isCommitting) {
+      checkAbort(options.signal)
+    }
     throw error
   }
 }

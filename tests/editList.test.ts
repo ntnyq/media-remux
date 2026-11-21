@@ -3,6 +3,24 @@ import { combineTracks, concatMedia, remuxMedia } from '../src'
 import type { RemuxResult } from '../src'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 
+test.each(['remux', 'combine'] as const)(
+  'can %s AAC when a discarded video track has an unsupported dwell edit',
+  async operation => {
+    const input = await editedMedia([{ mediaRate: 0 }], 0, 'progressive.mp4')
+    const target = memoryTarget()
+    const options = { writable: target.writable, storage: await diskStorage() }
+    await (operation === 'remux'
+      ? remuxMedia(input, { ...options, tracks: 'audio' })
+      : combineTracks(await fixture('video.mp4'), input, options))
+
+    const source = await packets(await fixture('progressive.mp4'), 'audio')
+    const actual = await packets(target.blob(), 'audio')
+    expect(actual.map(packet => packet.data)).toStrictEqual(
+      source.map(packet => packet.data),
+    )
+  },
+)
+
 interface Edit {
   duration?: number
   mediaTime?: number
@@ -110,8 +128,8 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
   expect(edtsStartOriginal).toBeGreaterThan(trakStart)
   const originalEditSize = original.readUInt32BE(edtsStartOriginal)
   const originalElst = original.indexOf('elst')
-  expect(original[originalElst + 4]).toBe(0)
-  const mediaTime = original.readInt32BE(originalElst + 16)
+  expect(original[originalElst + 4]).toBe(1)
+  const mediaTime = Number(original.readBigInt64BE(originalElst + 20))
   const mvhd = original.indexOf('mvhd')
   const movieTimescale = original.readUInt32BE(
     mvhd + (original[mvhd + 4] === 1 ? 24 : 16),

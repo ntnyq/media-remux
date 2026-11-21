@@ -301,7 +301,13 @@ export const moov = (muxer: IsobmffMuxer) => {
 const movieTrackDuration = (trackData: IsobmffTrackData) => {
     const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
     if (timing) {
-        return intoTimescale(timing.presentationEnd, GLOBAL_TIMESCALE);
+        const inspectedEnd = intoTimescale(timing.presentationEnd, GLOBAL_TIMESCALE);
+        if (trackData.writtenPresentationEnd === undefined) {
+            return inspectedEnd;
+        }
+        const mediaTime = intoTimescale(-(trackData.startTimestampOffset ?? 0), trackData.timescale);
+        const writtenEnd = (trackData.writtenPresentationEnd - mediaTime) / trackData.timescale;
+        return Math.max(inspectedEnd, intoTimescale(writtenEnd, GLOBAL_TIMESCALE));
     }
     // Round separately to match the edit list
     return Math.max(0, intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE)
@@ -311,8 +317,9 @@ const movieTrackDuration = (trackData: IsobmffTrackData) => {
 export const mvhd = (creationTime: number, trackDatas: IsobmffTrackData[]) => {
     const duration = Math.max(0, ...trackDatas.map(movieTrackDuration));
     const nextTrackId = Math.max(0, ...trackDatas.map(x => x.track.id)) + 1;
-    // Conditionally use u64 if u32 isn't enough
-    const needsU64 = !isU32(creationTime) || !isU32(duration);
+    // Keep the header width stable when patching fragmented durations.
+    const needsU64 = trackDatas.some(track => track.muxer.formatOptions._fragmentTrackTimings !== undefined)
+        || !isU32(creationTime) || !isU32(duration);
     const u32OrU64 = needsU64 ? u64 : u32;
     return fullBox('mvhd', +needsU64, 0, [
         u32OrU64(creationTime), // Creation time
@@ -352,7 +359,8 @@ export const trak = (trackData: IsobmffTrackData, creationTime: number) => {
 export const tkhd = (trackData: IsobmffTrackData, creationTime: number) => {
     // Round separately to match the edit list
     const durationInGlobalTimescale = movieTrackDuration(trackData);
-    const needsU64 = !isU32(creationTime) || !isU32(durationInGlobalTimescale);
+    const needsU64 = trackData.muxer.formatOptions._fragmentTrackTimings !== undefined
+        || !isU32(creationTime) || !isU32(durationInGlobalTimescale);
     const u32OrU64 = needsU64 ? u64 : u32;
     let matrix: TransformationMatrix;
     if (trackData.type === 'video' && trackData.track.metadata.transformationMatrix) {
@@ -429,7 +437,8 @@ export const edts = (trackData: IsobmffTrackData) => {
         // Without preflight timing, fragmented files use zero (unknown duration). Spec:
         // "the segment_duration of this edit may be zero"
         const mediaDuration = movieTrackDuration(trackData);
-        const needs64Bits = !isI32(mediaTime) || !isU32(mediaDuration);
+        const needs64Bits = trackData.muxer.formatOptions._fragmentTrackTimings !== undefined
+            || !isI32(mediaTime) || !isU32(mediaDuration);
         const u32OrU64 = needs64Bits ? u64 : u32;
         const i32OrI64 = needs64Bits ? i64 : i32;
         return box('edts', undefined, [
