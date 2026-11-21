@@ -21,21 +21,26 @@ test('checks multiple MP4 sample descriptions only on selected tracks', async ()
     entryStart,
     entryStart + original.readUInt32BE(entryStart),
   )
+
   // Add a second valid AVC sample entry and relocate moov to preserve stco.
   for (const type of ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd']) {
     const offset = original.indexOf(type, moovStart) - 4
+
     original.writeUInt32BE(original.readUInt32BE(offset) + entry.length, offset)
   }
+
   original.writeUInt32BE(2, stsd + 8)
   const moov = Buffer.concat([
     original.subarray(moovStart, entryStart),
     entry,
     original.subarray(entryStart, moovEnd),
   ])
+
   original.writeUInt32BE(moovEnd - moovStart, moovStart)
   original.write('free', moovStart + 4, 'ascii')
   const multipleDescriptions = new Blob([original, moov])
   const target = memoryTarget()
+
   await remuxMedia(multipleDescriptions, {
     tracks: 'audio',
     storage: await diskStorage(),
@@ -44,10 +49,12 @@ test('checks multiple MP4 sample descriptions only on selected tracks', async ()
 
   const source = await packets(input, 'audio')
   const actual = await packets(target.blob(), 'audio')
+
   expect(actual.map(packet => packet.data)).toStrictEqual(
     source.map(packet => packet.data),
   )
   const videoTarget = memoryTarget()
+
   await expect(
     remuxMedia(multipleDescriptions, {
       tracks: 'video',
@@ -95,11 +102,13 @@ test('keeps track selection fixed when the caller updates its options during pro
       }
     },
   }
+
   await concatMedia([input, input], options)
 
   for (const kind of ['video', 'audio'] as const) {
     const source = await packets(input, kind)
     const output = await packets(target.blob(), kind)
+
     expect(output).toHaveLength(source.length * 2)
     expect(output.map(packet => packet.data)).toStrictEqual(
       [...source, ...source].map(packet => packet.data),
@@ -110,6 +119,7 @@ test('keeps track selection fixed when the caller updates its options during pro
 test('captures options exposed through prototype accessors', async () => {
   const target = memoryTarget()
   const storage = await diskStorage()
+
   class Options {
     private outputTarget = target
     private remuxStorage = storage
@@ -122,6 +132,7 @@ test('captures options exposed through prototype accessors', async () => {
       return this.remuxStorage
     }
   }
+
   const result = await remuxMedia(await fixture('audio.m4a'), new Options())
 
   expect(result.bytesProcessed).toBeGreaterThan(0)
@@ -143,7 +154,9 @@ test.each([
     let bytes = new Uint8Array(await original.arrayBuffer())
     const lastMoof = fragmented.fragmentOffset(1, 2)
     const mdat = Buffer.from(bytes).indexOf('mdat') - 4
+
     expect(mdat).toBeGreaterThan(0)
+
     if (variant === 'truncated-header') {
       bytes = bytes.slice(0, lastMoof + 4)
     } else if (variant === 'truncated-large-header') {
@@ -153,6 +166,7 @@ test.each([
       new DataView(bytes.buffer).setUint32(lastMoof, 4)
     } else {
       const view = new DataView(bytes.buffer)
+
       if (variant === 'oversized-mdat') {
         view.setUint32(mdat, bytes.length + 1)
       } else {
@@ -160,13 +174,16 @@ test.each([
         view.setBigUint64(mdat + 8, 2n ** 53n)
       }
     }
+
     const malformed = new Blob([bytes])
+
     for (const inputs of [[malformed], [original, malformed]]) {
       const target = memoryTarget()
       const options = {
         writable: target.writable,
         storage: await diskStorage(),
       }
+
       await expect(
         inputs.length === 1
           ? remuxMedia(malformed, options)
@@ -187,14 +204,17 @@ test.each(['mdat', 'free'] as const)(
     const original = fragmented.blob()
     const bytes = new Uint8Array(await original.arrayBuffer())
     const mdat = Buffer.from(bytes).lastIndexOf('mdat') - 4
+
     expect(mdat).toBeGreaterThan(0)
     let blob: Blob
+
     if (kind === 'mdat') {
       new DataView(bytes.buffer).setUint32(mdat, 0)
       blob = new Blob([bytes])
     } else {
       blob = new Blob([bytes, Uint8Array.of(0, 0, 0, 0), 'free', 'padding'])
     }
+
     const target = memoryTarget()
     const result = await remuxMedia(blob, {
       writable: target.writable,
@@ -202,6 +222,7 @@ test.each(['mdat', 'free'] as const)(
     })
     const before = await packets(original, 'audio')
     const after = await packets(target.blob(), 'audio')
+
     expect(after).toHaveLength(9)
     expect(after).toStrictEqual(before)
     expect(result.duration).toBe(0.192)
@@ -219,6 +240,7 @@ test.each(['stts', 'stsc', 'stco'] as const)(
     // Empty regular tables are valid in fragmented initialization metadata, but
     // invalid headers must still reject rather than hide the remaining tables.
     const offset = bytes.indexOf(name)
+
     expect(offset).toBeGreaterThan(0)
     bytes.writeUInt32BE(4, offset - 4)
     const malformed = new Blob([bytes])
@@ -229,6 +251,7 @@ test.each(['stts', 'stsc', 'stco'] as const)(
         writable: target.writable,
         storage: await diskStorage(),
       }
+
       await expect(
         inputs.length === 1
           ? remuxMedia(malformed, options)
@@ -247,6 +270,7 @@ test('rejects backwards fragment timestamps before touching any core output', as
   const original = fragmented.blob()
   const bytes = Buffer.from(await original.arrayBuffer())
   const offset = bytes.indexOf('tfdt', fragmented.fragmentOffset(1, 1))
+
   expect(offset).toBeGreaterThan(0)
   bytes.writeBigUInt64BE(0n, offset + 8)
   const malformed = new Blob([bytes])
@@ -259,6 +283,7 @@ test('rejects backwards fragment timestamps before touching any core output', as
       storage: await diskStorage(),
     }
     let job: Promise<RemuxResult>
+
     if (operation === 'combine') {
       job = combineTracks(video, malformed, options)
     } else if (operation === 'concat') {
@@ -266,6 +291,7 @@ test('rejects backwards fragment timestamps before touching any core output', as
     } else {
       job = remuxMedia(malformed, options)
     }
+
     await expect(job).rejects.toThrow('previous GOP')
     expect(target.state.writes).toStrictEqual([])
     expect(target.state.isClosed).toBe(false)
@@ -286,6 +312,7 @@ test.each(['flv-first', 'mp4-first'] as const)(
     const mp4 = remuxed.blob()
     const video = await packets(flv, 'video')
     const audio = await packets(flv, 'audio')
+
     expect(video.length).toBeGreaterThan(0)
     expect(audio.length).toBeGreaterThan(0)
     const sourcePackets = [...video, ...audio]
@@ -294,6 +321,7 @@ test.each(['flv-first', 'mp4-first'] as const)(
       Math.max(
         ...sourcePackets.map(packet => packet.timestamp + packet.duration),
       ) - start
+
     expect(summary.duration).toBeCloseTo(duration, 4)
     const inputs = order === 'flv-first' ? [flv, mp4] : [mp4, flv]
     const target = memoryTarget()
@@ -307,12 +335,15 @@ test.each(['flv-first', 'mp4-first'] as const)(
       ['audio', audio],
     ] as const) {
       const output = await packets(target.blob(), kind)
+
       expect(output.map(packet => packet.data)).toStrictEqual(
         [...source, ...source].map(packet => packet.data),
       )
+
       for (const segment of [0, 1]) {
         for (const [index, packet] of source.entries()) {
           const copied = output[segment * source.length + index]!
+
           expect(copied.timestamp).toBeCloseTo(
             packet.timestamp - start + segment * duration,
             4,
@@ -321,6 +352,7 @@ test.each(['flv-first', 'mp4-first'] as const)(
         }
       }
     }
+
     expect(result.duration).toBeCloseTo(duration * 2, 4)
     expect(target.state.isClosed).toBe(true)
     expect(target.state.isAborted).toBe(false)
@@ -341,6 +373,7 @@ test.each(['stts', 'stsc', 'stss', 'stco', 'tfhd', 'trun'] as const)(
       name,
       isFragmentBox ? fragmented.fragmentOffset(1, 1) : 0,
     )
+
     expect(offset).toBeGreaterThan(0)
     bytes.writeUInt32BE(4, offset - 4)
     const malformed = new Blob([bytes])
@@ -351,6 +384,7 @@ test.each(['stts', 'stsc', 'stss', 'stco', 'tfhd', 'trun'] as const)(
         writable: target.writable,
         storage: await diskStorage(),
       }
+
       await expect(
         inputs.length === 1
           ? remuxMedia(malformed, options)
@@ -373,16 +407,19 @@ test('remuxes every regular and fragmented sample in a hybrid MP4', async () => 
   })
   const source = await packets(input, 'video')
   const output = await packets(target.blob(), 'video')
+
   expect(source).toHaveLength(75)
   expect(output).toHaveLength(75)
   expect(output.map(packet => packet.data)).toStrictEqual(
     source.map(packet => packet.data),
   )
   const start = Math.min(...source.map(packet => packet.timestamp))
+
   for (const [index, packet] of output.entries()) {
     expect(packet.timestamp).toBeCloseTo(source[index]!.timestamp - start, 4)
     expect(packet.duration).toBeCloseTo(source[index]!.duration, 4)
   }
+
   expect(result.duration).toBeCloseTo(3, 4)
 })
 
@@ -395,14 +432,17 @@ test.each(['stts-short', 'stts-long', 'stsc-short', 'stsc-long'])(
     const view = new DataView(bytes.buffer)
     const name = variant.startsWith('stts') ? 'stts' : 'stsc'
     const offset = Buffer.from(bytes).indexOf(name)
+
     expect(offset).toBeGreaterThan(0)
     // The fixture has one timing run; stsc's first row starts at chunk one.
     const field = offset + (name === 'stts' ? 12 : 16)
+
     view.setUint32(
       field,
       variant.endsWith('short') ? 1 : view.getUint32(field) + 1,
     )
     const target = memoryTarget()
+
     await expect(
       remuxMedia(new Blob([bytes]), {
         writable: target.writable,
@@ -424,8 +464,10 @@ test.each(['regular', 'fragmented'] as const)(
         ? await fixture('video.mp4')
         : (await fragmentedMp4({ fragments: 2, indexed: false })).blob()
     const truncated = input.slice(0, input.size - 1)
+
     for (const inputs of [[truncated], [input, truncated]]) {
       const target = memoryTarget()
+
       await expect(
         concatMedia(inputs, {
           writable: target.writable,
@@ -443,6 +485,7 @@ test.each(['regular', 'fragmented'] as const)(
 test('rejects video beginning with a dependent frame before touching output', async () => {
   const input = await fixture('leading-delta.mp4')
   const target = memoryTarget()
+
   await expect(
     remuxMedia(input, {
       writable: target.writable,
@@ -459,6 +502,7 @@ test.each(['empty', 'malformed'] as const)(
     const audio = kind === 'empty' ? new Blob() : new Blob(['invalid media'])
     const controller = new AbortController()
     const target = memoryTarget()
+
     await expect(
       combineTracks(await fixture('video.mp4'), audio, {
         signal: controller.signal,
@@ -469,6 +513,7 @@ test.each(['empty', 'malformed'] as const)(
       kind === 'empty' ? 'nonempty Blob' : 'unsupported or unrecognizable',
     )
     const listeners = getEventListeners(controller.signal, 'abort')
+
     controller.abort()
     expect(listeners).toStrictEqual([])
     expect(target.state.writes).toStrictEqual([])
@@ -488,6 +533,7 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
   })
   const beforeVideo = await packets(video, 'video')
   const beforeAudio = await packets(audio, 'audio')
+
   expect(
     beforeVideo.some(
       (packet, index) =>
@@ -499,17 +545,20 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
     ...beforeVideo.map(packet => packet.timestamp),
     ...beforeAudio.map(packet => packet.timestamp),
   )
+
   for (const [kind, before] of [
     ['video', beforeVideo],
     ['audio', beforeAudio],
   ] as const) {
     const after = await packets(target.blob(), kind)
+
     expect(after.map(packet => packet.data)).toStrictEqual(
       before.map(packet => packet.data),
     )
     expect(after.map(packet => packet.type)).toStrictEqual(
       before.map(packet => packet.type),
     )
+
     for (const [index, packet] of after.entries()) {
       expect(packet.timestamp).toBeCloseTo(
         (before[index]?.timestamp ?? 0) - start,
@@ -518,6 +567,7 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
       expect(packet.duration).toBeCloseTo(before[index]?.duration ?? 0, 4)
     }
   }
+
   expect(result.mimeType).toBe('video/mp4')
   expect(result.bytesProcessed).toBeGreaterThan(0)
   expect(target.state.isClosed).toBe(true)
@@ -536,15 +586,18 @@ test('extracts an AAC track from progressive MP4 to audio-only fragmented M4A', 
   })
   const before = await packets(blob, 'audio')
   const after = await packets(target.blob(), 'audio')
+
   expect(after.map(packet => packet.data)).toStrictEqual(
     before.map(packet => packet.data),
   )
+
   for (const [index, packet] of after.entries()) {
     expect(packet.timestamp).toBeCloseTo(
       (before[index]?.timestamp ?? 0) - (before[0]?.timestamp ?? 0),
       4,
     )
   }
+
   await expect(packets(target.blob(), 'video')).resolves.toStrictEqual([])
   expect(result.mimeType).toBe('audio/mp4')
 })
@@ -560,22 +613,27 @@ test.each(['progressive.mp4', 'progressive.flv', 'long-gop.mp4'])(
       storage: await diskStorage(),
     })
     const output = await packets(target.blob(), 'video')
+
     expect(output).toHaveLength(source.length * 2)
     expect(output.map(packet => packet.data)).toStrictEqual(
       [...source, ...source].map(packet => packet.data),
     )
     const shift =
       (output[source.length]?.timestamp ?? 0) - (output[0]?.timestamp ?? 0)
+
     expect(shift).toBeGreaterThan(0)
+
     for (let index = 0; index < source.length; index++) {
       expect(
         (output[index + source.length]?.timestamp ?? 0) -
           (output[index]?.timestamp ?? 0),
       ).toBeCloseTo(shift, 4)
     }
+
     expect(result.duration).toBeGreaterThan(0)
     // Exercise paged fragmented-input reading by remuxing our own output again.
     const repeated = memoryTarget()
+
     await remuxMedia(target.blob(), {
       writable: repeated.writable,
       storage: await diskStorage(),
@@ -588,6 +646,7 @@ test.each(['progressive.mp4', 'progressive.flv', 'long-gop.mp4'])(
 
 test('rejects incompatible segments before writing any output', async () => {
   const target = memoryTarget()
+
   await expect(
     concatMedia([await fixture('video.mp4'), await fixture('audio.m4a')], {
       writable: target.writable,
@@ -600,6 +659,7 @@ test('rejects incompatible segments before writing any output', async () => {
 
 test('rejects empty/truncated FLV and invalid track selection', async () => {
   const storage = await diskStorage()
+
   await expect(
     concatMedia([], { storage, writable: memoryTarget().writable }),
   ).rejects.toThrow('At least one')
@@ -607,6 +667,7 @@ test('rejects empty/truncated FLV and invalid track selection', async () => {
     remuxMedia(new Blob(), { storage, writable: memoryTarget().writable }),
   ).rejects.toThrow('nonempty Blob')
   const flv = await fixture('progressive.flv')
+
   await expect(
     remuxMedia(flv.slice(0, flv.size - 1), {
       storage,
@@ -626,6 +687,7 @@ test('preserves the abort reason and aborts/unlocks a partially written output',
   const controller = new AbortController()
   const reason = new Error('test cancellation')
   const target = memoryTarget()
+
   await expect(
     remuxMedia(await fixture('video.mp4'), {
       writable: target.writable,
@@ -650,6 +712,7 @@ test('propagates output I/O failures and releases the stream lock', async () => 
       throw failure
     },
   })
+
   await expect(
     remuxMedia(await fixture('video.mp4'), {
       writable,
@@ -661,13 +724,17 @@ test('propagates output I/O failures and releases the stream lock', async () => 
 
 test('produces files independently accepted and decoded by FFmpeg when available', async context => {
   const exec = promisify(execFile)
+
   try {
     await exec('ffmpeg', ['-version'])
   } catch {
     context.skip()
+
     return
   }
+
   const directory = await mkdtemp(join(tmpdir(), 'media-remux-decode-'))
+
   try {
     for (const name of [
       'progressive.mp4',
@@ -680,11 +747,13 @@ test('produces files independently accepted and decoded by FFmpeg when available
     ]) {
       const target = memoryTarget()
       const input = await fixture(name)
+
       await concatMedia([input, input], {
         writable: target.writable,
         storage: await diskStorage(),
       })
       const path = join(directory, `${name}.mp4`)
+
       await writeFile(path, new Uint8Array(await target.blob().arrayBuffer()))
       const { stderr } = await exec('ffmpeg', [
         '-v',
@@ -696,6 +765,7 @@ test('produces files independently accepted and decoded by FFmpeg when available
         'null',
         '-',
       ])
+
       expect(stderr).toBe('')
     }
   } finally {

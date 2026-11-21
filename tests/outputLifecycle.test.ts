@@ -1,6 +1,6 @@
 import { setImmediate } from 'node:timers/promises'
 import { expect, test, vi } from 'vitest'
-import { combineTracks, remuxMedia } from '../src'
+import { combineTracks, concatMedia, remuxMedia } from '../src'
 import { EncodedAudioPacketSource } from '../src/vendor/mediabunny/src/media-source'
 import { Output } from '../src/vendor/mediabunny/src/output'
 import { Mp4OutputFormat } from '../src/vendor/mediabunny/src/output-format'
@@ -8,6 +8,53 @@ import { StreamTarget } from '../src/vendor/mediabunny/src/target'
 import { temporaryFragmentSamples } from './helpers/fragmentSamples'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 import { indexedMp4 } from './helpers/mp4Index'
+
+test.each([1, 16])(
+  'closes a zero-buffer output after writing %i compatible segments',
+  async count => {
+    const input = await fixture('fractional-av.mp4')
+    const target = memoryTarget({ highWaterMark: 0 })
+
+    await concatMedia(
+      Array.from({ length: count }, () => input),
+      {
+        writable: target.writable,
+        storage: await diskStorage(),
+      },
+    )
+
+    const source = await packets(input, 'video')
+    const output = await packets(target.blob(), 'video')
+
+    expect(output.map(packet => packet.data)).toStrictEqual(
+      Array.from({ length: count }, () =>
+        source.map(packet => packet.data),
+      ).flat(),
+    )
+    expect(target.state.writes.length).toBeGreaterThanOrEqual(
+      count === 1 ? 1 : 2,
+    )
+    expect(target.state.isClosed).toBe(true)
+    expect(target.writable.locked).toBe(false)
+  },
+)
+
+test('propagates a null sink rejection and unlocks the stream', async () => {
+  const writable = new WritableStream({
+    async write() {
+      // oxlint-disable-next-line no-throw-literal -- Exercise an arbitrary WritableStream rejection reason.
+      throw null
+    },
+  })
+
+  await expect(
+    remuxMedia(await fixture('video.mp4'), {
+      writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toBeNull()
+  expect(writable.locked).toBe(false)
+})
 
 test('a final progress failure leaves no background access after sample storage disposal', async () => {
   const samples = await temporaryFragmentSamples()
@@ -21,8 +68,10 @@ test('a final progress failure leaves no background access after sample storage 
     if (isDisposed) {
       readsAfterDisposal++
     }
+
     return get(...args)
   })
+
   try {
     await expect(
       remuxMedia(await fixture('video.mp4'), {
@@ -50,12 +99,13 @@ test('a final progress failure leaves no background access after sample storage 
 })
 
 test.each([
-  { phase: 'write', fails: false },
-  { phase: 'close', fails: false },
-  { phase: 'close', fails: true },
+  { phase: 'write', fails: false, highWaterMark: 4 },
+  { phase: 'write', fails: false, highWaterMark: 0 },
+  { phase: 'close', fails: false, highWaterMark: 4 },
+  { phase: 'close', fails: true, highWaterMark: 4 },
 ] as const)(
-  'settles cancellation at the output commit boundary during $phase (close fails: $fails)',
-  async ({ phase, fails }) => {
+  'settles cancellation during $phase with highWaterMark $highWaterMark (close fails: $fails)',
+  async ({ phase, fails, highWaterMark }) => {
     const controller = new AbortController()
     const reason = new Error('cancel output')
     const closeFailure = new Error('output did not commit')
@@ -73,16 +123,18 @@ test.each([
             await setImmediate()
             controller.abort(reason)
           }
+
           if (fails) {
             throw closeFailure
           }
+
           state.closed = true
         },
         abort() {
           state.aborted = true
         },
       },
-      { highWaterMark: 4 },
+      { highWaterMark },
     )
     const result = remuxMedia(await fixture('vfr-bframes.mp4'), {
       writable,
@@ -93,6 +145,7 @@ test.each([
       .then(({ mimeType }) => mimeType)
       .catch((error: unknown) => error)
     const expected = phase === 'write' ? reason : 'video/mp4'
+
     expect(outcome).toBe(fails ? closeFailure : expected)
     expect(state).toStrictEqual({
       closed: phase === 'close' && !fails,
@@ -115,22 +168,27 @@ test('emits audio fragments as the final track continues after video ends', asyn
     .spyOn(storage.fragmentSamples, 'append')
     .mockImplementation(async (...args) => {
       const id = await append(...args)
+
       if (args[0] === 2) {
         audioAppended++
         peakQueued = Math.max(peakQueued, audioAppended - audioReleased)
       }
+
       return id
     })
   const releaseProbe = vi
     .spyOn(storage.fragmentSamples, 'release')
     .mockImplementation(async (...args) => {
       await release(...args)
+
       if (args[0] === 2) {
         ;[, audioReleased] = args
       }
     })
+
   try {
     const target = memoryTarget()
+
     await combineTracks(video, audio, { storage, writable: target.writable })
     expect(audioReleased).toBe(sampleCount)
     expect(peakQueued).toBeLessThan(128)
@@ -160,6 +218,7 @@ test.each([
       new EncodedAudioPacketSource('aac'),
       new EncodedAudioPacketSource('aac'),
     ]
+
     for (const source of sources) {
       output.addAudioTrack(source, {
         decoderConfig: {
@@ -170,6 +229,7 @@ test.each([
         },
       })
     }
+
     await output.start()
     const first = Promise.withResolvers<boolean>()
     const second = Promise.withResolvers<boolean>()
@@ -183,8 +243,10 @@ test.each([
         if (++started === sources.length) {
           entered.resolve(true)
         }
+
         if (track.id === 1) {
           await first.promise
+
           if (hasFailure) {
             throw failure
           }
@@ -192,14 +254,17 @@ test.each([
           await second.promise
         }
       })
+
     for (const source of sources) {
       source.close()
     }
+
     await entered.promise
     let isSettled = false
     const lifecycle = (async () => {
       try {
         await output[operation]()
+
         return { error: undefined }
       } catch (error) {
         return { error }
@@ -207,6 +272,7 @@ test.each([
         isSettled = true
       }
     })()
+
     try {
       first.resolve(true)
       await setImmediate()
@@ -214,6 +280,7 @@ test.each([
       expect(target.writable.locked).toBe(true)
       second.resolve(true)
       const result = await lifecycle
+
       expect(result.error).toBe(hasFailure ? failure : undefined)
       expect(target.writable.locked).toBe(false)
       expect(target.state.isAborted).toBe(operation === 'cancel' || hasFailure)

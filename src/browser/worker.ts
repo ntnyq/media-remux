@@ -100,6 +100,7 @@ export function installMediaWorker(
 
       writer = await request.handle.createWritable()
       const activeWriter = writer
+
       storage = createOpfsStorage(request.directory)
       const writable = new WritableStream<MediaOutputChunk>({
         /**
@@ -137,6 +138,7 @@ export function installMediaWorker(
        */
       const onProgress = (progress: RemuxProgress) => {
         const now = Date.now()
+
         if (
           progress.phase !== lastPhase ||
           progress.phase !== 'remux' ||

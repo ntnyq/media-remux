@@ -6,7 +6,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 // Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
-import { type Box, free, ftyp, IsobmffBoxWriter, mdat, mfra, moof, moov, sidx, styp, vtta, vttc, vtte } from './isobmff-boxes';
+import { aacFragmentRollGroups, type Box, free, ftyp, IsobmffBoxWriter, mdat, mfra, moof, moov, sidx, styp, vtta, vttc, vtte } from './isobmff-boxes';
 import { Muxer } from '../muxer';
 import { Output, OutputAudioTrack, OutputSubtitleTrack, OutputTrack, OutputVideoTrack, type TrackType } from '../output';
 import { Writer } from '../writer';
@@ -815,6 +815,7 @@ export class IsobmffMuxer extends Muxer {
         const store = this.formatOptions._fragmentSampleStore!;
         const indexStore = this.formatOptions._fragmentIndexStore!;
         const writer = this.writer!;
+        const boxWriter = this.boxWriter!;
         const unsignedComposition = this.formatOptions._fragmentTrackTimings !== undefined;
         const sampleFlags = (sample: Sample) => sample.type === 'key' ? 0x02000000 : 0x01010000;
         const summaries = [];
@@ -880,12 +881,15 @@ export class IsobmffMuxer extends Muxer {
             const flagsPresent = differentFlags && !firstFlagsPresent;
             const entrySize = 4 * (+differentDurations + +differentSizes + +flagsPresent + +compositionPresent);
             const trunSize = 20 + (firstFlagsPresent ? 4 : 0) + entrySize * count;
-            const trafSize = 8 + 28 + 20 + trunSize;
+            const rollGroups = track.type === 'audio' && track.track.source._codec === 'aac'
+                ? aacFragmentRollGroups(count, start === 0)
+                : [];
+            const trafSize = 8 + 28 + 20 + trunSize + rollGroups.reduce((size, group) => size + boxWriter.measureBox(group), 0);
             const flags = 1 | (firstFlagsPresent ? 4 : 0) | (differentDurations ? 0x100 : 0)
                 | (differentSizes ? 0x200 : 0) | (flagsPresent ? 0x400 : 0) | (compositionPresent ? 0x800 : 0);
             summaries.push({ track, chunk, count, start, sampleAt, first, reference, firstFlags,
                 differentDurations, differentSizes, flagsPresent, compositionPresent, firstFlagsPresent,
-                entrySize, trunSize, trafSize, flags, syncIndex, syncTimestamp, firstDecodeTime, absolute: false, offset: 0 });
+                entrySize, trunSize, trafSize, rollGroups, flags, syncIndex, syncTimestamp, firstDecodeTime, absolute: false, offset: 0 });
         }
         let moofSize = summaries.reduce((sum, summary) => sum + summary.trafSize, 24);
         let relativeOffset = moofSize + 16 + 8 * summaries.length;
@@ -980,6 +984,8 @@ export class IsobmffMuxer extends Muxer {
                 }
             if (used)
                 writer.write(page.subarray(0, used));
+            for (const group of summary.rollGroups)
+                boxWriter.writeBox(group);
             await writer.flush();
         }
         assert(writer.getPos() === moofOffset + moofSize);

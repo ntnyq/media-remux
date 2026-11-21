@@ -22,16 +22,20 @@ test('plans decode lead before writing an earlier segment with no reordering', a
   })
   const bytes = Buffer.from(await target.blob().arrayBuffer())
   const edit = bytes.indexOf('elst')
+
   expect(edit).toBeGreaterThan(0)
   expect(bytes[edit + 4]).toBe(1)
   // The later B-frame needs decode lead even though the first segment did not.
   expect(bytes.readBigInt64BE(edit + 20)).toBeGreaterThanOrEqual(1024n)
   const actual = await packets(target.blob(), 'audio')
   const expected = [0, 1024, 2048, 3072, 5120, 4096]
+
   expect(actual).toHaveLength(expected.length)
+
   for (const [index, packet] of actual.entries()) {
     expect(packet.timestamp).toBeCloseTo(expected[index]! / 48_000, 8)
   }
+
   expect(result.duration).toBeCloseTo(6144 / 48_000, 8)
 })
 
@@ -47,6 +51,7 @@ test.each([2, 16])(
         storage: await diskStorage(),
       },
     )
+
     // With 16 clips the first output page is flushed before moov is patched.
     expect(target.state.writes[0] === 1024 * 1024).toBe(count === 16)
 
@@ -55,6 +60,7 @@ test.each([2, 16])(
       writable: repeated.writable,
       storage: await diskStorage(),
     })
+
     expect(repeatedResult.bytesProcessed).toBe(result.bytesProcessed)
     expect(repeatedResult.duration).toBeCloseTo(result.duration, 4)
     expect(repeated.state.isClosed).toBe(true)
@@ -67,6 +73,7 @@ test('uses planned decode timing without sorting the long GOP', async () => {
   const sort = vi.spyOn(storage.fragmentSamples, 'sort')
   const sorted = vi.spyOn(storage.fragmentSamples, 'sorted')
   const target = memoryTarget()
+
   await remuxMedia(input, { storage, writable: target.writable })
   expect(sort).not.toHaveBeenCalled()
   expect(sorted).not.toHaveBeenCalled()
@@ -84,6 +91,7 @@ test('keeps fractional decode ticks aligned across fragments and segment boundar
   })
   const bytes = Buffer.from(await indexed.blob().arrayBuffer())
   const mdhd = bytes.indexOf('mdhd')
+
   expect(mdhd).toBeGreaterThan(0)
   // Input deltas become 1024 * 48000 / 44100 output ticks, requiring a carried remainder.
   bytes.writeUInt32BE(44_100, mdhd + 16)
@@ -94,12 +102,15 @@ test('keeps fractional decode ticks aligned across fragments and segment boundar
     storage: await diskStorage(),
   })
   const actual = await packets(target.blob(), 'audio')
+
   expect(actual).toHaveLength(count * 3)
+
   for (const [index, packet] of actual.entries()) {
     expect(
       Math.abs(packet.timestamp - (index * 1024) / 44_100),
     ).toBeLessThanOrEqual(0.51 / 48_000)
   }
+
   expect(result.duration).toBeCloseTo((count * 3 * 1024) / 44_100, 8)
 })
 
@@ -112,6 +123,7 @@ test('keeps fractional decode ticks aligned across fragments and segment boundar
  */
 async function singleFrame(duration: number, timescale: number): Promise<Blob> {
   const target = memoryTarget()
+
   await remuxMedia(await fixture('bt709-full-range.flv'), {
     writable: target.writable,
     storage: await diskStorage(),
@@ -119,11 +131,13 @@ async function singleFrame(duration: number, timescale: number): Promise<Blob> {
   const bytes = Buffer.from(await target.blob().arrayBuffer())
   const mdhd = bytes.indexOf('mdhd')
   const tfhd = bytes.indexOf('tfhd')
+
   expect(mdhd).toBeGreaterThan(0)
   expect(tfhd).toBeGreaterThan(0)
   expect(bytes.readUInt32BE(tfhd + 4)).toBe(0x02_00_38)
   bytes.writeUInt32BE(timescale, mdhd + (bytes[mdhd + 4] === 1 ? 24 : 16))
   bytes.writeUInt32BE(duration, tfhd + 12)
+
   return new Blob([bytes])
 }
 
@@ -135,9 +149,11 @@ test.each([
   async ({ duration, timescale }) => {
     const input = await singleFrame(duration, timescale)
     const source = await packets(input, 'video')
+
     expect(source).toHaveLength(1)
     expect(source[0]!.duration).toBe(duration / timescale)
     const target = memoryTarget()
+
     await expect(
       remuxMedia(input, {
         writable: target.writable,
@@ -163,6 +179,7 @@ test.each([
       storage: await diskStorage(),
     })
     const output = await packets(target.blob(), 'video')
+
     expect(output).toHaveLength(1)
     expect(output[0]!.duration).toBeCloseTo(duration / timescale, 5)
     expect(result.duration).toBeCloseTo(output[0]!.duration, 5)
@@ -184,10 +201,12 @@ test.each([
     })
     const bytes = Buffer.from(await indexed.blob().arrayBuffer())
     const mdhd = bytes.indexOf('mdhd')
+
     expect(mdhd).toBeGreaterThan(0)
     // AAC still decodes at 48 kHz, so output timing doubles the input track units.
     bytes.writeUInt32BE(24_000, mdhd + 16)
     const target = memoryTarget()
+
     await expect(
       remuxMedia(new Blob([bytes]), {
         writable: target.writable,
@@ -221,12 +240,15 @@ test.each([
     const source = await packets(input, 'audio')
     const start = Math.min(...source.map(packet => packet.timestamp))
     const target = memoryTarget()
+
     await remuxMedia(input, {
       writable: target.writable,
       storage: await diskStorage(),
     })
     const output = await packets(target.blob(), 'audio')
+
     expect(output).toHaveLength(source.length)
+
     for (const [index, packet] of output.entries()) {
       expect(packet.timestamp).toBeCloseTo(source[index]!.timestamp - start, 5)
       expect(packet.data).toStrictEqual(source[index]!.data)

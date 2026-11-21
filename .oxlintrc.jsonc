@@ -102,6 +102,56 @@
   },
   "overrides": [
     {
+      "files": ["**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx}"],
+      "jsPlugins": [{ "name": "ntnyq", "specifier": "eslint-plugin-ntnyq" }],
+      "rules": {
+        "ntnyq/padding-line-between-statements": [
+          "error",
+          // The last matching entry wins, so exceptions follow their general rules.
+          {
+            "blankLine": "always",
+            "prev": "*",
+            "next": [
+              "if",
+              "for",
+              "while",
+              "do",
+              "switch",
+              "try",
+              "return",
+              "throw",
+            ],
+          },
+          {
+            "blankLine": "always",
+            "prev": ["if", "for", "while", "do", "switch", "try"],
+            "next": "*",
+          },
+          {
+            "blankLine": "always",
+            "prev": ["const", "let", "var"],
+            "next": "*",
+          },
+          {
+            "blankLine": "any",
+            "prev": ["const", "let", "var"],
+            "next": ["const", "let", "var"],
+          },
+          { "blankLine": "always", "prev": "*", "next": ["function", "class"] },
+          { "blankLine": "always", "prev": ["function", "class"], "next": "*" },
+          { "blankLine": "always", "prev": "import", "next": "*" },
+          { "blankLine": "never", "prev": "import", "next": "import" },
+        ],
+      },
+    },
+    {
+      "files": ["**/*.{js,mjs,jsx,ts,mts,tsx}"],
+      "rules": {
+        // Statement padding owns ESM import spacing.
+        "import/newline-after-import": "off",
+      },
+    },
+    {
       "files": ["scripts/**/*.{js,ts}"],
       "rules": {
         "no-console": "off",

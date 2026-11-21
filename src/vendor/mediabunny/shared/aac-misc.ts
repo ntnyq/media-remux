@@ -50,7 +50,19 @@ export const parseAacAudioSpecificConfig = (bytes: Uint8Array | null): AacAudioS
             bitstream.skipBits(4); // extensionChannelConfiguration
         }
     }
-    else {
+    if (coreObjectType === 2 && channelConfiguration === 0) {
+        const configStart = bitstream.pos;
+        bitstream.skipBits(1); // frameLengthFlag
+        if (bitstream.readBits(1)) {
+            bitstream.skipBits(14); // coreCoderDelay
+        }
+        bitstream.skipBits(1); // extensionFlag
+        numberOfChannels = readAacProgramConfigChannelCount(bitstream);
+        if (numberOfChannels === null) {
+            bitstream.pos = configStart;
+        }
+    }
+    if (objectType !== 5 && objectType !== 29) {
         // There may be SBR/PS flags sitting behind a sync word after the config of the core coder. We find them by
         // scanning for the sync word, just like FFmpeg does.
         while (bitstream.getBitsLeft() > 15) {
@@ -84,6 +96,39 @@ export const parseAacAudioSpecificConfig = (bytes: Uint8Array | null): AacAudioS
             ? 2
             : numberOfChannels,
     };
+};
+/** Reads the channel count from an AAC program config element. */
+const readAacProgramConfigChannelCount = (bitstream: Bitstream) => {
+    bitstream.skipBits(10); // element_instance_tag, object_type, sampling_frequency_index
+    const elementCount = bitstream.readBits(4) + bitstream.readBits(4) + bitstream.readBits(4);
+    const lfeCount = bitstream.readBits(2);
+    const assocDataCount = bitstream.readBits(3);
+    const couplingCount = bitstream.readBits(4);
+    if (bitstream.readBits(1)) {
+        bitstream.skipBits(4); // mono_mixdown_element_number
+    }
+    if (bitstream.readBits(1)) {
+        bitstream.skipBits(4); // stereo_mixdown_element_number
+    }
+    if (bitstream.readBits(1)) {
+        bitstream.skipBits(3); // matrix_mixdown_idx, pseudo_surround_enable
+    }
+    let channels = lfeCount;
+    for (let i = 0; i < elementCount; i++) {
+        channels += bitstream.readBits(1) ? 2 : 1; // channel pair element or single channel element
+        bitstream.skipBits(4); // element_tag_select
+    }
+    bitstream.skipBits(4 * (lfeCount + assocDataCount) + 5 * couplingCount);
+    bitstream.pos = 8 * Math.ceil(bitstream.pos / 8);
+    if (bitstream.getBitsLeft() < 8) {
+        return null;
+    }
+    const commentBits = 8 * bitstream.readBits(8);
+    if (commentBits > bitstream.getBitsLeft()) {
+        return null;
+    }
+    bitstream.skipBits(commentBits);
+    return channels || null;
 };
 const readAacObjectType = (bitstream: Bitstream) => {
     const objectType = bitstream.readBits(5);

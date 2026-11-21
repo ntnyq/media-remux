@@ -15,6 +15,7 @@ import { PathedTarget, Target, type TargetRequest } from './target';
 import { Writer } from './writer';
 import { Logging } from './logging';
 import { EncodedPacket } from './packet';
+import { type IsobmffColorInformation } from './isobmff/isobmff-misc';
 import { validateAudioChunkMetadata, validateVideoChunkMetadata } from './codec';
 import { polyfillSymbolDispose } from './misc';
 polyfillSymbolDispose();
@@ -229,6 +230,8 @@ export type BaseTrackMetadata = {
  * @public
  */
 export type VideoTrackMetadata = BaseTrackMetadata & {
+    /** @internal Original numeric MP4 color identifiers, taking precedence over the decoder config. */
+    containerColorInformation?: IsobmffColorInformation;
     /**
      * The angle in degrees by which the track's frames should be rotated (clockwise). Rotation is applied before any
      * flip.

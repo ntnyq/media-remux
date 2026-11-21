@@ -260,8 +260,7 @@ export class StreamTarget extends Target {
     _lastFlushEnd = 0;
     /** @internal */
     _streamWriter: WritableStreamDefaultWriter<StreamTargetChunk> | null = null;
-    /** @internal */
-    _writeError: unknown = null;
+    private writeFailure: { reason: unknown } | null = null;
     private pendingWrite: Promise<void> | null = null;
     // These variables regard chunked mode:
     /** @internal */
@@ -313,10 +312,7 @@ export class StreamTarget extends Target {
     }
     /** @internal */
     async _flush() {
-        if (this._writeError !== null) {
-            // eslint-disable-next-line @typescript-eslint/only-throw-error
-            throw this._writeError;
-        }
+        this.checkWriteFailure();
         assert(this._streamWriter);
         if (this._sections.length === 0) {
             return;
@@ -355,7 +351,10 @@ export class StreamTarget extends Target {
                 }
             }
             if (this._streamWriter.desiredSize !== null && this._streamWriter.desiredSize <= 0) {
-                await this._streamWriter.ready; // Allow the writer to apply backpressure
+                // A zero-high-water-mark stream never becomes ready. A submitted
+                // write still completes and can provide backpressure on its own.
+                await this.pendingWrite;
+                this.checkWriteFailure();
             }
             if (this._chunked) {
                 // Let's first gather the data into bigger chunks before writing it
@@ -371,45 +370,47 @@ export class StreamTarget extends Target {
                     data: chunk.data,
                     position: chunk.start,
                 }).catch((error) => {
-                    this._writeError ??= error;
+                    this.writeFailure ??= { reason: error };
                 });
                 this._lastFlushEnd = chunk.start + chunk.data.byteLength;
             }
         }
         this._sections.length = 0;
     }
+    private checkWriteFailure() {
+        if (this.writeFailure) {
+            // eslint-disable-next-line @typescript-eslint/only-throw-error
+            throw this.writeFailure.reason;
+        }
+    }
     /** @internal */
     _writeDataIntoChunks(data: Uint8Array, position: number) {
-        // First, find the chunk to write the data into, or create one if none exists
-        let chunkIndex = this._chunks.findIndex(x => x.start <= position && position < x.start + this._chunkSize);
-        if (chunkIndex === -1)
-            chunkIndex = this._createChunk(position);
-        const chunk = this._chunks[chunkIndex]!;
-        // Figure out how much to write to the chunk, and then write to the chunk
-        const relativePosition = position - chunk.start;
-        const toWrite = data.subarray(0, Math.min(this._chunkSize - relativePosition, data.byteLength));
-        chunk.data.set(toWrite, relativePosition);
-        // Create a section describing the region of data that was just written to
-        const section: ChunkSection = {
-            start: relativePosition,
-            end: relativePosition + toWrite.byteLength,
-        };
-        this._insertSectionIntoChunk(chunk, section);
-        // Queue chunk for flushing to target if it has been fully written to
-        if (chunk.written[0]!.start === 0 && chunk.written[0]!.end === this._chunkSize) {
-            chunk.shouldFlush = true;
-        }
-        // Make sure we don't hold too many chunks in memory at once to keep memory usage down
-        if (this._chunks.length > MAX_CHUNKS_AT_ONCE) {
-            // Flush all but the last chunk
-            for (let i = 0; i < this._chunks.length - 1; i++) {
-                this._chunks[i]!.shouldFlush = true;
+        while (true) {
+            let chunkIndex = this._chunks.findIndex(x => x.start <= position && position < x.start + this._chunkSize);
+            if (chunkIndex === -1)
+                chunkIndex = this._createChunk(position);
+            const chunk = this._chunks[chunkIndex]!;
+            const relativePosition = position - chunk.start;
+            const toWrite = data.subarray(0, this._chunkSize - relativePosition);
+            chunk.data.set(toWrite, relativePosition);
+            this._insertSectionIntoChunk(chunk, {
+                start: relativePosition,
+                end: relativePosition + toWrite.byteLength,
+            });
+            if (chunk.written[0]!.start === 0 && chunk.written[0]!.end === this._chunkSize) {
+                chunk.shouldFlush = true;
             }
-            this._tryToFlushChunks();
-        }
-        // If the data didn't fit in one chunk, recurse with the remaining data
-        if (toWrite.byteLength < data.byteLength) {
-            this._writeDataIntoChunks(data.subarray(toWrite.byteLength), position + toWrite.byteLength);
+            if (this._chunks.length > MAX_CHUNKS_AT_ONCE) {
+                // Flush all but the last chunk to bound the chunk buffers retained here.
+                for (let i = 0; i < this._chunks.length - 1; i++) {
+                    this._chunks[i]!.shouldFlush = true;
+                }
+                this._tryToFlushChunks();
+            }
+            if (toWrite.byteLength === data.byteLength)
+                break;
+            data = data.subarray(toWrite.byteLength);
+            position += toWrite.byteLength;
         }
     }
     /** @internal */
@@ -477,7 +478,7 @@ export class StreamTarget extends Target {
                     data,
                     position,
                 }).catch((error) => {
-                    this._writeError ??= error;
+                    this.writeFailure ??= { reason: error };
                 });
                 this._lastFlushEnd = chunk.start + section.end;
             }
@@ -489,12 +490,9 @@ export class StreamTarget extends Target {
         if (this._chunked) {
             this._tryToFlushChunks(true);
         }
-        // A stream may still be writing even if its high water mark leaves ready resolved.
+        // Wait for every queued write before checking whether the file can commit.
         await this.pendingWrite;
-        if (this._writeError !== null) {
-            // eslint-disable-next-line @typescript-eslint/only-throw-error
-            throw this._writeError;
-        }
+        this.checkWriteFailure();
         assert(this._streamWriter);
         this._options._beforeClose?.();
         try {

@@ -9,15 +9,20 @@ test.each([false, true])(
   'retains VFR decode durations in FLV packets (metadataOnly=%s)',
   async metadataOnly => {
     const input = await openMediaInput(await fixture('vfr-bframes.flv'))
+
     try {
       const durations = []
+
       for await (const packet of input.tracks[0]!.packets(metadataOnly)) {
         durations.push(packet.sideData.decodeDuration)
         expect(packet.data.length === 0).toBe(metadataOnly)
       }
+
       // The end tag shares the final DTS, so the last packet reuses the previous interval.
       const expected = [0.1, 0.3, 0.1, 0.3, 0.5, 0.7, 0.7]
+
       expect(durations).toHaveLength(expected.length)
+
       for (const [index, duration] of durations.entries()) {
         expect(duration).toBeCloseTo(expected[index]!, 8)
       }
@@ -35,11 +40,14 @@ test.each([
   async ({ name, width, height, aspectWidth }) => {
     const blob = await fixture(name)
     const input = await openMediaInput(blob)
+
     try {
       const config = input.tracks[0]?.config
+
       if (!config || 'sampleRate' in config) {
         throw new Error('Missing video configuration')
       }
+
       expect(config).toMatchObject({
         codedWidth: width,
         codedHeight: height,
@@ -49,7 +57,9 @@ test.each([
     } finally {
       input.dispose()
     }
+
     const target = memoryTarget()
+
     await remuxMedia(blob, {
       writable: target.writable,
       storage: await diskStorage(),
@@ -58,13 +68,16 @@ test.each([
     // Probe container fields independently of the SPS-aware input parser.
     const stsd = bytes.indexOf('stsd')
     const tkhd = bytes.indexOf('tkhd')
+
     expect(stsd).toBeGreaterThan(0)
     expect(tkhd).toBeGreaterThan(0)
     const entry = stsd + 12
+
     expect(bytes.toString('ascii', entry + 4, entry + 8)).toBe('avc1')
     expect(bytes.readUInt16BE(entry + 32)).toBe(width)
     expect(bytes.readUInt16BE(entry + 34)).toBe(height)
     const dimensions = tkhd + (bytes[tkhd + 4] === 1 ? 92 : 80)
+
     expect(bytes.readUInt32BE(dimensions) / 65_536).toBe(width)
     expect(bytes.readUInt32BE(dimensions + 4) / 65_536).toBe(height)
     const pasp = bytes.indexOf('pasp')
@@ -72,6 +85,7 @@ test.each([
       pasp === -1
         ? 1
         : bytes.readUInt32BE(pasp + 4) / bytes.readUInt32BE(pasp + 8)
+
     expect(pixelAspectRatio).toBe(aspectWidth / width)
     expect(
       (await packets(target.blob(), 'video')).map(packet => packet.data),
@@ -84,13 +98,16 @@ test.each(['progressive.flv', 'bt709-full-range.flv'] as const)(
   async name => {
     const flv = await fixture(name)
     const target = memoryTarget()
+
     await remuxMedia(flv, {
       writable: target.writable,
       storage: await diskStorage(),
     })
     const signatures: string[][] = []
+
     for (const blob of [flv, target.blob()]) {
       const input = await openMediaInput(blob)
+
       try {
         expect(input.tracks.map(track => track.kind)).toStrictEqual(
           name === 'progressive.flv' ? ['video', 'audio'] : ['video'],
@@ -100,6 +117,7 @@ test.each(['progressive.flv', 'bt709-full-range.flv'] as const)(
         input.dispose()
       }
     }
+
     expect(signatures[1]).toStrictEqual(signatures[0])
   },
 )
@@ -108,8 +126,10 @@ function tags(bytes: Uint8Array) {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const entries = []
   let offset = view.getUint32(5) + 4
+
   while (offset < bytes.length) {
     const size = view.getUint32(offset) & 0xff_ff_ff
+
     entries.push({
       offset,
       size,
@@ -118,6 +138,7 @@ function tags(bytes: Uint8Array) {
     })
     offset += 11 + size + 4
   }
+
   return entries
 }
 
@@ -134,8 +155,10 @@ async function withAacDescription(description: Uint8Array) {
   const entry = tags(bytes).find(tag => tag.type === 8 && tag.packetType === 0)!
   const header = Buffer.from(bytes.subarray(entry.offset, entry.offset + 13))
   const size = 2 + description.length
+
   header.writeUIntBE(size, 1, 3)
   const tail = Buffer.alloc(4)
+
   tail.writeUInt32BE(11 + size)
 
   return new Blob([
@@ -171,8 +194,10 @@ test.each([
 test('accepts AAC-LC when its sync extension explicitly disables SBR', async () => {
   const input = await withAacDescription(Buffer.from('118856e500', 'hex'))
   const track = await openMediaInput(input, undefined, 'audio')
+
   try {
     const first = await track.tracks[0]!.packets().next()
+
     expect(first.value?.duration).toBe(1024 / 48_000)
     expect(track.tracks[0]!.config).toMatchObject({
       codec: 'mp4a.40.2',
@@ -187,6 +212,7 @@ test('accepts AAC-LC when its sync extension explicitly disables SBR', async () 
 test('discards implicitly signaled SBR audio when only video is selected', async () => {
   const input = await withAacDescription(Buffer.from('118856e580', 'hex'))
   const target = memoryTarget()
+
   await remuxMedia(input, {
     tracks: 'video',
     writable: target.writable,
@@ -194,6 +220,7 @@ test('discards implicitly signaled SBR audio when only video is selected', async
   })
   const source = await packets(await fixture('progressive.flv'), 'video')
   const output = await packets(target.blob(), 'video')
+
   expect(output.map(packet => packet.data)).toStrictEqual(
     source.map(packet => packet.data),
   )
@@ -203,12 +230,14 @@ test('discards implicitly signaled SBR audio when only video is selected', async
 test('preserves explicit full-range BT.709 SPS colors across FLV and MP4 concatenation', async () => {
   const flv = await fixture('bt709-full-range.flv')
   const remuxed = memoryTarget()
+
   await remuxMedia(flv, {
     writable: remuxed.writable,
     storage: await diskStorage(),
   })
   const mp4 = remuxed.blob()
   const target = memoryTarget()
+
   await concatMedia([flv, mp4], {
     writable: target.writable,
     storage: await diskStorage(),
@@ -216,6 +245,7 @@ test('preserves explicit full-range BT.709 SPS colors across FLV and MP4 concate
 
   for (const blob of [flv, mp4, target.blob()]) {
     const input = await openMediaInput(blob)
+
     try {
       expect(input.tracks[0]?.config).toMatchObject({
         colorSpace: {
@@ -229,9 +259,11 @@ test('preserves explicit full-range BT.709 SPS colors across FLV and MP4 concate
       input.dispose()
     }
   }
+
   // Check container signaling independently of the SPS-aware packet reader.
   const bytes = Buffer.from(await target.blob().arrayBuffer())
   const colr = bytes.indexOf('colr')
+
   expect(colr).toBeGreaterThan(0)
   expect(bytes.toString('ascii', colr + 4, colr + 8)).toBe('nclx')
   expect(bytes.readUInt16BE(colr + 8)).toBe(1)
@@ -239,6 +271,7 @@ test('preserves explicit full-range BT.709 SPS colors across FLV and MP4 concate
   expect(bytes.readUInt16BE(colr + 12)).toBe(1)
   expect(bytes[colr + 14]).toBe(128)
   const source = await packets(flv, 'video')
+
   expect(
     (await packets(target.blob(), 'video')).map(packet => packet.data),
   ).toStrictEqual([...source, ...source].map(packet => packet.data))
@@ -246,6 +279,7 @@ test('preserves explicit full-range BT.709 SPS colors across FLV and MP4 concate
 
 test('rejects actual container color changes before touching concatenation output', async () => {
   const remuxed = memoryTarget()
+
   await remuxMedia(await fixture('bt709-full-range.flv'), {
     writable: remuxed.writable,
     storage: await diskStorage(),
@@ -253,17 +287,21 @@ test('rejects actual container color changes before touching concatenation outpu
   const original = remuxed.blob()
   const bytes = Buffer.from(await original.arrayBuffer())
   const colr = bytes.indexOf('colr')
+
   expect(colr).toBeGreaterThan(0)
 
   for (const field of [8, 10, 12, 14]) {
     const changed = Buffer.from(bytes)
+
     if (field === 14) {
       changed[colr + field] = 0
     } else {
       // SMPTE 170M differs from the BT.709 values in the unchanged SPS.
       changed.writeUInt16BE(6, colr + field)
     }
+
     const target = memoryTarget()
+
     await expect(
       concatMedia([original, new Blob([changed])], {
         writable: target.writable,
@@ -284,10 +322,13 @@ test('reads signed FLV composition offsets and preserves decode order', async ()
   const tag = tags(bytes).find(
     entry => entry.type === 9 && entry.packetType === 1,
   )
+
   if (!tag) {
     throw new Error('Missing video packet')
   }
+
   const original = await packets(new Blob([bytes]), 'video')
+
   // Signed -20 ms.
   bytes.set([0xff, 0xff, 0xec], tag.offset + 13)
   const changed = await packets(new Blob([bytes]), 'video')
@@ -296,6 +337,7 @@ test('reads signed FLV composition offsets and preserves decode order', async ()
     (bytes[tag.offset + 5] ?? 0) * 256 +
     (bytes[tag.offset + 6] ?? 0) +
     (bytes[tag.offset + 7] ?? 0) * 16_777_216
+
   expect(changed[0]?.timestamp).toBeCloseTo(dts / 1000 - 0.02, 8)
   expect(changed.map(packet => packet.data)).toStrictEqual(
     original.map(packet => packet.data),
@@ -309,15 +351,19 @@ test('rejects changing FLV sequence headers and invalid previous-tag sizes', asy
   const tag = tags(bytes).find(
     entry => entry.type === 8 && entry.packetType === 0,
   )
+
   if (!tag) {
     throw new Error('Missing AAC configuration')
   }
+
   const changedHeader = bytes.slice(tag.offset, tag.offset + 11 + tag.size + 4)
+
   changedHeader[13] = (changedHeader[13] ?? 0) ^ 0x10
   await expect(
     openMediaInput(new Blob([bytes, changedHeader])),
   ).rejects.toThrow('configuration changes')
   const corrupt = bytes.slice()
+
   corrupt[tag.offset + 11 + tag.size + 3] = 0xff
   await expect(openMediaInput(new Blob([corrupt]))).rejects.toThrow(
     'previous tag size',
@@ -329,12 +375,15 @@ test('rejects unsupported FLV codecs before writing output', async () => {
     await (await fixture('progressive.flv')).arrayBuffer(),
   )
   const tag = tags(bytes).find(entry => entry.type === 9)
+
   if (!tag) {
     throw new Error('Missing video tag')
   }
+
   // Sorenson H.263.
   bytes[tag.offset + 11] = 0x12
   const target = memoryTarget()
+
   await expect(
     remuxMedia(new Blob([bytes]), {
       writable: target.writable,
@@ -347,10 +396,13 @@ test('rejects unsupported FLV codecs before writing output', async () => {
 test('extracts selected AAC without requiring the discarded FLV video codec', async () => {
   const original = await fixture('progressive.flv')
   const bytes = new Uint8Array(await original.arrayBuffer())
+
   for (const tag of tags(bytes).filter(entry => entry.type === 9)) {
     bytes[tag.offset + 11] = 0x12
   }
+
   const target = memoryTarget()
+
   await remuxMedia(new Blob([bytes]), {
     tracks: 'audio',
     writable: target.writable,
@@ -358,6 +410,7 @@ test('extracts selected AAC without requiring the discarded FLV video codec', as
   })
   const before = await packets(original, 'audio')
   const after = await packets(target.blob(), 'audio')
+
   expect(after.map(packet => packet.data)).toStrictEqual(
     before.map(packet => packet.data),
   )

@@ -32,28 +32,37 @@ function files(
       seals: 0,
       closes: 0,
     }
+
     records.set(trackId, record)
+
     return {
       async write(data, position) {
         if (options.writeError) {
           throw options.writeError
         }
+
         const count = options.zeroWrite
           ? 0
           : Math.min(data.length, options.shortWrite ?? data.length)
+
         record.writes.push(data.length)
+
         if (position + count > record.bytes.length) {
           const next = new Uint8Array(position + count)
+
           next.set(record.bytes)
           record.bytes = next
         }
+
         record.bytes.set(data.subarray(0, count), position)
+
         return count
       },
       async read(data, position) {
         if (options.readError) {
           throw options.readError
         }
+
         record.reads.push(data.length)
         const count = options.zeroRead
           ? 0
@@ -62,23 +71,28 @@ function files(
               options.shortRead ?? data.length,
               record.bytes.length - position,
             )
+
         data.set(record.bytes.subarray(position, position + count))
+
         return count
       },
       async seal() {
         record.seals++
+
         if (options.sealError) {
           throw options.sealError
         }
       },
       async close() {
         record.closes++
+
         if (options.closeError) {
           throw options.closeError
         }
       },
     }
   }
+
   return {
     records,
     open,
@@ -94,6 +108,7 @@ test('spools full pages before sealing and rereads independent track bytes', asy
   const store = createDiskFragmentIndex(backing.open)
   const first = payload(28 * 5003)
   const second = Uint8Array.of(4, 8, 15, 16, 23, 42)
+
   try {
     await store.append(1, first.subarray(0, 65_535))
     assert.equal(backing.records.get(1)?.writes.length, 0)
@@ -101,12 +116,15 @@ test('spools full pages before sealing and rereads independent track bytes', asy
     await store.append(1, first.subarray(65_535))
     assert.equal(backing.records.get(1)?.writes.length, 2)
     assert.equal(backing.records.get(1)?.seals, 0)
+
     for (let offset = 0; offset < first.length; offset += 65_536) {
       const length = Math.min(65_536, first.length - offset)
       const page = await store.read(1, offset, length)
+
       assert.deepEqual(page, first.subarray(offset, offset + length))
       page.fill(255)
     }
+
     assert.deepEqual(
       await store.read(1, 65_530, 28),
       first.subarray(65_530, 65_558),
@@ -118,6 +136,7 @@ test('spools full pages before sealing and rereads independent track bytes', asy
   } finally {
     await store.dispose()
   }
+
   assert.equal(backing.records.get(1)?.closes, 1)
   assert.equal(backing.records.get(2)?.closes, 1)
 })
@@ -126,6 +145,7 @@ test('retries partial reads/writes without losing bytes at page boundaries', asy
   const backing = files({ shortWrite: 4093, shortRead: 997 })
   const store = createDiskFragmentIndex(backing.open)
   const data = payload(65_536 + 29)
+
   try {
     await store.append(3, data)
     assert.deepEqual(await store.read(3, 0, 65_536), data.subarray(0, 65_536))
@@ -147,10 +167,12 @@ test('honors write backpressure and closes after already queued operations', asy
       entered.resolve(null)
       await gate.promise
       stored.set(data, position)
+
       return data.length
     },
     async read(data, position) {
       data.set(stored.subarray(position, position + data.length))
+
       return data.length
     },
     async seal() {},
@@ -159,10 +181,12 @@ test('honors write backpressure and closes after already queued operations', asy
     },
   }))
   const first = store.append(1, new Uint8Array(65_536).fill(7))
+
   await entered.promise
   const second = store.append(1, Uint8Array.of(9))
   const reading = store.read(1, 65_535, 2)
   const disposal = store.dispose()
+
   assert.equal(closed, 0)
   await assert.rejects(store.append(1, Uint8Array.of(1)), {
     name: 'InvalidStateError',
@@ -187,7 +211,9 @@ test.each(['write', 'read', 'seal'] as const)(
     }
     const backing = files(options)
     const store = createDiskFragmentIndex(backing.open)
+
     await store.append(2, Uint8Array.of(2))
+
     if (operation === 'write') {
       await assert.rejects(
         store.append(1, new Uint8Array(65_536)),
@@ -197,6 +223,7 @@ test.each(['write', 'read', 'seal'] as const)(
       await store.append(1, Uint8Array.of(1))
       await assert.rejects(store.read(1, 0, 1), error => error === diskError)
     }
+
     await assert.rejects(
       store.append(3, Uint8Array.of(3)),
       error => error === diskError,
@@ -212,6 +239,7 @@ test('rejects non-progressing writes and truncated reads', async () => {
   for (const zeroWrite of [true, false]) {
     const backing = files({ zeroWrite, zeroRead: !zeroWrite })
     const store = createDiskFragmentIndex(backing.open)
+
     try {
       if (zeroWrite) {
         await assert.rejects(
@@ -237,13 +265,16 @@ test('limits read allocations and validates track IDs before opening files', asy
   ] as const) {
     const backing = files()
     const store = createDiskFragmentIndex(backing.open)
+
     await assert.rejects(store.read(1, offset, length), RangeError)
     assert.equal(backing.records.size, 0)
     await store.dispose()
   }
+
   for (const track of [0, -1, 2 ** 32, 1.5]) {
     const backing = files()
     const store = createDiskFragmentIndex(backing.open)
+
     await assert.rejects(store.append(track, Uint8Array.of(1)), RangeError)
     assert.equal(backing.records.size, 0)
     await store.dispose()
@@ -254,6 +285,7 @@ test('reports close failures after attempting every file', async () => {
   const closeError = new Error('close failed')
   const backing = files({ closeError })
   const store = createDiskFragmentIndex(backing.open)
+
   await store.append(1, Uint8Array.of(1))
   await store.append(2, Uint8Array.of(2))
   await assert.rejects(store.dispose(), error => error === closeError)

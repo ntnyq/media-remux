@@ -9,12 +9,14 @@ test.each(['remux', 'combine'] as const)(
     const input = await editedMedia([{ mediaRate: 0 }], 0, 'progressive.mp4')
     const target = memoryTarget()
     const options = { writable: target.writable, storage: await diskStorage() }
+
     await (operation === 'remux'
       ? remuxMedia(input, { ...options, tracks: 'audio' })
       : combineTracks(await fixture('video.mp4'), input, options))
 
     const source = await packets(await fixture('progressive.mp4'), 'audio')
     const actual = await packets(target.blob(), 'audio')
+
     expect(actual.map(packet => packet.data)).toStrictEqual(
       source.map(packet => packet.data),
     )
@@ -46,6 +48,7 @@ async function editedMedia(
   const moovStart = original.indexOf('moov') - 4
   const editStart = original.indexOf('elst') - 4
   const movieHeader = original.indexOf('mvhd')
+
   expect(moovStart).toBeGreaterThan(0)
   expect(editStart).toBeGreaterThan(moovStart)
   expect(original[editStart + 8]).toBe(0)
@@ -56,6 +59,7 @@ async function editedMedia(
   const mediaTime = original.readInt32BE(editStart + 20)
   const entrySize = version === 1 ? 20 : 12
   const editList = Buffer.alloc(16 + entrySize * edits.length)
+
   editList.writeUInt32BE(editList.length)
   editList.write('elst', 4, 'ascii')
   editList[8] = version
@@ -66,6 +70,7 @@ async function editedMedia(
     const segmentDuration =
       edit.duration === undefined ? duration : edit.duration * timescale
     const start = edit.mediaTime ?? mediaTime
+
     if (version === 1) {
       editList.writeBigUInt64BE(BigInt(segmentDuration), offset)
       editList.writeBigInt64BE(BigInt(start), offset + 8)
@@ -73,6 +78,7 @@ async function editedMedia(
       editList.writeUInt32BE(segmentDuration, offset)
       editList.writeInt32BE(start, offset + 4)
     }
+
     editList.writeInt32BE(
       (edit.mediaRate ?? 1) * 65_536,
       offset + entrySize - 4,
@@ -88,19 +94,23 @@ async function editedMedia(
       moovStart + original.readUInt32BE(moovStart),
     ),
   ])
+
   for (const name of ['moov', 'trak', 'edts']) {
     const offset = moov.indexOf(name) - 4
+
     moov.writeUInt32BE(
       moov.readUInt32BE(offset) + editList.length - originalSize,
       offset,
     )
   }
+
   const totalDuration = edits.reduce(
     (total, edit) =>
       total +
       (edit.duration === undefined ? duration : edit.duration * timescale),
     0,
   )
+
   moov.writeUInt32BE(totalDuration, moov.indexOf('mvhd') + 20)
   moov.writeUInt32BE(totalDuration, moov.indexOf('tkhd') + 24)
   original.write('free', moovStart + 4, 'ascii')
@@ -113,10 +123,16 @@ async function editedMedia(
  *
  * @param duration - Media edit duration in seconds; zero is open-ended.
  * @param version - Edit list field width: 32-bit for v0 or 64-bit for v1.
+ * @param startShift - Extra media ticks to add to the original edit start.
  * @returns Edited input and the unedited fragmented video for packet comparisons.
  */
-async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
+async function fragmentedEditedMedia(
+  duration: number,
+  version: 0 | 1,
+  startShift = 0,
+) {
   const target = memoryTarget()
+
   await remuxMedia(await fixture('video.mp4'), {
     writable: target.writable,
     storage: await diskStorage(),
@@ -125,11 +141,14 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
   const moovStart = original.indexOf('moov') - 4
   const trakStart = original.indexOf('trak') - 4
   const edtsStartOriginal = original.indexOf('edts') - 4
+
   expect(edtsStartOriginal).toBeGreaterThan(trakStart)
   const originalEditSize = original.readUInt32BE(edtsStartOriginal)
   const originalElst = original.indexOf('elst')
+
   expect(original[originalElst + 4]).toBe(1)
-  const mediaTime = Number(original.readBigInt64BE(originalElst + 20))
+  const mediaTime =
+    Number(original.readBigInt64BE(originalElst + 20)) + startShift
   const mvhd = original.indexOf('mvhd')
   const movieTimescale = original.readUInt32BE(
     mvhd + (original[mvhd + 4] === 1 ? 24 : 16),
@@ -138,17 +157,20 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
     await (await editedMedia([{ duration, mediaTime }], version)).arrayBuffer(),
   )
   const edtsStart = edited.lastIndexOf('edts') - 4
+
   expect(edtsStart).toBeGreaterThan(0)
   const edts = edited.subarray(
     edtsStart,
     edtsStart + edited.readUInt32BE(edtsStart),
   )
   const elst = edts.indexOf('elst')
+
   if (version === 1) {
     edts.writeBigUInt64BE(BigInt(duration * movieTimescale), elst + 12)
   } else {
     edts.writeUInt32BE(duration * movieTimescale, elst + 12)
   }
+
   // Fragment payloads use moof-relative offsets and move with their moofs.
   // Discard the optional TFRA index, whose absolute offsets would be stale.
   const bytes = Buffer.concat([
@@ -156,13 +178,16 @@ async function fragmentedEditedMedia(duration: number, version: 0 | 1) {
     edts,
     original.subarray(edtsStartOriginal + originalEditSize),
   ])
+
   for (const offset of [moovStart, trakStart]) {
     bytes.writeUInt32BE(
       bytes.readUInt32BE(offset) + edts.length - originalEditSize,
       offset,
     )
   }
+
   const mfra = bytes.lastIndexOf('mfra')
+
   expect(mfra).toBeGreaterThan(0)
   bytes.write('free', mfra, 'ascii')
 
@@ -197,6 +222,11 @@ test.each([0, 1] as const)(
         error: /trims video/u,
       },
       {
+        // The first frame starts at 1024 and ends at 1536 on the 12288 Hz clock.
+        edits: [{ mediaTime: 1280, duration: 1.979 }],
+        error: /trims video/u,
+      },
+      {
         edits: [{ mediaTime: -1, duration: 2 }],
         error: /no media edit/u,
       },
@@ -204,6 +234,7 @@ test.each([0, 1] as const)(
 
     for (const { edits, error } of cases) {
       const input = await editedMedia(edits, version)
+
       for (const operation of ['remux', 'concat', 'combine'] as const) {
         const target = memoryTarget()
         const options = {
@@ -211,6 +242,7 @@ test.each([0, 1] as const)(
           storage: await diskStorage(),
         }
         let job: Promise<RemuxResult>
+
         if (operation === 'combine') {
           job = combineTracks(input, audio, options)
         } else if (operation === 'concat') {
@@ -218,6 +250,7 @@ test.each([0, 1] as const)(
         } else {
           job = remuxMedia(input, options)
         }
+
         await expect(job).rejects.toThrow(error)
         expect(target.state.writes).toStrictEqual([])
         expect(target.state.isClosed).toBe(false)
@@ -258,9 +291,11 @@ test.each([0, 1] as const)(
       ['audio', audioPackets, 0],
     ] as const) {
       const output = await packets(target.blob(), kind)
+
       expect(output.map(packet => packet.data)).toStrictEqual(
         source.map(packet => packet.data),
       )
+
       for (const [index, packet] of output.entries()) {
         expect(packet.timestamp).toBeCloseTo(
           source[index]!.timestamp + shift - start,
@@ -268,6 +303,7 @@ test.each([0, 1] as const)(
         )
       }
     }
+
     expect(result.duration).toBeCloseTo(end - start, 4)
     expect(target.state.isClosed).toBe(true)
     expect(target.writable.locked).toBe(false)
@@ -300,6 +336,7 @@ test.each([0, 1] as const)(
       'progressive.mp4',
     )
     const target = memoryTarget()
+
     await remuxMedia(input, {
       tracks: 'audio',
       writable: target.writable,
@@ -308,6 +345,7 @@ test.each([0, 1] as const)(
 
     const source = await packets(await fixture('progressive.mp4'), 'audio')
     const output = await packets(target.blob(), 'audio')
+
     expect(output.map(packet => packet.data)).toStrictEqual(
       source.map(packet => packet.data),
     )
@@ -328,6 +366,7 @@ test.each([0, 1] as const)(
 
     const source = await packets(await fixture('video.mp4'), 'video')
     const output = await packets(target.blob(), 'video')
+
     expect(output).toStrictEqual(source)
     expect(result.duration).toBe(2)
     expect(target.state.isClosed).toBe(true)
@@ -352,6 +391,24 @@ test.each([0, 1] as const)(
       expect(output.state.isAborted).toBe(false)
       expect(output.writable.locked).toBe(false)
     }
+  },
+)
+
+test.each([0, 1] as const)(
+  'rejects a v%s edit starting partway through the first fragmented video frame',
+  async version => {
+    const { input } = await fragmentedEditedMedia(1.98, version, 1152)
+    const target = memoryTarget()
+
+    await expect(
+      remuxMedia(input, {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toThrow(/trims video/u)
+
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
   },
 )
 
@@ -383,6 +440,7 @@ test.each([0, 1] as const)(
       await (await editedMedia([{}], version)).arrayBuffer(),
     )
     const mdhd = bytes.lastIndexOf('mdhd')
+
     expect(mdhd).toBeGreaterThan(0)
     // Lowering the media timescale by one extends the track by less than half
     // a movie tick. Its two-second edit still represents the rounded endpoint.

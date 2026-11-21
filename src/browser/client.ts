@@ -17,6 +17,7 @@ function captureJob(job: MediaJob): MediaJob {
   switch (job.operation) {
     case 'remux': {
       const { input, tracks } = job
+
       return {
         operation: 'remux',
         input,
@@ -25,6 +26,7 @@ function captureJob(job: MediaJob): MediaJob {
     }
     case 'concat': {
       const { inputs, tracks } = job
+
       return {
         operation: 'concat',
         inputs: [...inputs],
@@ -116,11 +118,13 @@ export async function runMediaJob(
     ...(signal === undefined ? {} : { signal }),
     ...(onProgress === undefined ? {} : { onProgress }),
   }
+
   checkAbort(settings.signal)
   const submittedJob = captureJob(job)
 
   const directory =
     settings.directory ?? (await globalThis.navigator?.storage?.getDirectory())
+
   if (!directory) {
     throw new Error(
       'OPFS is unavailable. Supply a directory or use the core APIs with a storage adapter.',
@@ -209,10 +213,12 @@ export async function runMediaJob(
       function onMessage(event: MessageEvent<unknown>) {
         if (!isWorkerResponse(event.data)) {
           finish(new Error('Invalid media Worker response.'))
+
           return
         }
 
         const response: WorkerResponse = event.data
+
         if (response.type === 'progress') {
           try {
             settings.onProgress?.(response.progress)
@@ -223,6 +229,7 @@ export async function runMediaJob(
           finish(undefined, response.result)
         } else if (response.type === 'error') {
           const error = new Error(response.message)
+
           error.name = response.name
           finish(error)
         }
@@ -265,6 +272,7 @@ export async function runMediaJob(
       // before posting so an already-cancelled job cannot start in the Worker.
       if (settings.signal?.aborted) {
         onAbort()
+
         return
       }
 
@@ -286,7 +294,9 @@ export async function runMediaJob(
     await removeJob(temporary, 'spools')
 
     const file = await handle.getFile()
+
     checkAbort(settings.signal)
+
     if (file.size === 0) {
       throw new Error('Media Worker produced an empty output.')
     }

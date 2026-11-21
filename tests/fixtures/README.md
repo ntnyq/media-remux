@@ -10,6 +10,7 @@ Small synthetic FFmpeg-generated media fixtures. They contain generated test pat
 - `vfr-bframes.flv`: the same variable-rate H.264 payloads in FLV, retaining decode timestamps and composition offsets. Generated with `ffmpeg -i vfr-bframes.mp4 -c copy -f flv vfr-bframes.flv`.
 - `fractional-av.mp4`: H.264 at 30000/1001 fps and AAC at 44.1 kHz, used to check edit-list rounding across concatenation and repeated remux. Generated with `ffmpeg -f lavfi -i testsrc2=size=64x64:rate=30000/1001:duration=6.13 -f lavfi -i sine=frequency=440:sample_rate=44100:duration=6.13 -c:v libx264 -g 24 -keyint_min 24 -sc_threshold 0 -c:a aac -b:a 24k fractional-av.mp4`.
 - `audio.m4a`: AAC with encoder pre-roll, audio only.
+- `aac-pce.flv`: stereo AAC-LC with a program config element in its sequence header. Generated with `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.06 -ac 2 -c:a aac -aac_pce 1 -b:a 24k -f flv aac-pce.flv`.
 - `subtitle-first.mp4`: fragmented MP4 with a `mov_text` subtitle track before unchanged AAC from `audio.m4a`. The audio `traf` uses the preceding subtitle data's end as its implicit base. Generated with `ffmpeg -i audio.m4a -f srt -i subtitle.srt -map 1 -map 0 -c:a copy -c:s mov_text -movflags empty_moov+frag_keyframe+omit_tfhd_offset subtitle-first.mp4`, using one SRT cue containing `remux regression` from `00:00:00,000` to `00:00:01,000`.
 - `progressive.mp4`, `progressive.flv`: progressive H.264/AAC.
 - `long-gop.mp4`: H.264 for fragment/sample processing.

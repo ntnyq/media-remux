@@ -15,9 +15,12 @@ test.each(['complete', 'unsupported-scheme', 'missing-auxiliary'] as const)(
       'unsupported-scheme': ['schm'],
       'missing-auxiliary': ['senc', 'saiz', 'saio'],
     }[variant]
+
     for (const name of names) {
       let offset = bytes.indexOf(name)
+
       expect(offset).toBeGreaterThan(0)
+
       while (offset >= 0) {
         if (name === 'schm') {
           bytes.write('cbc1', offset + 8, 'ascii')
@@ -25,9 +28,11 @@ test.each(['complete', 'unsupported-scheme', 'missing-auxiliary'] as const)(
           // Keep every box extent valid while hiding per-sample IV metadata.
           bytes.write('free', offset, 'ascii')
         }
+
         offset = bytes.indexOf(name, offset + 4)
       }
     }
+
     const encrypted = new Blob([bytes])
     const clear = await fixture('progressive.mp4')
 
@@ -47,6 +52,7 @@ test.each(['complete', 'unsupported-scheme', 'missing-auxiliary'] as const)(
         signal: controller.signal,
       }
       let job: Promise<RemuxResult>
+
       if (operation === 'concat') {
         job = concatMedia([clear, encrypted], options)
       } else if (operation === 'combine-video') {
@@ -59,6 +65,7 @@ test.each(['complete', 'unsupported-scheme', 'missing-auxiliary'] as const)(
           tracks: operation === 'remux' ? 'all' : operation,
         })
       }
+
       await expect(job).rejects.toThrow('Encrypted MP4 tracks are unsupported')
       expect(target.state.writes).toStrictEqual([])
       expect(target.state.isClosed).toBe(false)
@@ -76,12 +83,14 @@ test.each(['video', 'audio'] as const)(
     const bytes = Buffer.from(await original.arrayBuffer())
     const codec = protectedKind === 'video' ? 'avc1' : 'mp4a'
     let offset = bytes.indexOf('stsd')
+
     while (
       offset >= 0 &&
       bytes.toString('ascii', offset + 16, offset + 20) !== codec
     ) {
       offset = bytes.indexOf('stsd', offset + 4)
     }
+
     expect(offset).toBeGreaterThan(0)
     // The unselected entry is deliberately incomplete; the clear track's
     // metadata and payload are unchanged and must remain extractable.
@@ -93,6 +102,7 @@ test.each(['video', 'audio'] as const)(
     const selectedKind = protectedKind === 'video' ? 'audio' : 'video'
     const source = await packets(original, selectedKind)
     const target = memoryTarget()
+
     await remuxMedia(new Blob([bytes]), {
       tracks: selectedKind,
       writable: target.writable,

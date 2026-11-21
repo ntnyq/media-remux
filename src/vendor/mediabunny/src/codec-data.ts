@@ -199,10 +199,7 @@ export const extractAvcDecoderConfigurationRecord = (packetData: Uint8Array): Av
         if (!spsInfo) {
             return null;
         }
-        const hasExtendedData = spsInfo.profileIdc === 100
-            || spsInfo.profileIdc === 110
-            || spsInfo.profileIdc === 122
-            || spsInfo.profileIdc === 144;
+        const hasExtendedData = avcProfileHasExtendedConfigurationData(spsInfo.profileIdc);
         return {
             configurationVersion: 1,
             avcProfileIndication: spsInfo.profileIdc,
@@ -252,10 +249,7 @@ export const serializeAvcDecoderConfigurationRecord = (record: AvcDecoderConfigu
             bytes.push(pps[i]!);
         }
     }
-    if ((record.avcProfileIndication === 100
-        || record.avcProfileIndication === 110
-        || record.avcProfileIndication === 122
-        || record.avcProfileIndication === 144)
+    if (avcProfileHasExtendedConfigurationData(record.avcProfileIndication)
         && record.chromaFormat !== null // Can happen if the data was too short
     ) {
         assert(record.bitDepthLumaMinus8 !== null);
@@ -320,11 +314,7 @@ export const deserializeAvcDecoderConfigurationRecord = (data: Uint8Array): AvcD
             sequenceParameterSetExt: null,
         };
         // Check if there are extended profile fields
-        if ((avcProfileIndication === 100
-            || avcProfileIndication === 110
-            || avcProfileIndication === 122
-            || avcProfileIndication === 144)
-            && offset + 4 <= data.length) {
+        if (avcProfileHasExtendedConfigurationData(avcProfileIndication) && offset + 4 <= data.length) {
             const chromaFormat = view.getUint8(offset++) & 0x03;
             const bitDepthLumaMinus8 = view.getUint8(offset++) & 0x07;
             const bitDepthChromaMinus8 = view.getUint8(offset++) & 0x07;
@@ -348,6 +338,10 @@ export const deserializeAvcDecoderConfigurationRecord = (data: Uint8Array): AvcD
         Logging._error('Error deserializing AVC Decoder Configuration Record:', error);
         return null;
     }
+};
+const avcProfileHasExtendedConfigurationData = (profileIdc: number) => {
+    // ISO 14496-15 excludes Baseline, Main, and Extended profiles.
+    return profileIdc !== 66 && profileIdc !== 77 && profileIdc !== 88;
 };
 export type AvcSpsInfo = {
     emulationUnpreventedBytes: Uint8Array;
@@ -423,7 +417,12 @@ export const parseAvcSps = (sps: Uint8Array): AvcSpsInfo | null => {
             || profileIdc === 83
             || profileIdc === 86
             || profileIdc === 118
-            || profileIdc === 128) {
+            || profileIdc === 128
+            || profileIdc === 138
+            || profileIdc === 139
+            || profileIdc === 134
+            || profileIdc === 135
+            || profileIdc === 144) { // Legacy High 4:4:4
             chromaFormatIdc = readExpGolomb(bitstream);
             if (chromaFormatIdc === 3) {
                 separateColourPlaneFlag = bitstream.readBits(1);

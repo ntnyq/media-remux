@@ -51,17 +51,19 @@ export abstract class InputFormat {
 export abstract class IsobmffInputFormat extends InputFormat {
     /** @internal */
     protected async _getMajorBrand(input: Input) {
-        let slice = input._reader.requestSlice(0, 12);
-        if (isThenable(slice))
-            slice = await slice;
+        const slice = await input._reader.requestSlice(0, 12);
         if (!slice)
             return null;
-        slice.skip(4);
+        const size = readU32Be(slice);
         const fourCc = readAscii(slice, 4);
         if (fourCc !== 'ftyp'
             && fourCc !== 'styp' // Segment
         ) {
             return null;
+        }
+        if (size === 1) {
+            const brand = await input._reader.requestSlice(16, 4);
+            return brand ? readAscii(brand, 4) : null;
         }
         return readAscii(slice, 4);
     }
@@ -108,18 +110,19 @@ export class Mp4InputFormat extends IsobmffInputFormat {
                 size = readU64Be(sizeExtensionSlice);
                 headerSize = 16;
             }
-            if (size < headerSize) {
-                return false; // Hardly a box is it
+            const end = pos + size;
+            const fileSize = input._reader.fileSizeNonStrict;
+            if (size < headerSize || !Number.isSafeInteger(end) || (fileSize !== null && end > fileSize)) {
+                return false;
             }
             const fourCc = readAscii(slice, 4);
-            if (fourCc === 'moof' || fourCc === 'sidx') { // Seen in HLS for example
+            if (fourCc === 'moof' || fourCc === 'sidx' || fourCc === 'moov' || fourCc === 'mdat') {
                 return true;
             }
-            else if (fourCc === 'emsg' || fourCc === 'prft' || fourCc === 'free') {
-                // These are boxes that can appear before the first moof in DASH Media Segments. They're a strong signal
-                // that this is indeed an fMP4 segment, but just to be sure, let's walk the box structure to make sure
-                // it stays sane.
-                pos += size;
+            else if (fourCc === 'emsg' || fourCc === 'prft' || fourCc === 'free'
+                || fourCc === 'skip' || fourCc === 'wide') {
+                // Padding or segment metadata may precede the first media box.
+                pos = end;
             }
             else {
                 return false;

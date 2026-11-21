@@ -13,10 +13,12 @@ function join(parts: Uint8Array[]) {
     parts.reduce((length, part) => length + part.length, 0),
   )
   let offset = 0
+
   for (const part of parts) {
     result.set(part, offset)
     offset += part.length
   }
+
   return result
 }
 
@@ -29,9 +31,11 @@ function join(parts: Uint8Array[]) {
 function words(...values: number[]) {
   const result = new Uint8Array(values.length * 4)
   const view = new DataView(result.buffer)
+
   for (const [index, value] of values.entries()) {
     view.setUint32(index * 4, value)
   }
+
   return result
 }
 
@@ -57,12 +61,15 @@ function header(name: string, size: number) {
   if (size <= 0xff_ff_ff_ff) {
     return join([words(size), new TextEncoder().encode(name)])
   }
+
   const data = join([
     words(1),
     new TextEncoder().encode(name),
     new Uint8Array(8),
   ])
+
   new DataView(data.buffer).setBigUint64(8, BigInt(size))
+
   return data
 }
 
@@ -76,8 +83,10 @@ function header(name: string, size: number) {
 function boxes(data: Uint8Array) {
   const entries: { name: string; data: Uint8Array; payload: Uint8Array }[] = []
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+
   for (let offset = 0; offset < data.length;) {
     const size = view.getUint32(offset)
+
     assert.ok(size >= 8 && offset + size <= data.length)
     entries.push({
       name: new TextDecoder().decode(data.subarray(offset + 4, offset + 8)),
@@ -86,6 +95,7 @@ function boxes(data: Uint8Array) {
     })
     offset += size
   }
+
   return entries
 }
 
@@ -157,6 +167,7 @@ export async function fragmentedMp4(
   const originalMoov = original.find(entry => entry.name === 'moov')!.payload
   const trackCounts =
     tracks === 1 ? [fragments] : [fragments, shorterTrackFragments]
+
   assert.ok(trackCounts.every(count => count > 0 && count <= fragments))
 
   /**
@@ -172,10 +183,12 @@ export async function fragmentedMp4(
         if (entry.name === 'edts') {
           return []
         }
+
         if (entry.name === 'stbl') {
           const stsd = boxes(entry.payload).find(
             child => child.name === 'stsd',
           )!.data
+
           return [
             box(
               'stbl',
@@ -189,30 +202,38 @@ export async function fragmentedMp4(
             ),
           ]
         }
+
         if (entry.name === 'trak') {
           return trackCounts.map((_, index) =>
             box('trak', rewrite(entry.payload, index + 1)),
           )
         }
+
         if (['mdia', 'minf'].includes(entry.name)) {
           return [box(entry.name, rewrite(entry.payload, trackId))]
         }
+
         const view = new DataView(entry.payload.buffer)
+
         if (entry.name === 'mvhd') {
           view.setUint32(16, 0)
         }
+
         if (entry.name === 'tkhd') {
           view.setUint32(12, trackId)
           view.setUint32(20, 0)
         }
+
         if (entry.name === 'mdhd') {
           view.setUint32(12, 48_000)
           view.setUint32(16, 0)
         }
+
         return [box(entry.name, entry.payload)]
       }),
     )
   }
+
   const moov = box(
     'moov',
     join([
@@ -244,9 +265,11 @@ export async function fragmentedMp4(
     if (tracks === 1) {
       return index
     }
+
     if (track === 2) {
       return index * 2 + 1
     }
+
     return index < shorterTrackFragments
       ? index * 2
       : index + shorterTrackFragments
@@ -262,9 +285,11 @@ export async function fragmentedMp4(
     if (tracks === 1) {
       return { track: 1, index }
     }
+
     if (index < shorterTrackFragments * 2) {
       return { track: (index % 2) + 1, index: Math.floor(index / 2) }
     }
+
     return { track: 1, index: index - shorterTrackFragments }
   }
 
@@ -297,6 +322,7 @@ export async function fragmentedMp4(
     const { track, index } = location(globalIndex)
     const tfhd = box('tfhd', words(0x02_00_00, track))
     const decode = new Uint8Array(8)
+
     new DataView(decode.buffer).setBigUint64(
       0,
       BigInt(index * samplesPerFragment * 1024),
@@ -316,11 +342,13 @@ export async function fragmentedMp4(
     function trun(from: number, count: number, offset: number) {
       const entries = Array.from({ length: count }, (_, at) => {
         const sample = from + at
+
         return words(
           sample === 1 ? 0x00_01_00_00 : 0,
           relativeTimestamp(sample) - sample * 1024,
         )
       })
+
       return box(
         'trun',
         join([
@@ -340,6 +368,7 @@ export async function fragmentedMp4(
       const runs = multipleRuns
         ? [trun(0, 1, offset), trun(1, 2, offset + 4)]
         : [trun(0, 3, offset)]
+
       return box(
         'moof',
         join([
@@ -348,6 +377,7 @@ export async function fragmentedMp4(
         ]),
       )
     }
+
     const data = box(
       'mdat',
       join(
@@ -357,15 +387,19 @@ export async function fragmentedMp4(
       ),
     )
     const movie = moof(moof(0).length + 8)
+
     return join([movie, data])
   }
+
   const stride = fragment(0).length
   const mfraStart = fragmentStart + totalFragments * stride
   let indexOffset = mfraStart + 8 + indexPadding
   const indexes = trackCounts.map((count, at) => {
     const size = 24 + count * entrySize
     const offset = indexOffset
+
     indexOffset += size
+
     return {
       track: at + 1,
       count,
@@ -400,29 +434,38 @@ export async function fragmentedMp4(
     function copy(offset: number, data: Uint8Array) {
       const from = Math.max(start, offset)
       const to = Math.min(end, offset + data.length)
+
       if (from < to) {
         result.set(data.subarray(from - offset, to - offset), from - start)
       }
     }
+
     copy(0, init)
+
     if (padding) {
       copy(init.length, header('free', padding))
     }
+
     const first = Math.max(0, Math.floor((start - fragmentStart) / stride))
     const last = Math.min(
       totalFragments,
       Math.ceil((end - fragmentStart) / stride),
     )
+
     for (let at = first; at < last; at++) {
       copy(fragmentStart + at * stride, fragment(at))
     }
+
     if (indexed) {
       copy(mfraStart, header('mfra', mfraSize))
+
       if (indexPadding) {
         copy(mfraStart + 8, header('free', indexPadding))
       }
+
       for (const table of indexes) {
         const word = (widths[0] - 1) * 16 + (widths[1] - 1) * 4 + widths[2] - 1
+
         copy(
           table.start,
           join([
@@ -438,6 +481,7 @@ export async function fragmentedMp4(
           table.count,
           Math.ceil((end - table.entries) / entrySize),
         )
+
         for (let entry = from; entry < to; entry++) {
           const data = new Uint8Array(entrySize)
           let offset = 0
@@ -451,12 +495,15 @@ export async function fragmentedMp4(
            */
           const write = (value: number, width: number) => {
             let remaining = value
+
             for (let at = width - 1; at >= 0; at--) {
               data[offset + at] = remaining % 256
               remaining = Math.floor(remaining / 256)
             }
+
             offset += width
           }
+
           write(
             entry * 3072 + relativeTimestamp(indexReference),
             version === 1 ? 8 : 4,
@@ -476,13 +523,17 @@ export async function fragmentedMp4(
           copy(table.entries + entry * entrySize, data)
         }
       }
+
       copy(size - 16, box('mfro', words(0, mfraSize)))
     }
+
     for (const [offset, data] of patches) {
       copy(offset, data)
     }
+
     return result
   }
+
   const source = new CustomSource({
     /**
      * Reports the virtual file size without materializing its contents.
@@ -505,19 +556,24 @@ export async function fragmentedMp4(
       if (recordReads) {
         reads.push({ start, end })
       }
+
       assert.ok(
         end - start <= 256 * 1024,
         `Unbounded source read: ${end - start}`,
       )
       await Promise.resolve()
+
       return readRange(start, end)
     },
   })
   const read: unknown = Reflect.get(source, '_read')
+
   assert.equal(typeof read, 'function')
+
   if (typeof read !== 'function') {
     throw new TypeError('Missing source reader')
   }
+
   Object.defineProperty(source, '_read', {
     configurable: true,
 
@@ -534,16 +590,20 @@ export async function fragmentedMp4(
       if (recordReads) {
         requests.push({ start, end })
       }
+
       assert.ok(
         end - start <= 64 * 1024,
         `Unbounded parser read: ${end - start}`,
       )
+
       if (indexes.some(table => start >= table.entries && end <= table.end)) {
         assert.ok(end - start <= 16 * 1024)
       }
+
       return Reflect.apply(read, source, [start, end, ...args])
     },
   })
+
   return {
     source,
     reads,
@@ -601,6 +661,7 @@ export async function fragmentedMp4(
      */
     blob() {
       assert.ok(size < 64 * 1024 * 1024)
+
       return new Blob([readRange(0, size)])
     },
   }

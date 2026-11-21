@@ -14,8 +14,10 @@ const videoTimescale = 57_600
  */
 function boxes(data: Buffer) {
   const entries: { type: string; bytes: Buffer }[] = []
+
   for (let offset = 0; offset < data.length;) {
     const size = data.readUInt32BE(offset)
+
     assert.ok(size >= 8 && offset + size <= data.length)
     entries.push({
       type: data.toString('ascii', offset + 4, offset + 8),
@@ -23,6 +25,7 @@ function boxes(data: Buffer) {
     })
     offset += size
   }
+
   return entries
 }
 
@@ -35,7 +38,9 @@ function boxes(data: Buffer) {
  */
 function boxPayload(data: Buffer, type: string) {
   const box = boxes(data).find(entry => entry.type === type)
+
   assert.ok(box, `Missing ${type} box`)
+
   return box.bytes.subarray(8)
 }
 
@@ -47,11 +52,14 @@ function boxPayload(data: Buffer, type: string) {
  */
 function videoEntry(data: Buffer) {
   let payload = data
+
   for (const type of ['moov', 'trak', 'mdia', 'minf', 'stbl', 'stsd']) {
     payload = boxPayload(payload, type)
   }
+
   expect(payload.readUInt32BE(4)).toBe(1)
   const entry = boxes(payload.subarray(8))[0]!
+
   // The VisualSampleEntry body starts after the box header and is 78 bytes.
   return { stsd: payload, type: entry.type, children: entry.bytes.subarray(86) }
 }
@@ -65,12 +73,15 @@ function videoEntry(data: Buffer) {
 function av1FragmentStarts(data: Buffer) {
   const starts: bigint[] = []
   const compositionFlags: number[] = []
+
   for (const fragment of boxes(data).filter(entry => entry.type === 'moof')) {
     for (const track of boxes(fragment.bytes.subarray(8))) {
       if (track.type === 'traf') {
         const children = track.bytes.subarray(8)
+
         if (boxPayload(children, 'tfhd').readUInt32BE(4) === 1) {
           const run = boxPayload(children, 'trun')
+
           // oxlint-disable-next-line no-bitwise -- trun full-box flags.
           compositionFlags.push(run.readUIntBE(1, 3) & 0x08_00)
           starts.push(boxPayload(children, 'tfdt').readBigUInt64BE(4))
@@ -78,8 +89,10 @@ function av1FragmentStarts(data: Buffer) {
       }
     }
   }
+
   expect(starts.length).toBeGreaterThan(0)
   expect(compositionFlags).toStrictEqual(starts.map(() => 0))
+
   return starts
 }
 
@@ -124,15 +137,18 @@ test.each([
     const input = await fixture(name)
     const audio = await fixture('audio.m4a')
     const source = videoEntry(Buffer.from(await input.arrayBuffer()))
+
     expect(source.type).toBe(type)
 
     const target = memoryTarget()
+
     await combineTracks(input, audio, {
       storage: await diskStorage(),
       writable: target.writable,
     })
     const output = target.blob()
     const entry = videoEntry(Buffer.from(await output.arrayBuffer()))
+
     expect(entry.type).toBe(type)
     expect(boxPayload(entry.children, 'hvcC')).toStrictEqual(
       boxPayload(source.children, 'hvcC'),
@@ -150,6 +166,7 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
   const input = await fixture('av1-main10.mp4')
   const sourceBytes = Buffer.from(await input.arrayBuffer())
   const sourceConfig = boxPayload(videoEntry(sourceBytes).children, 'av1C')
+
   expect(sourceConfig.length).toBeGreaterThan(4)
   // Explicit initial presentation delay of one sample.
   sourceConfig[3] = 0x10
@@ -158,9 +175,11 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
   const sourceVideo = await packets(video, 'video')
   const sourceAudio = await packets(audio, 'audio')
   const start = sourceAudio[0]!.timestamp
+
   expect(start).toBeLessThan(sourceVideo[0]!.timestamp)
 
   const target = memoryTarget()
+
   await combineTracks(video, audio, {
     storage: await diskStorage(),
     writable: target.writable,
@@ -168,20 +187,25 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
   const output = target.blob()
   const data = Buffer.from(await output.arrayBuffer())
   const entry = videoEntry(data)
+
   expect(entry.type).toBe('av01')
   expect(boxPayload(entry.children, 'av1C')).toStrictEqual(sourceConfig)
   const compatibleBrands = boxPayload(data, 'ftyp')
     .toString('ascii', 8)
     .match(/.{4}/gu)
+
   expect(compatibleBrands).toContain('av01')
   expect(av1FragmentStarts(data)[0]).toBe(
     BigInt(Math.round((sourceVideo[0]!.timestamp - start) * videoTimescale)),
   )
 
   const outputVideo = await packets(output, 'video')
+
   expect(outputVideo).toHaveLength(sourceVideo.length)
+
   for (const [index, original] of sourceVideo.entries()) {
     const actual = outputVideo[index]!
+
     expect(actual.data).toStrictEqual(original.data)
     expect(actual.type).toBe(original.type)
     expect(
@@ -191,6 +215,7 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
       1 / videoTimescale,
     )
   }
+
   await expect(encodedPackets(output, 'audio')).resolves.toStrictEqual(
     await encodedPackets(audio, 'audio'),
   )
@@ -204,25 +229,87 @@ test('writes colr when av1C has no configuration OBUs', async () => {
   const av1C = boxes(children).find(entry => entry.type === 'av1C')!.bytes
   // Replace the removed OBUs with a sibling free box to keep chunk offsets.
   const remainder = av1C.subarray(12)
+
   expect(remainder.length).toBeGreaterThanOrEqual(8)
   av1C.writeUInt32BE(12)
   remainder.writeUInt32BE(remainder.length)
   remainder.write('free', 4, 'ascii')
   const colr = boxes(children).find(entry => entry.type === 'colr')
+
   colr?.bytes.write('free', 4, 'ascii')
 
   const target = memoryTarget()
+
   await remuxMedia(new Blob([bytes]), {
     storage: await diskStorage(),
     writable: target.writable,
   })
   const result = videoEntry(Buffer.from(await target.blob().arrayBuffer()))
+
   expect(boxPayload(result.children, 'av1C')).toStrictEqual(
     av1C.subarray(8, 12),
   )
   expect(boxPayload(result.children, 'colr').toString('ascii', 0, 4)).toBe(
     'nclx',
   )
+})
+
+test('preserves raw MP4 color identifiers and rejects mismatched segments', async () => {
+  const source = memoryTarget()
+
+  await remuxMedia(await fixture('bt709-full-range.flv'), {
+    storage: await diskStorage(),
+    writable: source.writable,
+  })
+  const first = Buffer.from(await source.blob().arrayBuffer())
+  // Valid SMPTE 240M identifiers override the BT.709 in the AVC SPS.
+  const expected = Buffer.from('6e636c7800070007000780', 'hex')
+
+  expected.copy(boxPayload(videoEntry(first).children, 'colr'))
+  const video = new Blob([first])
+  const audio = await fixture('audio.m4a')
+  const combined = memoryTarget()
+
+  await combineTracks(video, audio, {
+    storage: await diskStorage(),
+    writable: combined.writable,
+  })
+  const remuxed = memoryTarget()
+
+  await remuxMedia(combined.blob(), {
+    storage: await diskStorage(),
+    writable: remuxed.writable,
+  })
+  const concatenated = memoryTarget()
+
+  await concatMedia([video, video], {
+    storage: await diskStorage(),
+    writable: concatenated.writable,
+  })
+
+  for (const target of [combined, remuxed, concatenated]) {
+    const { children } = videoEntry(
+      Buffer.from(await target.blob().arrayBuffer()),
+    )
+
+    expect(boxPayload(children, 'colr')).toStrictEqual(expected)
+  }
+
+  for (const offset of [4, 6, 8]) {
+    const second = Buffer.from(first)
+
+    boxPayload(videoEntry(second).children, 'colr').writeUInt16BE(4, offset)
+    const target = memoryTarget()
+
+    await expect(
+      concatMedia([video, new Blob([second])], {
+        storage: await diskStorage(),
+        writable: target.writable,
+      }),
+    ).rejects.toThrow(/incompatible track layout or decoder configuration/iu)
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
+  }
 })
 
 test('concatenates compatible AV1 and remuxes the resulting fragmented input', async () => {
@@ -238,6 +325,7 @@ test('concatenates compatible AV1 and remuxes the resulting fragmented input', a
     storage: await diskStorage(),
     writable: repeated.writable,
   })
+
   await expect(encodedPackets(repeated.blob(), 'video')).resolves.toStrictEqual(
     [...expected, ...expected, ...expected],
   )
@@ -245,6 +333,7 @@ test('concatenates compatible AV1 and remuxes the resulting fragmented input', a
   const starts = av1FragmentStarts(
     Buffer.from(await repeated.blob().arrayBuffer()),
   )
+
   expect(starts[0]).toBe(0n)
   expect(starts.length).toBeGreaterThan(1)
 })
@@ -258,13 +347,17 @@ test.each([
     const first = await fixture(name)
     const second = Buffer.from(await first.arrayBuffer())
     const entry = videoEntry(second)
+
     if (change === 'HEVC sample entry') {
       entry.stsd.write('hev1', 12, 'ascii')
     } else {
       const config = boxPayload(entry.children, 'av1C')
+
       config[3] = config[3] === 0x10 ? 0x11 : 0x10
     }
+
     const target = memoryTarget()
+
     await expect(
       concatMedia([first, new Blob([second])], {
         storage: await diskStorage(),
@@ -283,8 +376,10 @@ test.each([
   'rejects an invalid configuration record in %s before writing',
   async (name, type) => {
     const bytes = Buffer.from(await (await fixture(name)).arrayBuffer())
+
     boxPayload(videoEntry(bytes).children, type)[0] = 0
     const target = memoryTarget()
+
     await expect(
       remuxMedia(new Blob([bytes]), {
         storage: await diskStorage(),
@@ -300,6 +395,7 @@ test('rejects a cross-segment AV1 video gap before acquiring the output', async 
   const video = await fixture('av1-main10.mp4')
   const audio = await fixture('audio.m4a')
   const combined = memoryTarget()
+
   // The audio extends beyond the video in each segment.
   await combineTracks(video, audio, {
     storage: await diskStorage(),
@@ -307,6 +403,7 @@ test('rejects a cross-segment AV1 video gap before acquiring the output', async 
   })
   const clip = combined.blob()
   const target = memoryTarget()
+
   await expect(
     concatMedia([clip, clip], {
       storage: await diskStorage(),

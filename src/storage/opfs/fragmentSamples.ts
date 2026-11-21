@@ -86,6 +86,7 @@ export function createOpfsFragmentSamples(
       `samples-${trackId}-${kind}.bin`,
       { create: true },
     )
+
     if (!isSyncAccessFileHandle(handle)) {
       throw new Error('This browser does not support worker sample disk.')
     }

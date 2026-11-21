@@ -20,10 +20,12 @@ function join(parts: Uint8Array[]) {
     parts.reduce((size, part) => size + part.length, 0),
   )
   let offset = 0
+
   for (const part of parts) {
     data.set(part, offset)
     offset += part.length
   }
+
   return data
 }
 
@@ -36,9 +38,11 @@ function join(parts: Uint8Array[]) {
  */
 function box(name: string, payload: Uint8Array) {
   const data = new Uint8Array(8 + payload.length)
+
   new DataView(data.buffer).setUint32(0, data.length)
   data.set(new TextEncoder().encode(name), 4)
   data.set(payload, 8)
+
   return data
 }
 
@@ -52,9 +56,11 @@ function box(name: string, payload: Uint8Array) {
 function largeHeader(name: string, size: number) {
   const data = new Uint8Array(16)
   const view = new DataView(data.buffer)
+
   view.setUint32(0, 1)
   data.set(new TextEncoder().encode(name), 4)
   view.setBigUint64(8, BigInt(size))
+
   return data
 }
 
@@ -68,8 +74,10 @@ function largeHeader(name: string, size: number) {
 function boxes(data: Uint8Array): Box[] {
   const result: Box[] = []
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+
   for (let offset = 0; offset < data.length;) {
     const size = view.getUint32(offset)
+
     assert.ok(size >= 8 && offset + size <= data.length)
     result.push({
       name: new TextDecoder().decode(data.subarray(offset + 4, offset + 8)),
@@ -78,6 +86,7 @@ function boxes(data: Uint8Array): Box[] {
     })
     offset += size
   }
+
   return result
 }
 
@@ -148,16 +157,20 @@ export async function indexedMp4(
     if (pcm) {
       return 4
     }
+
     return constantSize ? 5 : (index % 15) + 1
   })
   const offsets: number[] = []
   let mediaSize = 0
+
   for (const size of sizes) {
     offsets.push(mediaSize)
     mediaSize += size
   }
+
   const timestamps: number[] = []
   let decodeTime = 0
+
   for (let index = 0; index < samples; index++) {
     timestamps.push(
       decodeTime +
@@ -167,17 +180,22 @@ export async function indexedMp4(
     )
     decodeTime += deltas[index % deltas.length]!
   }
+
   const chunks: { start: number; count: number }[] = []
+
   for (let index = 0; index < samples;) {
     const count = Math.min(
       chunkPattern[chunks.length % chunkPattern.length]!,
       samples - index,
     )
+
     assert.ok(count > 0)
     chunks.push({ start: index, count })
     index += count
   }
+
   const media = new Uint8Array(mediaSize)
+
   for (let index = 0; index < samples; index++) {
     media.fill(index % 251, offsets[index]!, offsets[index]! + sizes[index]!)
   }
@@ -199,13 +217,17 @@ export async function indexedMp4(
   ) {
     const data = new Uint8Array(8 + entries * width)
     const view = new DataView(data.buffer)
+
     view.setUint32(4, entries)
+
     if (name === 'ctts') {
       view.setUint8(0, cttsVersion)
     }
+
     for (let index = 0; index < entries; index++) {
       write(view, 8 + index * width, index)
     }
+
     return box(name, data)
   }
 
@@ -216,15 +238,19 @@ export async function indexedMp4(
    */
   function sampleSizes() {
     let payloadSize = 0
+
     if (fieldSize) {
       payloadSize = Math.ceil((samples * fieldSize) / 8)
     } else if (!constantSize) {
       payloadSize = samples * 4
     }
+
     const data = new Uint8Array(12 + payloadSize)
     const view = new DataView(data.buffer)
+
     view.setUint32(4, fieldSize || (constantSize ? 5 : 0))
     view.setUint32(8, samples)
+
     for (let index = 0; index < samples; index++) {
       if (fieldSize === 4) {
         data[12 + Math.floor(index / 2)]! |=
@@ -237,6 +263,7 @@ export async function indexedMp4(
         view.setUint32(12 + index * 4, sizes[index]!)
       }
     }
+
     return box(fieldSize ? 'stz2' : 'stsz', data)
   }
 
@@ -258,13 +285,16 @@ export async function indexedMp4(
         if (entry.name === 'edts') {
           return []
         }
+
         if (entry.name === 'stbl') {
           let stsd = boxes(entry.payload).find(
             child => child.name === 'stsd',
           )!.data
+
           if (pcm) {
             const pcmEntry = new Uint8Array(8 + 36)
             const view = new DataView(pcmEntry.buffer)
+
             view.setUint32(4, 1)
             view.setUint32(8, 36)
             pcmEntry.set(new TextEncoder().encode('sowt'), 12)
@@ -274,6 +304,7 @@ export async function indexedMp4(
             view.setUint32(40, 48_000 * 65_536)
             stsd = box('stsd', pcmEntry)
           }
+
           return [
             box(
               'stbl',
@@ -327,6 +358,7 @@ export async function indexedMp4(
                   co64 ? 8 : 4,
                   (view, at, index) => {
                     const offset = mediaOffset + offsets[chunks[index]!.start]!
+
                     if (co64) {
                       view.setBigUint64(at, BigInt(offset))
                     } else {
@@ -339,26 +371,33 @@ export async function indexedMp4(
             ),
           ]
         }
+
         if (['mdia', 'minf'].includes(entry.name)) {
           return [box(entry.name, rewrite(entry.payload, mediaOffset, trackId))]
         }
+
         if (entry.name === 'trak') {
           return Array.from({ length: tracks }, (_, index) =>
             box('trak', rewrite(entry.payload, mediaOffset, index + 1)),
           )
         }
+
         if (entry.name === 'tkhd') {
           new DataView(entry.payload.buffer).setUint32(12, trackId)
         }
+
         if (entry.name === 'mdhd') {
           const view = new DataView(entry.payload.buffer)
+
           view.setUint32(12, 48_000)
           view.setUint32(16, decodeTime)
         }
+
         return [box(entry.name, entry.payload)]
       }),
     )
   }
+
   const moovHeaderSize = padding ? 16 : 8
   const contentsSize = rewrite(originalMoov, 0, 1).length
   const moovSize = moovHeaderSize + padding + contentsSize
@@ -393,6 +432,7 @@ export async function indexedMp4(
    */
   function collectTables(data: Uint8Array, start: number) {
     let offset = start
+
     for (const entry of boxes(data)) {
       if (['trak', 'mdia', 'minf', 'stbl'].includes(entry.name)) {
         collectTables(entry.payload, offset + 8)
@@ -414,9 +454,11 @@ export async function indexedMp4(
           end: offset + entry.data.length,
         })
       }
+
       offset += entry.data.length
     }
   }
+
   collectTables(contents, ftyp.length + moovHeaderSize + padding)
   const size = mediaOffset + mediaSize
   const reads: { start: number; end: number }[] = []
@@ -443,6 +485,7 @@ export async function indexedMp4(
       if (recordReads) {
         reads.push({ start, end })
       }
+
       assert.ok(
         end - start <= 256 * 1024,
         `Unbounded index read: ${end - start} bytes`,
@@ -450,9 +493,11 @@ export async function indexedMp4(
       // Force an asynchronous boundary to expose shared parser-state races.
       await Promise.resolve()
       const data = new Uint8Array(end - start)
+
       for (const segment of segments) {
         const from = Math.max(start, segment.start)
         const to = Math.min(end, segment.start + segment.data.length)
+
         if (from < to) {
           data.set(
             segment.data.subarray(from - segment.start, to - segment.start),
@@ -460,16 +505,20 @@ export async function indexedMp4(
           )
         }
       }
+
       return data
     },
   })
   // The public declaration hides _read; probe this pinned dependency at the
   // Reader boundary as well as recording actual, coalesced source reads.
   const read: unknown = Reflect.get(source, '_read')
+
   assert.equal(typeof read, 'function')
+
   if (typeof read !== 'function') {
     throw new TypeError('Missing source reader')
   }
+
   Object.defineProperty(source, '_read', {
     configurable: true,
 
@@ -486,6 +535,7 @@ export async function indexedMp4(
       if (recordReads) {
         requests.push({ start, end })
       }
+
       if (
         tableRanges.some(range => start >= range.start + 8 && end <= range.end)
       ) {
@@ -494,13 +544,16 @@ export async function indexedMp4(
           `Unbounded table page: ${end - start} bytes`,
         )
       }
+
       assert.ok(
         end - start <= 64 * 1024,
         `Unbounded parser request: ${end - start} bytes`,
       )
+
       return Reflect.apply(read, source, [start, end, ...args])
     },
   })
+
   return {
     source,
     reads,
@@ -546,13 +599,16 @@ export async function indexedMp4(
       assert.ok(padding < 16 * 1024 * 1024)
       const parts: Uint8Array[] = []
       let position = 0
+
       for (const segment of segments) {
         if (segment.start > position) {
           parts.push(new Uint8Array(segment.start - position))
         }
+
         parts.push(segment.data)
         position = segment.start + segment.data.length
       }
+
       return new Blob(parts.map(part => part.slice()))
     },
   }

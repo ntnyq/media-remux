@@ -74,8 +74,10 @@ export async function concatMedia(
   options: RemuxOptions,
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
+
   checkAbort(settings.signal)
   const blobs = [...inputs]
+
   if (blobs.length === 0) {
     throw new TypeError('At least one media segment is required.')
   }
@@ -99,6 +101,7 @@ export async function concatMedia(
     try {
       const tracks = selectTracks(input, settings.tracks)
       const current = JSON.stringify(tracks.map(track => trackSignature(track)))
+
       if (index === 0) {
         baseline = tracks
         signature = current
@@ -128,6 +131,7 @@ export async function concatMedia(
 
       try {
         const info = infos[index]
+
         if (!info) {
           throw new Error('Missing segment timeline.')
         }
@@ -146,6 +150,7 @@ export async function concatMedia(
   if (!decodeTimeline) {
     throw new Error('Missing output decode timeline.')
   }
+
   return writeSegments(
     baseline,
     segments(),
@@ -188,13 +193,16 @@ export async function combineTracks(
     })
 
     const videoInput = await openMediaInput(video, settings.signal, 'video')
+
     inputs.push(videoInput)
 
     const audioInput = await openMediaInput(audio, settings.signal, 'audio')
+
     inputs.push(audioInput)
 
     const videoTrack = videoInput.tracks.find(track => track.kind === 'video')
     const audioTrack = audioInput.tracks.find(track => track.kind === 'audio')
+
     if (!videoTrack || !audioTrack) {
       throw new Error(
         'combineTracks requires a video track followed by an audio track.',

@@ -39,6 +39,7 @@ async function readBytes(
   signal?: AbortSignal,
 ): Promise<Uint8Array<ArrayBuffer>> {
   checkAbort(signal)
+
   if (offset < 0 || length < 0 || offset + length > blob.size) {
     throw new Error('Truncated FLV file.')
   }
@@ -46,7 +47,9 @@ async function readBytes(
   const bytes = new Uint8Array(
     await blob.slice(offset, offset + length).arrayBuffer(),
   )
+
   checkAbort(signal)
+
   if (bytes.length !== length) {
     throw new Error('Incomplete FLV read.')
   }
@@ -88,16 +91,19 @@ async function* readTags(
   signal?: AbortSignal,
 ): AsyncGenerator<FlvTag, void, unknown> {
   const header = await readBytes(blob, 0, 9, signal)
+
   if (header[3] !== 1 || ((header[4] ?? 0) & ~5) !== 0) {
     throw new Error('Unsupported FLV header.')
   }
 
   let offset = new DataView(header.buffer).getUint32(5)
+
   if (offset < 9) {
     throw new Error('Invalid FLV data offset.')
   }
 
   const initialSize = await readBytes(blob, offset, 4, signal)
+
   if (new DataView(initialSize.buffer).getUint32(0) !== 0) {
     throw new Error('Invalid FLV initial tag size.')
   }
@@ -108,23 +114,28 @@ async function* readTags(
     const tagHeader = await readBytes(blob, offset, 11, signal)
     const [type] = tagHeader
     const size = uint24(tagHeader, 1)
+
     if (uint24(tagHeader, 8) !== 0 || ![8, 9, 18].includes(type ?? 0)) {
       throw new Error('Unsupported FLV tag or encrypted data.')
     }
 
     const tail = await readBytes(blob, offset + 11 + size, 4, signal)
+
     if (new DataView(tail.buffer).getUint32(0) !== 11 + size) {
       throw new Error('Invalid FLV previous tag size.')
     }
 
     const tagKind = type === 9 ? 'video' : 'audio'
+
     if (type !== 18 && (!kind || kind === tagKind)) {
       const prefixSize = type === 9 ? 5 : 2
+
       if (size < prefixSize) {
         throw new Error('Truncated FLV media tag.')
       }
 
       const prefix = await readBytes(blob, offset + 11, prefixSize, signal)
+
       if (
         (type === 9 && ((prefix[0] ?? 0) & 15) !== 7) ||
         (type === 8 && (prefix[0] ?? 0) >> 4 !== 10)
@@ -133,6 +144,7 @@ async function* readTags(
       }
 
       const packetType = prefix[1] ?? -1
+
       if (
         packetType !== 0 &&
         packetType !== 1 &&
@@ -199,6 +211,7 @@ function videoConfig(description: Uint8Array<ArrayBuffer>): VideoDecoderConfig {
   const avc = deserializeAvcDecoderConfigurationRecord(description)
   const sps = avc?.sequenceParameterSets[0]
   const info = sps && parseAvcSps(sps)
+
   if (!avc || !info || avc.pictureParameterSets.length === 0) {
     throw new Error('Invalid FLV AVC decoder configuration.')
   }
@@ -237,10 +250,11 @@ function videoConfig(description: Uint8Array<ArrayBuffer>): VideoDecoderConfig {
  *
  * @param description - AudioSpecificConfig bytes.
  * @returns Codec identifier, channel count, sample rate, and initialization bytes.
- * @throws {Error} If AAC-LC, explicit channels, or a positive sample rate are absent.
+ * @throws {Error} If AAC-LC, a channel count, or a positive sample rate are absent.
  */
 function audioConfig(description: Uint8Array<ArrayBuffer>): AudioDecoderConfig {
   const info = parseAacAudioSpecificConfig(description)
+
   if (
     info.objectType !== 2 ||
     info.sbrPresent ||
@@ -248,9 +262,7 @@ function audioConfig(description: Uint8Array<ArrayBuffer>): AudioDecoderConfig {
     !info.outputSampleRate ||
     !(info.outputSampleRate > 0)
   ) {
-    throw new Error(
-      'FLV requires AAC-LC with an explicit channel configuration.',
-    )
+    throw new Error('FLV requires AAC-LC with a known channel layout.')
   }
 
   return {
@@ -273,6 +285,7 @@ function aacFrameSamples(description: Uint8Array): number {
   // Skip the object type and sample-rate field, whose escape value introduces
   // an explicit 24-bit frequency, then skip channels to reach frameLengthFlag.
   bits.skipBits(5)
+
   if (bits.readBits(4) === 15) {
     bits.skipBits(24)
   }
@@ -316,6 +329,7 @@ export async function openFlvInput(
   )) {
     if (tag.packetType === 0) {
       const previous = configs.get(tag.kind)
+
       if (previous && !sameBytes(previous, tag.data)) {
         throw new Error('FLV decoder configuration changes within a segment.')
       }
@@ -331,6 +345,7 @@ export async function openFlvInput(
   for (const [kind, description] of configs) {
     const config =
       kind === 'video' ? videoConfig(description) : audioConfig(description)
+
     tracks.push({
       kind,
       codec: kind === 'video' ? 'avc' : 'aac',
@@ -377,6 +392,7 @@ export async function openFlvInput(
           if (tag.packetType !== 0) {
             if (pending) {
               const delta = tag.timestamp - pending.timestamp
+
               if (delta < 0 || (delta === 0 && tag.packetType === 1)) {
                 throw new Error(
                   'FLV decode timestamps must increase within each track.',

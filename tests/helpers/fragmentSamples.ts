@@ -12,6 +12,7 @@ export async function temporaryFragmentSamples() {
   const directory = await mkdtemp(join(tmpdir(), 'media-remux-samples-'))
   const store = createDiskFragmentSamples(async (trackId, kind) => {
     const file = await open(join(directory, `${trackId}-${kind}.bin`), 'w+')
+
     return {
       /**
        * Reads sample-store bytes at an absolute file position.
@@ -22,6 +23,7 @@ export async function temporaryFragmentSamples() {
        */
       async read(data, position) {
         const result = await file.read(data, 0, data.length, position)
+
         return result.bytesRead
       },
 
@@ -34,6 +36,7 @@ export async function temporaryFragmentSamples() {
        */
       async write(data, position) {
         const result = await file.write(data, 0, data.length, position)
+
         return result.bytesWritten
       },
 
@@ -53,6 +56,7 @@ export async function temporaryFragmentSamples() {
       close: () => file.close(),
     }
   })
+
   return {
     store,
     directory,

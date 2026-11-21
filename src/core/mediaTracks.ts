@@ -1,6 +1,7 @@
 /* oxlint-disable no-await-in-loop -- Inspect one track at a time to bound packet metadata reads. */
 import { checkAbort } from '../abort'
 import type { RemuxOptions } from '../types'
+import { resolveIsobmffColorInformation } from '../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { simplifyRational } from '../vendor/mediabunny/src/misc'
 import type { Rational } from '../vendor/mediabunny/src/misc'
 import type { DecodeTimeline } from './decodeTimeline'
@@ -45,6 +46,7 @@ export function selectTracks(
 
       return left.kind === 'video' ? -1 : 1
     })
+
   if (tracks.length === 0) {
     throw new Error('Input has no selected media tracks.')
   }
@@ -63,6 +65,7 @@ function descriptionBytes(
   config: VideoDecoderConfig | AudioDecoderConfig,
 ): Uint8Array {
   const buffer = config.description
+
   if (!buffer) {
     return new Uint8Array(0)
   }
@@ -81,6 +84,7 @@ function descriptionBytes(
 function getDisplayAspectRatio(config: VideoDecoderConfig): Rational | null {
   const width = config.displayAspectWidth ?? config.codedWidth
   const height = config.displayAspectHeight ?? config.codedHeight
+
   if (width === undefined || height === undefined) {
     return null
   }
@@ -109,12 +113,10 @@ export function trackSignature(track: PacketTrack): string {
           width: config.codedWidth,
           height: config.codedHeight,
           aspectRatio: getDisplayAspectRatio(config),
-          colorSpace: {
-            primaries: config.colorSpace?.primaries ?? null,
-            transfer: config.colorSpace?.transfer ?? null,
-            matrix: config.colorSpace?.matrix ?? null,
-            fullRange: config.colorSpace?.fullRange ?? null,
-          },
+          colorInformation: resolveIsobmffColorInformation(
+            config.colorSpace,
+            track.containerColorInformation,
+          ),
         }),
     matrix:
       track.kind === 'video'
@@ -153,6 +155,7 @@ export async function inspectTracks(
 
     for await (const packet of track.packets(true)) {
       checkAbort(signal)
+
       if (
         !Number.isFinite(packet.timestamp) ||
         !Number.isFinite(packet.duration) ||
@@ -171,11 +174,13 @@ export async function inspectTracks(
       if (packet.type === 'key') {
         maxTimestampBeforeLastKeyPacket = maxTimestamp
       }
+
       if (packet.timestamp < maxTimestampBeforeLastKeyPacket) {
         throw new Error(
           'Timestamps cannot be smaller than the largest timestamp of the previous GOP.',
         )
       }
+
       maxTimestamp = Math.max(maxTimestamp, packet.timestamp)
       decodeTimeline?.addPacket(index, packet)
 
@@ -196,6 +201,8 @@ export async function inspectTracks(
   }
 
   const info = { start, duration: end - start }
+
   decodeTimeline?.finishSegment(info)
+
   return info
 }

@@ -70,6 +70,7 @@ test.each([
       matrix: 'bt709',
       fullRange: false,
     } satisfies VideoColorSpaceInit
+
     expect(
       trackSignature(videoTrack([], { ...baseline, ...difference })),
     ).not.toBe(trackSignature(videoTrack([], baseline)))
@@ -87,6 +88,7 @@ test('allows B-frame reordering within a GOP during timeline preflight', async (
     [5, 'delta'],
     [6, 'delta'],
   ])
+
   await expect(inspectTracks([track])).resolves.toStrictEqual({
     start: 0,
     duration: 8,
@@ -102,6 +104,7 @@ test('compares proportional display dimensions by their exact aspect ratio', () 
     displayAspectWidth: 192,
     displayAspectHeight: 128,
   }
+
   expect(trackSignature({ ...track, config })).toBe(
     trackSignature({
       ...track,
@@ -125,5 +128,6 @@ test('rejects a delta packet crossing the preceding GOP timeline', async () => {
     [4, 'key'],
     [2, 'delta'],
   ])
+
   await expect(inspectTracks([track])).rejects.toThrow('previous GOP')
 })

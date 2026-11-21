@@ -29,6 +29,7 @@ export async function diskStorage(): Promise<RemuxStorage> {
   const directory = await mkdtemp(join(tmpdir(), 'media-remux-index-'))
   const fragmentIndex = createDiskFragmentIndex(async trackId => {
     const file = await open(join(directory, `${trackId}.index`), 'w+')
+
     return {
       /**
        * Writes index bytes at an absolute file offset.
@@ -39,6 +40,7 @@ export async function diskStorage(): Promise<RemuxStorage> {
        */
       async write(bytes, offset) {
         const result = await file.write(bytes, 0, bytes.length, offset)
+
         return result.bytesWritten
       },
 
@@ -51,6 +53,7 @@ export async function diskStorage(): Promise<RemuxStorage> {
        */
       async read(bytes, offset) {
         const result = await file.read(bytes, 0, bytes.length, offset)
+
         return result.bytesRead
       },
 
@@ -72,6 +75,7 @@ export async function diskStorage(): Promise<RemuxStorage> {
       close: () => file.close(),
     }
   })
+
   onTestFinished(async () => {
     try {
       await fragmentIndex.dispose()
@@ -80,57 +84,67 @@ export async function diskStorage(): Promise<RemuxStorage> {
     }
   })
   const samples = await temporaryFragmentSamples()
+
   onTestFinished(() => samples.dispose())
+
   return { fragmentIndex, fragmentSamples: samples.store }
 }
 
 /**
  * Creates an in-memory output target that supports positional writes.
  *
+ * @param strategy - Optional stream buffering strategy.
  * @returns The writable stream, lifecycle and write-size probes, and a Blob reader.
  */
-export function memoryTarget() {
+export function memoryTarget(strategy?: QueuingStrategy<MediaOutputChunk>) {
   let bytes = new Uint8Array(0)
   const state = { isClosed: false, isAborted: false, writes: [] as number[] }
+
   return {
     state,
-    writable: new WritableStream<MediaOutputChunk>({
-      /**
-       * Copies an output chunk into the target, growing its buffer as needed.
-       *
-       * @param chunk - Output bytes and their destination position.
-       * @param chunk.data - Bytes to copy into the target.
-       * @param chunk.position - Inclusive destination byte offset.
-       * @returns Nothing.
-       */
-      write({ data, position }) {
-        state.writes.push(data.byteLength)
-        if (position + data.byteLength > bytes.length) {
-          const next = new Uint8Array(position + data.byteLength)
-          next.set(bytes)
-          bytes = next
-        }
-        bytes.set(data, position)
-      },
+    writable: new WritableStream<MediaOutputChunk>(
+      {
+        /**
+         * Copies an output chunk into the target, growing its buffer as needed.
+         *
+         * @param chunk - Output bytes and their destination position.
+         * @param chunk.data - Bytes to copy into the target.
+         * @param chunk.position - Inclusive destination byte offset.
+         * @returns Nothing.
+         */
+        write({ data, position }) {
+          state.writes.push(data.byteLength)
 
-      /**
-       * Records successful closure of the output stream.
-       *
-       * @returns Nothing.
-       */
-      close() {
-        state.isClosed = true
-      },
+          if (position + data.byteLength > bytes.length) {
+            const next = new Uint8Array(position + data.byteLength)
 
-      /**
-       * Records abortion of the output stream.
-       *
-       * @returns Nothing.
-       */
-      abort() {
-        state.isAborted = true
+            next.set(bytes)
+            bytes = next
+          }
+
+          bytes.set(data, position)
+        },
+
+        /**
+         * Records successful closure of the output stream.
+         *
+         * @returns Nothing.
+         */
+        close() {
+          state.isClosed = true
+        },
+
+        /**
+         * Records abortion of the output stream.
+         *
+         * @returns Nothing.
+         */
+        abort() {
+          state.isAborted = true
+        },
       },
-    }),
+      strategy,
+    ),
 
     /**
      * Takes a snapshot of all bytes written so far, including unwritten gaps.
@@ -151,12 +165,16 @@ export function memoryTarget() {
  */
 export async function packets(blob: Blob, kind: 'video' | 'audio') {
   const input = await openMediaInput(blob)
+
   try {
     const track = input.tracks.find(candidate => candidate.kind === kind)
+
     if (!track) {
       return []
     }
+
     const encoded = []
+
     for await (const packet of track.packets()) {
       encoded.push({
         data: packet.data,
@@ -165,6 +183,7 @@ export async function packets(blob: Blob, kind: 'video' | 'audio') {
         duration: packet.duration,
       })
     }
+
     return encoded
   } finally {
     input.dispose()

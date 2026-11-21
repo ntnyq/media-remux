@@ -53,6 +53,7 @@ export function createOpfsStorage(
         fragmentSamples.dispose(),
       ])
       const failure = results.find(result => result.status === 'rejected')
+
       if (failure?.status === 'rejected') {
         throw failure.reason
       }

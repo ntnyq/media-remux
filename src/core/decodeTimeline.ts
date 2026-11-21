@@ -42,10 +42,13 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
     addPacket(index: number, packet: EncodedPacket) {
       const clock = clocks[index]
       const duration = packet.sideData.decodeDuration
+
       if (!clock || duration === undefined) {
         throw new Error('Missing packet decode duration.')
       }
+
       const decodeOrigin = packet.timestamp - clock.units / clock.timescale
+
       clock.segmentMinimum = Math.min(clock.segmentMinimum, decodeOrigin)
       clock.segmentMaximum = Math.max(clock.segmentMaximum, decodeOrigin)
       clock.segmentStart = Math.min(clock.segmentStart, packet.timestamp)
@@ -55,6 +58,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
       )
       const precise = duration * clock.timescale + clock.remainder
       const units = Math.round(precise)
+
       clock.remainder = precise - units
       clock.units += units
     },
@@ -69,16 +73,19 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
       for (const clock of clocks) {
         const segmentStart = clock.segmentStart - info.start + elapsed
         const earliestOrigin = clock.segmentMinimum - info.start + elapsed
+
         if (clock.isAv1) {
           if (clock.start === Infinity) {
             clock.decodeStartUnits = Math.round(segmentStart * clock.timescale)
           }
+
           // Independently rounding the starting PTS and cumulative decode
           // durations can differ from rounding the final PTS by one tick.
           const earliest = Math.round(earliestOrigin * clock.timescale)
           const latest = Math.round(
             (clock.segmentMaximum - info.start + elapsed) * clock.timescale,
           )
+
           if (
             earliest < clock.decodeStartUnits - 1 ||
             latest > clock.decodeStartUnits + 1
@@ -93,6 +100,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
             Math.floor(earliestOrigin * clock.timescale),
           )
         }
+
         clock.segmentMinimum = Infinity
         clock.segmentMaximum = -Infinity
         clock.start = Math.min(clock.start, segmentStart)
@@ -100,6 +108,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
         clock.segmentStart = Infinity
         clock.segmentEnd = -Infinity
       }
+
       elapsed += info.duration
     },
 

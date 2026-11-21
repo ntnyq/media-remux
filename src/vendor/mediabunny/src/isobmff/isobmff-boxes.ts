@@ -11,6 +11,7 @@ import { type AudioCodec, generateAv1CodecConfigurationFromCodecString, parsePcm
 import { formatSubtitleTimestamp } from '../subtitles';
 import { Writer } from '../writer';
 import { getTrackMetadata, GLOBAL_TIMESCALE, intoTimescale, type IsobmffAudioTrackData, IsobmffMuxer, type IsobmffSubtitleTrackData, type IsobmffTrackData, type IsobmffVideoTrackData, presentationSpan, type Sample } from './isobmff-muxer';
+import { resolveIsobmffColorInformation } from './isobmff-misc';
 import { buildDtsSpecificBox, parseAc3SyncFrame, parseDtsFrame, parseEac3SyncFrame, parseOpusIdentificationHeader } from '../codec-data';
 import { type MetadataTags, RichImageData } from '../metadata';
 import { Bitstream } from '../../shared/bitstream';
@@ -605,7 +606,9 @@ export const videoSampleDescription = (compressionType: string, trackData: Isobm
 ], [
     VIDEO_CODEC_TO_CONFIGURATION_BOX[trackData.track.source._codec]?.(trackData) ?? null,
     pasp(trackData),
-    trackData.track.source._codec !== 'av1' && colorSpaceIsEmpty(trackData.info.decoderConfig.colorSpace)
+    trackData.track.source._codec !== 'av1'
+        && !trackData.track.metadata.containerColorInformation
+        && colorSpaceIsEmpty(trackData.info.decoderConfig.colorSpace)
         ? null
         : colr(trackData),
     btrt(trackData),
@@ -633,20 +636,23 @@ export const pasp = (trackData: IsobmffVideoTrackData) => {
 };
 /** Colour Information Box: Specifies the color space of the video. */
 export const colr = (trackData: IsobmffVideoTrackData) => {
-    const colorSpace = trackData.info.decoderConfig.colorSpace;
+    const { primaries, transfer, matrix, fullRange } = resolveIsobmffColorInformation(
+        trackData.info.decoderConfig.colorSpace,
+        trackData.track.metadata.containerColorInformation,
+    );
     return box('colr', [
         // Colour type
         ascii(trackData.muxer.isQuickTime ? 'nclc' : 'nclx'),
         // Colour primaries
-        u16(colorSpace?.primaries != null ? COLOR_PRIMARIES_MAP[colorSpace.primaries] : 2),
+        u16(primaries),
         // Transfer characteristics
-        u16(colorSpace?.transfer != null ? TRANSFER_CHARACTERISTICS_MAP[colorSpace.transfer] : 2),
+        u16(transfer),
         // Matrix coefficients
-        u16(colorSpace?.matrix != null ? MATRIX_COEFFICIENTS_MAP[colorSpace.matrix] : 2),
+        u16(matrix),
         // Full range flag
         trackData.muxer.isQuickTime
             ? [] // Doesn't have it
-            : u8((colorSpace?.fullRange ? 1 : 0) << 7),
+            : u8((fullRange ? 1 : 0) << 7),
     ]);
 };
 /** AVC Configuration Box: Provides additional information to the decoder. */
@@ -1149,6 +1155,22 @@ const fragmentSampleFlags = (sample: Sample) => {
     }
     // Note that there are a lot of other flags to potentially set here, but most are irrelevant / non-necessary
     return byte1 << 24 | byte2 << 16 | byte3 << 8 | byte4;
+};
+/** Describes one AAC packet of decode pre-roll for every sample that has a predecessor. */
+export const aacFragmentRollGroups = (sampleCount: number, startsTrack: boolean): Box[] => {
+    const ungrouped = startsTrack ? 1 : 0;
+    if (sampleCount <= ungrouped)
+        return [];
+    return [
+        fullBox('sgpd', 1, 0, [ascii('roll'), u32(2), u32(1), i16(-1)]),
+        fullBox('sbgp', 0, 0, [
+            ascii('roll'),
+            u32(1 + ungrouped),
+            ungrouped ? [u32(ungrouped), u32(0)] : [],
+            u32(sampleCount - ungrouped),
+            u32(0x10001), // First description defined inside this track fragment
+        ]),
+    ];
 };
 /** Track Fragment Box */
 export const traf = (trackData: IsobmffTrackData) => {

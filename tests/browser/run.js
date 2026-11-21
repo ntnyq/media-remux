@@ -12,27 +12,34 @@ function assert(condition, message) {
 
 async function fixture(name) {
   const response = await fetch(`../fixtures/${name}`)
+
   assert(response.ok, 'Cannot load fixture')
+
   return response.blob()
 }
 
 async function listNames(directory) {
   const names = []
+
   for await (const name of directory.keys()) {
     names.push(name)
   }
+
   return names.toSorted()
 }
 
 async function playbackTiming(file) {
   const video = document.createElement('video')
+
   video.muted = true
   document.body.append(video)
   const url = URL.createObjectURL(file)
   let timer
   let callback
+
   try {
     const { promise: frame, resolve, reject } = Promise.withResolvers()
+
     timer = setTimeout(
       () => reject(new Error('Playback frame timeout')),
       10_000,
@@ -47,6 +54,7 @@ async function playbackTiming(file) {
     )
     video.src = url
     const [firstFrame] = await Promise.all([frame, video.play()])
+
     return { firstFrame, duration: video.duration }
   } finally {
     clearTimeout(timer)
@@ -67,6 +75,7 @@ async function run() {
   })
   const createWorker = () =>
     new Worker(new URL('worker.js', import.meta.url), { type: 'module' })
+
   try {
     const video = await fixture('video.mp4')
     const audio = await fixture('audio.m4a')
@@ -76,6 +85,7 @@ async function run() {
       { operation: 'remux', input: audio },
       { operation: 'concat', inputs: [flv, flv] },
     ]
+
     for (const job of jobs) {
       const progress = []
       const result = await runMediaJob(job, {
@@ -83,14 +93,17 @@ async function run() {
         directory,
         onProgress: event => progress.push(event),
       })
+
       assert(result.file.size > 1000, 'Output is empty')
       assert(
         progress.some(event => event.phase === 'finalize'),
         'Missing finalization progress',
       )
       const names = await listNames(directory)
+
       assert(names.length === 1, 'Unexpected job directory count')
       const temporary = await directory.getDirectoryHandle(names[0])
+
       assert(
         JSON.stringify(await listNames(temporary)) === '["output.mp4"]',
         'Spools survived completion',
@@ -98,6 +111,7 @@ async function run() {
       const outputBytes = new Uint8Array(
         await result.file.slice(4, 8).arrayBuffer(),
       )
+
       assert(
         new TextDecoder().decode(outputBytes) === 'ftyp',
         'Output is not MP4',
@@ -114,6 +128,7 @@ async function run() {
         duration: result.duration,
       })
     }
+
     const vfr = await fixture('vfr-bframes.mp4')
     const vfrFlv = await fixture('vfr-bframes.flv')
     const playbackCases = [
@@ -132,6 +147,7 @@ async function run() {
       ['vfr-mp4-flv', { operation: 'concat', inputs: [vfr, vfrFlv] }, 0],
       ['vfr-flv-mp4', { operation: 'concat', inputs: [vfrFlv, vfr] }, 0],
     ]
+
     if (
       document
         .createElement('video')
@@ -143,10 +159,13 @@ async function run() {
         1024 / 48_000,
       ])
     }
+
     for (const [label, job, firstFrame] of playbackCases) {
       const result = await runMediaJob(job, { createWorker, directory })
+
       try {
         const actual = await playbackTiming(result.file)
+
         assert(
           Math.abs(actual.firstFrame - firstFrame) < 0.00005,
           `${label}: first-frame timestamp shifted`,
@@ -160,6 +179,7 @@ async function run() {
         await result.dispose()
       }
     }
+
     const fractionalAv = await fixture('fractional-av.mp4')
     const concatenated = await runMediaJob(
       {
@@ -168,6 +188,7 @@ async function run() {
       },
       { createWorker, directory },
     )
+
     try {
       assert(
         concatenated.file.size > 1024 * 1024,
@@ -177,6 +198,7 @@ async function run() {
         { operation: 'remux', input: concatenated.file },
         { createWorker, directory },
       )
+
       try {
         assert(
           repeated.bytesProcessed === concatenated.bytesProcessed &&
@@ -193,6 +215,7 @@ async function run() {
     } finally {
       await concatenated.dispose()
     }
+
     for (const mutation of [
       'inputs',
       'options',
@@ -209,6 +232,7 @@ async function run() {
           ? Object.create({ createWorker, directory })
           : { createWorker, directory }
       const pending = runMediaJob(job, options)
+
       if (mutation === 'inputs') {
         inputs.length = 0
       } else if (mutation === 'options') {
@@ -218,7 +242,9 @@ async function run() {
           )
         }
       }
+
       const result = await pending
+
       assert(
         result.duration > 3.6 && result.duration < 3.7,
         'Active job lost its submitted inputs',
@@ -230,11 +256,13 @@ async function run() {
       )
       checks.push({ capturedJob: mutation, cleanup: 'clean' })
     }
+
     for (const [label, input, message] of [
       ['truncated', video.slice(0, video.size - 1), 'sample payload'],
       ['leading-delta', await fixture('leading-delta.mp4'), 'keyframe'],
     ]) {
       let failure
+
       try {
         await runMediaJob(
           { operation: 'remux', input },
@@ -243,6 +271,7 @@ async function run() {
       } catch (error) {
         failure = error
       }
+
       assert(
         failure instanceof Error && failure.message.includes(message),
         `Invalid ${label} input did not reject with the expected error`,
@@ -253,7 +282,9 @@ async function run() {
       )
       checks.push({ invalidInput: label, cleanup: 'clean' })
     }
+
     const controller = new AbortController()
+
     try {
       await runMediaJob(
         {
@@ -271,15 +302,18 @@ async function run() {
           },
         },
       )
+
       throw new Error('Cancellation did not reject')
     } catch (error) {
       assert(error.name === 'AbortError', error.message)
     }
+
     assert(
       (await listNames(directory)).length === 0,
       'Cancellation left temporary files',
     )
     checks.push({ cancellation: 'clean' })
+
     for (const createFailure of [
       () => {
         throw new Error('factory failure')
@@ -288,6 +322,7 @@ async function run() {
         new Worker(new URL('crash.js', import.meta.url), { type: 'module' }),
     ]) {
       let failed = false
+
       try {
         await runMediaJob(
           { operation: 'remux', input: video },
@@ -296,12 +331,14 @@ async function run() {
       } catch {
         failed = true
       }
+
       assert(failed, 'Worker failure did not reject')
       assert(
         (await listNames(directory)).length === 0,
         'Failed Worker left files',
       )
     }
+
     checks.push({ workerFailure: 'clean' })
     // Two simultaneous jobs must use exclusive files and leave no locks behind.
     const concurrent = await Promise.all(
@@ -312,6 +349,7 @@ async function run() {
         ),
       ),
     )
+
     await Promise.all(concurrent.map(result => result.dispose()))
     assert(
       (await listNames(directory)).length === 0,
@@ -326,6 +364,7 @@ async function run() {
 
 document.querySelector('#run').addEventListener('click', async () => {
   output.textContent = 'Running'
+
   try {
     await run()
   } catch (error) {

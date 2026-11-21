@@ -13,9 +13,11 @@ import { fragmentedMp4 } from './mp4Fragments'
 export function moofWords(...values: number[]) {
   const bytes = new Uint8Array(values.length * 4)
   const view = new DataView(bytes.buffer)
+
   for (const [index, value] of values.entries()) {
     view.setUint32(index * 4, value)
   }
+
   return bytes
 }
 
@@ -30,10 +32,12 @@ function join(parts: Uint8Array[]) {
     parts.reduce((sum, part) => sum + part.length, 0),
   )
   let offset = 0
+
   for (const part of parts) {
     bytes.set(part, offset)
     offset += part.length
   }
+
   return bytes
 }
 
@@ -50,9 +54,11 @@ function header(name: string, size: number) {
     new TextEncoder().encode(name),
     ...(size > 0xff_ff_ff_ff ? [new Uint8Array(8)] : []),
   ])
+
   if (size > 0xff_ff_ff_ff) {
     new DataView(bytes.buffer).setBigUint64(8, BigInt(size))
   }
+
   return bytes
 }
 
@@ -170,14 +176,18 @@ export async function largeMoof(
     if (order === 'reverse') {
       return (samples - 1 - index) * 1024
     }
+
     if (order === 'ties') {
       return Math.floor(index / 3) * 1024
     }
+
     if (order === 'shuffle') {
       const block = Math.floor(index / 257) * 257
       const length = Math.min(257, samples - block)
+
       return (block + (((index - block) * 17) % length)) * 1024
     }
+
     return decode(index)
   }
 
@@ -198,7 +208,9 @@ export async function largeMoof(
    */
   const packet = (index: number) => {
     const data = new Uint8Array(4 + (defaults ? 0 : index % 3))
+
     data.set(moofWords(index))
+
     return data
   }
   const fixed = new Map<number, Uint8Array>([
@@ -223,13 +235,16 @@ export async function largeMoof(
     ],
     [moofStart + moofSize, header('mdat', mdatSize)],
   ])
+
   new DataView(fixed.get(trafStart + 8)!.buffer).setBigUint64(
     16,
     BigInt(mediaStart),
   )
+
   if (padding) {
     fixed.set(moofStart + moofHeader.length + 16, header('free', padding))
   }
+
   const size = mediaStart + byteOffset(samples)
   const patches = new Map<number, Uint8Array>()
   const requests: { start: number; end: number }[] = []
@@ -254,20 +269,25 @@ export async function largeMoof(
     function copy(position: number, bytes: Uint8Array) {
       const from = Math.max(start, position)
       const to = Math.min(end, position + bytes.length)
+
       if (to > from) {
         result.set(bytes.subarray(from - position, to - position), from - start)
       }
     }
+
     for (const [position, bytes] of fixed) {
       copy(position, bytes)
     }
+
     if (end > runStart && start < runStart + allRunsSize) {
       const first = Math.max(0, Math.floor((start - runStart) / runBytes))
       const last = Math.min(runs - 1, Math.floor((end - runStart) / runBytes))
+
       for (let run = first; run <= last; run++) {
         const index = run * runSize
         const count = Math.min(runSize, samples - index)
         const position = runStart + run * runBytes
+
         copy(
           position,
           join([
@@ -280,6 +300,7 @@ export async function largeMoof(
             ),
           ]),
         )
+
         if (!defaults) {
           const from = Math.max(
             index,
@@ -289,6 +310,7 @@ export async function largeMoof(
             index + count,
             index + Math.ceil((end - position - 24) / rowSize),
           )
+
           for (let at = from; at < to; at++) {
             copy(
               position + 24 + (at - index) * rowSize,
@@ -303,22 +325,27 @@ export async function largeMoof(
         }
       }
     }
+
     if (end > mediaStart) {
       // At most one extra sample at either edge; byteOffset is monotonic.
       let index = Math.max(
         0,
         Math.floor((start - mediaStart) / (defaults ? 4 : 5)) - 2,
       )
+
       while (index < samples && mediaStart + byteOffset(index) < end) {
         copy(mediaStart + byteOffset(index), packet(index))
         index++
       }
     }
+
     for (const [position, bytes] of patches) {
       copy(position, bytes)
     }
+
     return result
   }
+
   const source = new CustomSource({
     /**
      * Reports the virtual file size without materializing its contents.
@@ -343,14 +370,18 @@ export async function largeMoof(
         `Unbounded source read: ${end - start}`,
       )
       const data = readRange(start, end)
+
       return data
     },
   })
   const read: unknown = Reflect.get(source, '_read')
+
   assert.equal(typeof read, 'function')
+
   if (typeof read !== 'function') {
     throw new TypeError('Missing reader')
   }
+
   Object.defineProperty(source, '_read', {
     configurable: true,
 
@@ -368,6 +399,7 @@ export async function largeMoof(
       if (recordReads) {
         requests.push({ start, end })
       }
+
       assert.ok(
         end - start <= 64 * 1024,
         `Unbounded parser read: ${end - start}`,
@@ -377,18 +409,25 @@ export async function largeMoof(
         end,
         ...args,
       ])
+
       if (!bufferPages || end - start <= 16) {
         return result
       }
+
       assert.ok(result && typeof result === 'object')
       const bytes: unknown = Reflect.get(result, 'bytes')
       const offset: unknown = Reflect.get(result, 'offset')
+
       assert.ok(bytes instanceof Uint8Array)
+
       if (typeof offset !== 'number') {
         throw new TypeError('Missing source offset')
       }
+
       const backing = Buffer.alloc(8 * 1024 * 1024)
+
       backing.set(bytes.subarray(start - offset, end - offset))
+
       return {
         bytes: backing,
         view: new DataView(
@@ -400,6 +439,7 @@ export async function largeMoof(
       }
     },
   })
+
   return {
     source,
     requests,
@@ -423,6 +463,7 @@ export async function largeMoof(
      */
     blob: () => {
       assert.ok(size < 64 * 1024 * 1024)
+
       return new Blob([readRange(0, size)])
     },
   }
@@ -449,18 +490,22 @@ export async function encryptedMoof(
    */
   function children(bytes: Uint8Array) {
     const entries: { name: string; bytes: Uint8Array }[] = []
+
     for (let at = 0; at < bytes.length;) {
       const size = new DataView(bytes.buffer, bytes.byteOffset + at).getUint32(
         0,
       )
+
       entries.push({
         name: new TextDecoder().decode(bytes.subarray(at + 4, at + 8)),
         bytes: bytes.slice(at, at + size),
       })
       at += size
     }
+
     return entries
   }
+
   const sinf = box(
     'sinf',
     join([
@@ -499,8 +544,10 @@ export async function encryptedMoof(
         if (['moov', 'trak', 'mdia', 'minf', 'stbl'].includes(entry.name)) {
           return box(entry.name, rewrite(entry.bytes.subarray(8)))
         }
+
         if (entry.name === 'stsd') {
           const sample = children(entry.bytes.subarray(16))[0]!
+
           return box(
             'stsd',
             join([
@@ -509,20 +556,25 @@ export async function encryptedMoof(
             ]),
           )
         }
+
         return entry.bytes
       }),
     )
   }
+
   const init = rewrite(original.subarray(0, fixture.moofStart))
   const subsamples = mode === 'senc-subsamples' || mode === 'aux'
   const records: Uint8Array[] = []
   const packets: Uint8Array[] = []
+
   for (let index = 0; index < fixture.samples; index++) {
     const iv = new Uint8Array(16)
+
     new DataView(iv.buffer).setBigUint64(0, BigInt(index + 1))
     const plain = fixture.packet(index)
     const clear = subsamples ? 1 : 0
     const cipher = createCipheriv('aes-128-ctr', key, iv)
+
     packets.push(
       join([
         plain.subarray(0, clear),
@@ -532,14 +584,18 @@ export async function encryptedMoof(
     )
     const sizes = new Uint8Array(2 + (index % 2 ? 12 : 6))
     const view = new DataView(sizes.buffer)
+
     view.setUint16(0, index % 2 ? 2 : 1)
     view.setUint16(2, clear)
     view.setUint32(4, index % 2 ? 1 : plain.length - clear)
+
     if (index % 2) {
       view.setUint32(10, plain.length - clear - 1)
     }
+
     records.push(join([iv.subarray(0, 8), ...(subsamples ? [sizes] : [])]))
   }
+
   const bytes = join(records)
   const isAux = mode.startsWith('aux')
   const extra = isAux
@@ -562,15 +618,18 @@ export async function encryptedMoof(
   const trafAt = 24
   const withExtra = join([moof, extra])
   const view = new DataView(withExtra.buffer)
+
   view.setUint32(0, withExtra.length)
   view.setUint32(trafAt, view.getUint32(trafAt) + extra.length)
   view.setBigUint64(
     trafAt + 8 + 16,
     BigInt(init.length + withExtra.length + 8 + (isAux ? bytes.length : 0)),
   )
+
   if (isAux) {
     view.setUint32(withExtra.length - 4, withExtra.length + 8)
   }
+
   const output = join([
     init,
     withExtra,
@@ -597,14 +656,18 @@ export async function encryptedMoof(
      */
     read(start, end) {
       assert.ok(end - start <= 256 * 1024)
+
       return output.slice(start, end)
     },
   })
   const read: unknown = Reflect.get(source, '_read')
+
   assert.equal(typeof read, 'function')
+
   if (typeof read !== 'function') {
     throw new TypeError('Missing source reader')
   }
+
   Object.defineProperty(source, '_read', {
     /**
      * Records encrypted-fixture parser reads and enforces the request limit.
@@ -618,8 +681,10 @@ export async function encryptedMoof(
     value(start: number, end: number, ...args: unknown[]) {
       requests.push({ start, end })
       assert.ok(end - start <= 64 * 1024)
+
       return Reflect.apply(read, source, [start, end, ...args])
     },
   })
+
   return { ...fixture, source, key, requests }
 }

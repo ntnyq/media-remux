@@ -2,6 +2,7 @@
 import { checkAbort } from '../../abort'
 import { Input } from '../../vendor/mediabunny/src/input'
 import { MP4 } from '../../vendor/mediabunny/src/input-format'
+import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { EncodedPacketSink } from '../../vendor/mediabunny/src/media-sink'
 import type { TransformationMatrix } from '../../vendor/mediabunny/src/misc'
 import type { EncodedPacket } from '../../vendor/mediabunny/src/packet'
@@ -32,6 +33,11 @@ export interface PacketTrack {
    * matrix is treated as identity for compatibility checks; audio omits it.
    */
   matrix?: TransformationMatrix
+
+  /**
+   * Numeric color identifiers explicitly signaled by an MP4 video track.
+   */
+  containerColorInformation?: IsobmffColorInformation
 
   /**
    * Creates a fresh packet iterator in decode order, starting at the first packet.
@@ -86,12 +92,15 @@ export async function openMediaInput(
   selection: 'all' | 'audio' | 'video' = 'all',
 ): Promise<MediaInput> {
   checkAbort(signal)
+
   if (!(blob instanceof Blob) || blob.size === 0) {
     throw new TypeError('Media input must be a nonempty Blob.')
   }
 
   const magic = new Uint8Array(await blob.slice(0, 3).arrayBuffer())
+
   checkAbort(signal)
+
   if (magic[0] === 0x46 && magic[1] === 0x4c && magic[2] === 0x56) {
     return openFlvInput(blob, signal, selection)
   }
@@ -107,6 +116,7 @@ export async function openMediaInput(
    * @returns Nothing.
    */
   const abort = () => input.dispose()
+
   signal?.addEventListener('abort', abort, { once: true })
 
   try {
@@ -117,11 +127,13 @@ export async function openMediaInput(
       selection === 'video' ? null : await input.getPrimaryAudioTrack(),
     ]) {
       checkAbort(signal)
+
       if (track) {
         // Protected sample entries remain encrypted even when their scheme or
         // auxiliary IV metadata is unsupported or missing. Never copy ciphertext
         // into a clear output track; unselected tracks may still be discarded.
         const codecId = await track.getInternalCodecId()
+
         if (
           typeof codecId === 'string' &&
           ['encv', 'enca'].includes(codecId.toLowerCase())
@@ -130,6 +142,7 @@ export async function openMediaInput(
         }
 
         const codec = await track.getCodec()
+
         if (
           codec !== 'avc' &&
           codec !== 'hevc' &&
@@ -142,6 +155,7 @@ export async function openMediaInput(
         }
 
         const config = await track.getDecoderConfig()
+
         if (!config) {
           throw new Error('Missing decoder configuration.')
         }
@@ -156,6 +170,10 @@ export async function openMediaInput(
         }
 
         const sink = new EncodedPacketSink(track)
+        const containerColorInformation = track.isVideoTrack()
+          ? track.getContainerColorInformation()
+          : undefined
+
         tracks.push({
           kind: track.isVideoTrack() ? 'video' : 'audio',
           codec,
@@ -163,6 +181,7 @@ export async function openMediaInput(
           ...(track.isVideoTrack()
             ? { matrix: await track.getTransformationMatrix() }
             : {}),
+          ...(containerColorInformation && { containerColorInformation }),
 
           /**
            * Walks this MP4 track in decode order with bounded packet reads.
@@ -189,6 +208,7 @@ export async function openMediaInput(
               // Abort disposes the parser, which can reject an in-flight read.
               // Keep the caller's cancellation reason instead of that cleanup error.
               checkAbort(signal)
+
               throw error
             }
           },
@@ -213,6 +233,7 @@ export async function openMediaInput(
     signal?.removeEventListener('abort', abort)
     input.dispose()
     checkAbort(signal)
+
     throw error
   }
 }

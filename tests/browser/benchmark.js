@@ -16,6 +16,7 @@ export async function benchmark(inputs, rounds = 3) {
   const directory = await root.getDirectoryHandle(directoryName, {
     create: true,
   })
+
   try {
     for (const { name, blob } of inputs) {
       // Stage outside the timer so packet reads use an OPFS-backed File.
@@ -23,9 +24,11 @@ export async function benchmark(inputs, rounds = 3) {
         create: true,
       })
       const writer = await handle.createWritable()
+
       await writer.write(blob)
       await writer.close()
       const input = await handle.getFile()
+
       for (let round = 0; round < rounds; round++) {
         const started = performance.now()
         const phases = {}
@@ -42,6 +45,7 @@ export async function benchmark(inputs, rounds = 3) {
           },
         )
         const elapsedMs = performance.now() - started
+
         await result.dispose()
         rows.push({
           name,
@@ -66,6 +70,7 @@ export async function benchmark(inputs, rounds = 3) {
   } finally {
     await root.removeEntry(directoryName, { recursive: true })
   }
+
   const report = {
     status: 'passed',
     inputStorage: 'opfs',
@@ -73,11 +78,13 @@ export async function benchmark(inputs, rounds = 3) {
     hardwareConcurrency: navigator.hardwareConcurrency,
     rows,
   }
+
   document.querySelector('#result').textContent = JSON.stringify(
     report,
     null,
     2,
   )
+
   return report
 }
 
@@ -86,6 +93,7 @@ document.querySelector('#run').addEventListener('click', async () => {
     name: blob.name,
     blob,
   }))
+
   try {
     await benchmark(inputs)
   } catch (error) {

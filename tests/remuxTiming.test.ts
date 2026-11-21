@@ -17,6 +17,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
     const duration =
       Math.max(...source.map(packet => packet.timestamp + packet.duration)) -
       start
+
     expect(source).toHaveLength(7)
     expect(new Set(source.map(packet => packet.duration)).size).toBeGreaterThan(
       1,
@@ -30,6 +31,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
     const target = memoryTarget()
     const options = { storage: await diskStorage(), writable: target.writable }
     let result: RemuxResult
+
     if (operation === 'concat') {
       result = await concatMedia([input, input], options)
     } else if (operation === 'combine') {
@@ -37,6 +39,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
     } else {
       result = await remuxMedia(input, options)
     }
+
     const copies = operation === 'concat' ? 2 : 1
     // Combining preserves the shared A/V offset rather than normalizing video alone.
     const timelineStart =
@@ -53,13 +56,18 @@ test.each(['remux', 'concat', 'combine'] as const)(
       storage: await diskStorage(),
       writable: repeated.writable,
     })
+
     expect(repeatedResult.duration).toBeCloseTo(result.duration, 4)
+
     for (const output of [target.blob(), repeated.blob()]) {
       const actual = await packets(output, 'video')
+
       expect(actual).toHaveLength(source.length * copies)
+
       for (const [index, packet] of actual.entries()) {
         const original = source[index % source.length]!
         const segment = Math.floor(index / source.length)
+
         expect(packet.data).toStrictEqual(original.data)
         expect(packet.type).toBe(original.type)
         expect(packet.timestamp).toBeCloseTo(
@@ -68,6 +76,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
         )
         expect(packet.duration).toBeCloseTo(original.duration, 4)
       }
+
       expect(
         Math.max(...actual.map(packet => packet.timestamp + packet.duration)),
       ).toBeCloseTo(result.duration, 4)
@@ -79,6 +88,7 @@ test('extracts unchanged AAC payloads after a subtitle traf with an implicit dat
   const input = await fixture('subtitle-first.mp4')
   const expected = await packets(await fixture('audio.m4a'), 'audio')
   const parsed = await packets(input, 'audio')
+
   expect(parsed.map(packet => packet.data)).toStrictEqual(
     expected.map(packet => packet.data),
   )
@@ -89,6 +99,7 @@ test('extracts unchanged AAC payloads after a subtitle traf with an implicit dat
     writable: target.writable,
   })
   const actual = await packets(target.blob(), 'audio')
+
   expect(actual.map(packet => packet.data)).toStrictEqual(
     expected.map(packet => packet.data),
   )
@@ -99,23 +110,30 @@ test('extracts unchanged AAC payloads after a subtitle traf with an implicit dat
 
 test('preserves VFR decode deltas and absolute PTS independently read by FFprobe', async context => {
   const exec = promisify(execFile)
+
   try {
     await exec('ffprobe', ['-version'])
   } catch {
     context.skip()
+
     return
   }
+
   const directory = await mkdtemp(join(tmpdir(), 'media-remux-timing-'))
+
   try {
     const input = await fixture('vfr-bframes.mp4')
     const target = memoryTarget()
+
     await remuxMedia(input, {
       storage: await diskStorage(),
       writable: target.writable,
     })
     const timings: number[][][] = []
+
     for (const [index, blob] of [input, target.blob()].entries()) {
       const path = join(directory, `${index}.mp4`)
+
       await writeFile(path, new Uint8Array(await blob.arrayBuffer()))
       const { stdout } = await exec('ffprobe', [
         '-v',
@@ -128,6 +146,7 @@ test('preserves VFR decode deltas and absolute PTS independently read by FFprobe
         'csv=p=0',
         path,
       ])
+
       timings.push(
         stdout
           .trim()
@@ -135,10 +154,13 @@ test('preserves VFR decode deltas and absolute PTS independently read by FFprobe
           .map(line => line.split(',').map(Number)),
       )
     }
+
     const [source, output] = timings
+
     expect(source).toHaveLength(7)
     expect(output).toHaveLength(source!.length)
     const sourceStart = Math.min(...source!.map(row => row[0]!))
+
     for (const [index, row] of output!.entries()) {
       expect(row[0]).toBeCloseTo(source![index]![0]! - sourceStart, 5)
       expect(row[1]! - output![0]![1]!).toBeCloseTo(
@@ -156,12 +178,15 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
   'preserves absolute A/V timestamps from %s as read by FFprobe',
   async (name, context) => {
     const exec = promisify(execFile)
+
     try {
       await exec('ffprobe', ['-version'])
     } catch {
       context.skip()
+
       return
     }
+
     const video = await fixture(name)
     const audio = await fixture('audio.m4a')
     const sources = [
@@ -175,15 +200,19 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
       writable: target.writable,
     })
     const repeated = memoryTarget()
+
     await remuxMedia(target.blob(), {
       storage: await diskStorage(),
       writable: repeated.writable,
     })
     const directory = await mkdtemp(join(tmpdir(), 'media-remux-av-timing-'))
+
     try {
       for (const [index, blob] of [target.blob(), repeated.blob()].entries()) {
         const path = join(directory, `${index}.mp4`)
+
         await writeFile(path, new Uint8Array(await blob.arrayBuffer()))
+
         for (const [track, selector] of ['v:0', 'a:0'].entries()) {
           const { stdout } = await exec('ffprobe', [
             '-v',
@@ -200,7 +229,9 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
             .trim()
             .split('\n')
             .map(line => Number(line.split(',')[0]))
+
           expect(actual).toHaveLength(sources[track]!.length)
+
           for (const [packet, timestamp] of actual.entries()) {
             expect(timestamp).toBeCloseTo(
               sources[track]![packet]!.timestamp - start,
@@ -208,6 +239,7 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
             )
           }
         }
+
         const { stdout } = await exec('ffprobe', [
           '-v',
           'error',
@@ -217,6 +249,7 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
           'default=noprint_wrappers=1:nokey=1',
           path,
         ])
+
         expect(Number(stdout.trim())).toBeCloseTo(result.duration, 4)
       }
     } finally {
@@ -239,37 +272,47 @@ test.each([
     )
     const expected: { timestamp: number; data: Uint8Array }[] = []
     let duration = 0
+
     for (const source of sources) {
       const start = Math.min(...source.map(packet => packet.timestamp))
+
       for (const packet of source) {
         expected.push({
           timestamp: packet.timestamp - start + duration,
           data: packet.data,
         })
       }
+
       duration +=
         Math.max(...source.map(packet => packet.timestamp + packet.duration)) -
         start
     }
+
     const target = memoryTarget()
     const result = await concatMedia(inputs, {
       storage: await diskStorage(),
       writable: target.writable,
     })
+
     expect(result.duration).toBeCloseTo(duration, 4)
     const repeated = memoryTarget()
     const repeatedResult = await remuxMedia(target.blob(), {
       storage: await diskStorage(),
       writable: repeated.writable,
     })
+
     expect(repeatedResult.duration).toBeCloseTo(duration, 4)
+
     for (const output of [target.blob(), repeated.blob()]) {
       const actual = await packets(output, 'video')
+
       expect(actual).toHaveLength(expected.length)
+
       for (const [index, packet] of actual.entries()) {
         expect(packet.timestamp).toBeCloseTo(expected[index]!.timestamp, 4)
         expect(packet.data).toStrictEqual(expected[index]!.data)
       }
+
       expect(
         Math.max(...actual.map(packet => packet.timestamp + packet.duration)),
       ).toBeCloseTo(duration, 4)

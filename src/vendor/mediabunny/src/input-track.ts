@@ -9,6 +9,7 @@
 import { type AudioCodec, type MediaCodec, type VideoCodec } from './codec';
 import { determineVideoPacketType } from './codec-data';
 import { Input } from './input';
+import { type IsobmffColorInformation } from './isobmff/isobmff-misc';
 import { EncodedPacketSink, type PacketRetrievalOptions } from './media-sink';
 import { assert, extractRotationFromMatrix, isNumber, isThenable, matrixIsFlipped, type MaybePromise, type Rational, roundToDivisor, simplifyRational, type TransformationMatrix } from './misc';
 import { type TrackType } from './output';
@@ -499,6 +500,7 @@ export interface InputVideoTrackBacking extends InputTrackBacking {
     getMetadataDisplayWidth?(): MaybePromise<number | null>;
     getMetadataDisplayHeight?(): MaybePromise<number | null>;
     getTransformationMatrix(): MaybePromise<TransformationMatrix>;
+    getContainerColorInformation?(): IsobmffColorInformation | undefined;
     getColorSpace(): Promise<VideoColorSpaceInit>;
     canBeTransparent(): Promise<boolean>;
     getDecoderConfig(): Promise<VideoDecoderConfig | null>;
@@ -686,6 +688,10 @@ export class InputVideoTrack extends InputTrack {
             ? this._backing.getSquarePixelHeight()
             : this._backing.getSquarePixelWidth();
         return requireSync(value, 'displayHeight', 'getDisplayHeight');
+    }
+    /** @internal Returns the original numeric MP4 color fields when present. */
+    getContainerColorInformation() {
+        return this._backing.getContainerColorInformation?.();
     }
     /** Returns the color space of the track's samples. */
     async getColorSpace() {

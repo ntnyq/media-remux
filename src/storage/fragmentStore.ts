@@ -129,6 +129,7 @@ export function createDiskFragmentStore(
 
     const result = (async () => {
       await queue
+
       if (failure) {
         throw failure.error
       }
@@ -163,8 +164,10 @@ export function createDiskFragmentStore(
     }
 
     let track = tracks.get(trackId)
+
     if (!track) {
       const file = await open(trackId)
+
       track = {
         file,
         buffer: new Uint8Array(FRAGMENT_PAGE_SIZE),
@@ -193,6 +196,7 @@ export function createDiskFragmentStore(
     while (offset < track.used) {
       const data = track.buffer.subarray(offset, track.used)
       const written = await track.file.write(data, track.written)
+
       if (!Number.isInteger(written) || written <= 0 || written > data.length) {
         throw new Error('Fragment storage file write made no progress.')
       }
@@ -216,6 +220,7 @@ export function createDiskFragmentStore(
     append(trackId: number, data: Uint8Array) {
       return enqueueOperation(async () => {
         const track = await getTrack(trackId)
+
         if (track.sealed) {
           throw new DOMException(
             'Fragment storage has entered the read phase.',
@@ -234,9 +239,11 @@ export function createDiskFragmentStore(
             data.length - offset,
             FRAGMENT_PAGE_SIZE - track.used,
           )
+
           track.buffer.set(data.subarray(offset, offset + length), track.used)
           track.used += length
           offset += length
+
           if (track.used === FRAGMENT_PAGE_SIZE) {
             await flushTrack(track)
           }
@@ -266,6 +273,7 @@ export function createDiskFragmentStore(
         }
 
         const track = await getTrack(trackId)
+
         if (offset + length > track.written + track.used) {
           throw new RangeError('Fragment storage file is incomplete.')
         }
@@ -282,6 +290,7 @@ export function createDiskFragmentStore(
         while (consumed < length) {
           const remaining = data.subarray(consumed)
           const count = await track.file.read(remaining, offset + consumed)
+
           if (
             !Number.isInteger(count) ||
             count <= 0 ||
@@ -308,6 +317,7 @@ export function createDiskFragmentStore(
     reset(trackId: number) {
       return enqueueOperation(async () => {
         const track = tracks.get(trackId)
+
         if (track) {
           await track.file.close()
           tracks.delete(trackId)
@@ -338,6 +348,7 @@ export function createDiskFragmentStore(
         }
 
         tracks.clear()
+
         if (closeFailure) {
           throw closeFailure.error
         }

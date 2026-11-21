@@ -81,6 +81,7 @@ export function createOpfsFragmentStore(
         const bytes = await snapshot
           .slice(position, position + data.length)
           .arrayBuffer()
+
         data.set(new Uint8Array(bytes))
 
         return bytes.byteLength

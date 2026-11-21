@@ -6,7 +6,25 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 // Subset migrated from patched Mediabunny 1.62.1; see THIRD_PARTY_NOTICES.md at the package root.
-import { bytesToHexString, toDataView, uint8ArraysAreEqual } from '../misc';
+import { bytesToHexString, COLOR_PRIMARIES_MAP, MATRIX_COEFFICIENTS_MAP, toDataView, TRANSFER_CHARACTERISTICS_MAP, uint8ArraysAreEqual } from '../misc';
+/** Numeric color identifiers from an nclx or nclc box, including values outside WebCodecs. */
+export type IsobmffColorInformation = Readonly<{
+    primaries: number;
+    transfer: number;
+    matrix: number;
+    fullRange?: boolean | undefined;
+}>;
+/** Resolves the same identifiers for output and segment compatibility checks. */
+export const resolveIsobmffColorInformation = (
+    colorSpace: VideoColorSpaceInit | undefined,
+    container: IsobmffColorInformation | undefined,
+): IsobmffColorInformation => ({
+    primaries: container?.primaries ?? (colorSpace?.primaries != null ? COLOR_PRIMARIES_MAP[colorSpace.primaries] : 2),
+    transfer: container?.transfer ?? (colorSpace?.transfer != null ? TRANSFER_CHARACTERISTICS_MAP[colorSpace.transfer] : 2),
+    matrix: container?.matrix ?? (colorSpace?.matrix != null ? MATRIX_COEFFICIENTS_MAP[colorSpace.matrix] : 2),
+    fullRange: container?.fullRange ?? colorSpace?.fullRange ?? undefined,
+});
+
 export const buildIsobmffMimeType = (info: {
     isQuickTime: boolean;
     hasVideo: boolean;

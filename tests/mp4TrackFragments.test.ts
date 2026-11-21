@@ -1,6 +1,10 @@
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, remuxMedia } from '../src'
 import type { RemuxResult } from '../src'
+import { Input } from '../src/vendor/mediabunny/src/input'
+import { MP4 } from '../src/vendor/mediabunny/src/input-format'
+import { IsobmffDemuxer } from '../src/vendor/mediabunny/src/isobmff/isobmff-demuxer'
+import { CustomSource } from './helpers/CustomSource'
 import { diskStorage, fixture, memoryTarget } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
@@ -17,29 +21,37 @@ test.each([true, false])(
     const moofStart = fragmented.fragmentOffset(1, 2)
     const moofEnd = moofStart + bytes.readUInt32BE(moofStart)
     const trafStart = bytes.indexOf('traf', moofStart) - 4
+
     expect(trafStart).toBeGreaterThan(moofStart)
     const traf = Buffer.from(bytes.subarray(trafStart, moofEnd))
+
     expect(traf.readUInt32BE(0)).toBe(traf.length)
 
     // Both runs reference the same three payloads, replayed on a later timeline.
     // Growing the moof shifts mdat, so update both relative data offsets.
     const trun = traf.indexOf('trun')
+
     expect(trun).toBeGreaterThan(0)
     traf.writeInt32BE(traf.readInt32BE(trun + 12) + traf.length, trun + 12)
     const duplicate = Buffer.from(traf)
+
     expect(duplicate.includes('tfdt')).toBe(tfdt)
+
     if (tfdt) {
       const offset = duplicate.indexOf('tfdt')
+
       duplicate.writeBigUInt64BE(
         duplicate.readBigUInt64BE(offset + 8) + 3072n,
         offset + 8,
       )
     }
+
     const moof = Buffer.concat([
       bytes.subarray(moofStart, trafStart),
       traf,
       duplicate,
     ])
+
     moof.writeUInt32BE(moof.length)
     const input = new Blob([
       bytes.subarray(0, moofStart),
@@ -55,6 +67,7 @@ test.each([true, false])(
         storage: await diskStorage(),
       }
       let job: Promise<RemuxResult>
+
       if (operation === 'combine') {
         job = combineTracks(video, input, options)
       } else if (operation === 'concat') {
@@ -71,3 +84,58 @@ test.each([true, false])(
     }
   },
 )
+
+test('retries hybrid decode-time recovery after a sample-table read fails', async () => {
+  const bytes = Buffer.from(await (await fixture('hybrid.mp4')).arrayBuffer())
+  const moof = bytes.indexOf('moof') - 4
+  const tfdt = bytes.indexOf('tfdt', moof)
+  const mfra = bytes.lastIndexOf('mfra')
+  const stts = bytes.indexOf('stts')
+
+  expect(moof).toBeGreaterThan(0)
+  expect(tfdt).toBeGreaterThan(moof)
+  expect(mfra).toBeGreaterThan(tfdt)
+  expect(stts).toBeGreaterThan(0)
+  expect(bytes[tfdt + 4]).toBe(1)
+  const decodeTime = Number(bytes.readBigUInt64BE(tfdt + 8))
+
+  bytes.write('free', tfdt, 'ascii')
+  bytes.write('free', mfra, 'ascii')
+
+  const firstTimingRow = stts + 12
+  const failure = new Error('sample timing could not be read')
+  let shouldFail = true
+  const input = new Input({
+    formats: [MP4],
+    source: new CustomSource({
+      getSize: () => bytes.length,
+      read(start, end) {
+        if (start === firstTimingRow && shouldFail) {
+          shouldFail = false
+
+          throw failure
+        }
+
+        return bytes.subarray(start, end)
+      },
+    }),
+  })
+
+  try {
+    // eslint-disable-next-line no-underscore-dangle -- Exercise a fragment read before the normal sample table is initialized.
+    const demuxer = await input._getDemuxer()
+
+    if (!(demuxer instanceof IsobmffDemuxer)) {
+      throw new TypeError('Expected an MP4 demuxer')
+    }
+
+    await demuxer.readMetadata()
+    await expect(demuxer.readFragment(moof)).rejects.toBe(failure)
+
+    const fragment = await demuxer.readFragment(moof)
+
+    expect(fragment?.trackData.get(1)?.samples.timestampOffset).toBe(decodeTime)
+  } finally {
+    input.dispose()
+  }
+})

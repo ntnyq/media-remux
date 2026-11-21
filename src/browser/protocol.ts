@@ -151,6 +151,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
   }
 
   const { job, handle, directory } = value
+
   if (
     !isRecord(job) ||
     !isRecord(handle) ||
@@ -162,6 +163,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
   }
 
   const { tracks } = job
+
   if (
     tracks !== undefined &&
     (typeof tracks !== 'string' || !['all', 'audio', 'video'].includes(tracks))

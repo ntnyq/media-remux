@@ -49,14 +49,19 @@ export class CustomSource extends Source {
     if (this._disposed) {
       throw new InputDisposedError()
     }
+
     this.size ??= await this.options.getSize()
+
     if (end > this.size) {
       return null
     }
+
     const bytes = await this.options.read(start, end)
+
     if (this._disposed) {
       throw new InputDisposedError()
     }
+
     return {
       bytes,
       view: new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),

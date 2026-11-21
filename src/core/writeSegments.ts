@@ -43,6 +43,7 @@ function abortableStorage(
   ): Promise<Result> {
     checkAbort(signal)
     const result = await operation()
+
     checkAbort(signal)
 
     return result
@@ -238,6 +239,7 @@ export async function writeSegments(
      */
     async function advance(cursor: (typeof cursors)[number]) {
       cursor.next = await cursor.iterator.next()
+
       if (cursor.next.done && segment.isLast) {
         cursor.writer?.close()
       }
@@ -259,6 +261,7 @@ export async function writeSegments(
               (left.next?.value?.timestamp ?? 0) -
               (right.next?.value?.timestamp ?? 0),
           )
+
         if (!cursor || !cursor.next || cursor.next.done || !cursor.writer) {
           break
         }
@@ -301,6 +304,9 @@ export async function writeSegments(
         output.addVideoTrack(source, {
           decoderConfig: config,
           ...(track.matrix ? { transformationMatrix: track.matrix } : {}),
+          ...(track.containerColorInformation && {
+            containerColorInformation: track.containerColorInformation,
+          }),
         })
 
         writers.push({
@@ -378,6 +384,7 @@ export async function writeSegments(
     if (!isCommitting) {
       checkAbort(options.signal)
     }
+
     throw error
   }
 }

@@ -16,7 +16,7 @@ import { type InputAudioTrackBacking, type InputTrackBacking, type InputVideoTra
 import { type PacketRetrievalOptions } from '../media-sink';
 import { assert, binarySearchLessOrEqual, bytesToHexString, COLOR_PRIMARIES_MAP_INVERSE, IDENTITY_MATRIX, isIso639Dash2LanguageCode, isThenable, MATRIX_COEFFICIENTS_MAP_INVERSE, multiplyMatrices, type Rational, textDecoder, type TransformationMatrix, TRANSFER_CHARACTERISTICS_MAP_INVERSE, UNDETERMINED_LANGUAGE, toDataView, roundIfAlmostInteger, hexStringToBytes, HEX_STRING_REGEX, EMPTY_COLOR_SPACE, colorSpaceIsComplete, simplifyRational } from '../misc';
 import { EncodedPacket, PLACEHOLDER_DATA } from '../packet';
-import { buildIsobmffMimeType, parsePsshBoxContents, psshBoxesAreEqual, type PsshBox } from './isobmff-misc';
+import { buildIsobmffMimeType, type IsobmffColorInformation, parsePsshBoxContents, psshBoxesAreEqual, type PsshBox } from './isobmff-misc';
 import { MAX_BOX_HEADER_SIZE, MIN_BOX_HEADER_SIZE, readBoxHeader, readDataBox, readFixed_16_16, readFixed_2_30, readEsDescriptor, readMetadataStringShort } from './isobmff-reader';
 import { FileSlice, readBytes, readF64Be, readI16Be, readI32Be, readI64Be, Reader, readU16Be, readU24Be, readU32Be, readU64Be, readU8, readAscii } from '../reader';
 import { DEFAULT_TRACK_DISPOSITION, type MetadataTags, RichImageData, type TrackDisposition } from '../metadata';
@@ -85,6 +85,7 @@ type InternalTrack = {
         codec: VideoCodec | null;
         codecDescription: Uint8Array | null;
         colorSpace: VideoColorSpaceInit;
+        containerColorInformation?: IsobmffColorInformation;
         avcType: 1 | 3 | null;
         avcCodecInfo: AvcDecoderConfigurationRecord | null;
         hevcCodecInfo: HevcDecoderConfigurationRecord | null;
@@ -452,7 +453,6 @@ export class IsobmffDemuxer extends Demuxer {
         if (pending)
             return pending;
         const result = this.withBoxParser(() => this.readSampleTableForTrack(internalTrack)).catch((error) => {
-            internalTrack.sampleTable = null;
             this.sampleTablePromises.delete(internalTrack);
             throw error;
         });
@@ -468,16 +468,18 @@ export class IsobmffDemuxer extends Demuxer {
             ? parsePcmCodec(internalTrack.info.codec as PcmAudioCodec).sampleSize * internalTrack.info.numberOfChannels
             : null;
         const sampleTable = new SampleTable(this.reader, pcmFrameSize);
-        internalTrack.sampleTable = sampleTable;
         if (internalTrack.sampleTableByteOffset === null) {
             // There's no sample table to read, it's in another file (happens with segments)
+            internalTrack.sampleTable = sampleTable;
             return sampleTable;
         }
         assert(this.moovEnd !== null);
         const stblContainerSlice = new FileSlice(new Uint8Array(0), new DataView(new ArrayBuffer(0)), 0, internalTrack.sampleTableByteOffset, this.moovEnd);
+        internalTrack.sampleTable = sampleTable; // Box traversal fills this provisional table.
         this.currentTrack = internalTrack;
         try {
             await this.traverseBox(stblContainerSlice, true);
+            await sampleTable.initialize();
         }
         catch (error) {
             internalTrack.sampleTable = null;
@@ -486,7 +488,6 @@ export class IsobmffDemuxer extends Demuxer {
         finally {
             this.currentTrack = null;
         }
-        await sampleTable.initialize();
         return sampleTable;
     }
     readFragment(startPos: number): Promise<Fragment | null> {
@@ -1468,6 +1469,12 @@ export class IsobmffDemuxer extends Demuxer {
                     if (colourType === 'nclx') {
                         fullRange = Boolean(readU8(slice) & 0x80);
                     }
+                    track.info.containerColorInformation = {
+                        primaries: colourPrimaries,
+                        transfer: transferCharacteristics,
+                        matrix: matrixCoefficients,
+                        fullRange,
+                    };
                     track.info.colorSpace = {
                         primaries: COLOR_PRIMARIES_MAP_INVERSE[colourPrimaries] ?? null,
                         transfer: TRANSFER_CHARACTERISTICS_MAP_INVERSE[transferCharacteristics] ?? null,
@@ -2634,7 +2641,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         }
     }
     /**
-     * Rejects video prefix and tail edits lost when copying every encoded sample.
+     * Rejects video prefix and track tail edits lost when copying every sample.
      * Use the original media time so leading empty edits and their rounded offsets
      * do not affect this comparison. Movie-unit rounding permits the edit list's
      * normal timescale quantization while still rejecting partial-sample cuts.
@@ -2645,8 +2652,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         if (!edit) {
             return;
         }
-        if (track.info?.type === 'video' && presentationTimestamp < edit.mediaTime
-            && presentationTimestamp + duration <= edit.mediaTime) {
+        if (track.info?.type === 'video' && presentationTimestamp < edit.mediaTime) {
             throw new Error('Unsupported MP4 edit list: media edit trims video sample presentation.');
         }
         if (edit.segmentDuration === 0) {
@@ -2896,6 +2902,9 @@ class IsobmffVideoTrackBacking extends IsobmffTrackBacking implements InputVideo
     }
     getTransformationMatrix(): TransformationMatrix {
         return [...this.internalTrack.matrix];
+    }
+    getContainerColorInformation() {
+        return this.internalTrack.info.containerColorInformation;
     }
     async getColorSpace(): Promise<VideoColorSpaceInit> {
         const decoderConfig = await this.getDecoderConfig();
