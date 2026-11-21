@@ -758,7 +758,7 @@ export const parseHevcSps = (sps: Uint8Array): HevcSpsInfo | null => {
         }
         const bitDepthLumaMinus8 = readExpGolomb(bitstream);
         const bitDepthChromaMinus8 = readExpGolomb(bitstream);
-        readExpGolomb(bitstream); // log2_max_pic_order_cnt_lsb_minus4
+        const log2MaxPicOrderCntLsbMinus4 = readExpGolomb(bitstream);
         const spsSubLayerOrderingInfoPresentFlag = bitstream.readBits(1);
         const startI = spsSubLayerOrderingInfoPresentFlag ? 0 : spsMaxSubLayersMinus1;
         let spsMaxNumReorderPics = 0;
@@ -792,7 +792,7 @@ export const parseHevcSps = (sps: Uint8Array): HevcSpsInfo | null => {
         if (bitstream.readBits(1)) { // long_term_ref_pics_present_flag
             const numLongTermRefPicsSps = readExpGolomb(bitstream);
             for (let i = 0; i < numLongTermRefPicsSps; i++) {
-                readExpGolomb(bitstream); // lt_ref_pic_poc_lsb_sps[i]
+                bitstream.skipBits(log2MaxPicOrderCntLsbMinus4 + 4); // lt_ref_pic_poc_lsb_sps[i]
                 bitstream.skipBits(1); // used_by_curr_pic_lt_sps_flag[i]
             }
         }
@@ -1062,11 +1062,12 @@ const skipStRefPicSet = (bitstream: Bitstream, stRpsIdx: number, num_short_term_
         const numDelta = NumDeltaPocs[RefRpsIdx] ?? 0;
         for (let j = 0; j <= numDelta; j++) {
             const used_by_curr_pic_flag = bitstream.readBits(1);
-            if (!used_by_curr_pic_flag) {
-                bitstream.readBits(1); // use_delta_flag
+            const use_delta_flag = used_by_curr_pic_flag || bitstream.readBits(1); // Inferred to be 1 when absent
+            // Only the kept entries end up in this set
+            if (use_delta_flag) {
+                NumDeltaPocsThis++;
             }
         }
-        NumDeltaPocsThis = NumDeltaPocs[RefRpsIdx]!;
     }
     else {
         const num_negative_pics = readExpGolomb(bitstream);

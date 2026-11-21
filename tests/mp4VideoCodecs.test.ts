@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, remuxMedia } from '../src'
+import { parseHevcSps } from '../src/vendor/mediabunny/src/codec-data'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 
 const videoTimescale = 57_600
@@ -92,6 +93,27 @@ function av1FragmentStarts(data: Buffer) {
 async function encodedPackets(input: Blob, kind: 'video' | 'audio') {
   return (await packets(input, kind)).map(({ data, type }) => ({ data, type }))
 }
+
+// These SPS NAL units share the same 4:3, full-range BT.709 VUI after the
+// reference-picture fields. FFmpeg's trace_headers verifies both bitstreams.
+test.each([
+  [
+    'an 8-bit long-term picture order count',
+    '42010101600000030090000003000003001ea030810596566924cb53bf0e6e02020208000003000800000300c040',
+  ],
+  [
+    'chained short-term sets with a different number of retained references',
+    '42010101600000030090000003000003001ea030810596566924c88bf7cde1cdc04040410000030001000003001808',
+  ],
+])('reads HEVC SPS display metadata after %s', (_description, sps) => {
+  expect(parseHevcSps(Buffer.from(sps, 'hex'))).toMatchObject({
+    pixelAspectRatio: { num: 4, den: 3 },
+    fullRangeFlag: 1,
+    colourPrimaries: 1,
+    transferCharacteristics: 1,
+    matrixCoefficients: 1,
+  })
+})
 
 test.each([
   ['hvc1', 'hevc-hvc1.mp4'],
