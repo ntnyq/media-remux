@@ -1,5 +1,12 @@
 /* oxlint-disable no-await-in-loop -- Tracks and segments are consumed in order with bounded memory. */
+
 import { checkAbort } from '../abort'
+import {
+  MEDIA_TRACK_KIND,
+  REMUX_ERROR_CODE,
+  REMUX_PROGRESS_PHASE,
+  REMUX_TRACK_SELECTION,
+} from '../constants'
 import { createRemuxError } from '../errors'
 import type { RemuxOptions, RemuxResult } from '../types'
 import { createDecodeTimeline } from './decodeTimeline'
@@ -76,7 +83,9 @@ export async function concatMedia(
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
   const selection =
-    settings.tracks === 'video-with-optional-audio' ? 'all' : settings.tracks
+    settings.tracks === REMUX_TRACK_SELECTION.videoWithOptionalAudio
+      ? REMUX_TRACK_SELECTION.all
+      : settings.tracks
 
   checkAbort(settings.signal)
   const blobs = [...inputs]
@@ -94,7 +103,7 @@ export async function concatMedia(
   // segment cannot leave a partially written concatenation behind.
   for (const [index, blob] of blobs.entries()) {
     settings.onProgress?.({
-      phase: 'inspect',
+      phase: REMUX_PROGRESS_PHASE.inspect,
       bytesProcessed: 0,
       segmentIndex: index,
     })
@@ -111,7 +120,7 @@ export async function concatMedia(
         decodeTimeline = createDecodeTimeline(tracks)
       } else if (current !== signature) {
         throw createRemuxError(
-          'INCOMPATIBLE_SEGMENTS',
+          REMUX_ERROR_CODE.incompatibleSegments,
           `Incompatible track layout or decoder configuration in segment ${index}.`,
         )
       }
@@ -191,25 +200,37 @@ export async function combineTracks(
 
   try {
     settings.onProgress?.({
-      phase: 'inspect',
+      phase: REMUX_PROGRESS_PHASE.inspect,
       bytesProcessed: 0,
       segmentIndex: 0,
     })
 
-    const videoInput = await openMediaInput(video, settings.signal, 'video')
+    const videoInput = await openMediaInput(
+      video,
+      settings.signal,
+      REMUX_TRACK_SELECTION.video,
+    )
 
     inputs.push(videoInput)
 
-    const audioInput = await openMediaInput(audio, settings.signal, 'audio')
+    const audioInput = await openMediaInput(
+      audio,
+      settings.signal,
+      REMUX_TRACK_SELECTION.audio,
+    )
 
     inputs.push(audioInput)
 
-    const videoTrack = videoInput.tracks.find(track => track.kind === 'video')
-    const audioTrack = audioInput.tracks.find(track => track.kind === 'audio')
+    const videoTrack = videoInput.tracks.find(
+      track => track.kind === MEDIA_TRACK_KIND.video,
+    )
+    const audioTrack = audioInput.tracks.find(
+      track => track.kind === MEDIA_TRACK_KIND.audio,
+    )
 
     if (!videoTrack || !audioTrack) {
       throw createRemuxError(
-        'MISSING_REQUIRED_TRACK',
+        REMUX_ERROR_CODE.missingRequiredTrack,
         'combineTracks requires a video track followed by an audio track.',
       )
     }

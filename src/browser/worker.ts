@@ -1,4 +1,9 @@
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
+import {
+  MEDIA_JOB_OPERATION,
+  REMUX_PROGRESS_PHASE,
+  WORKER_MESSAGE_TYPE,
+} from '../constants'
 import { remuxMedia, combineTracks, concatMedia } from '../core/remux'
 import { isRemuxError } from '../errors'
 import { createOpfsStorage } from '../storage'
@@ -129,7 +134,7 @@ export function installMediaWorker(
       })
 
       let lastProgressAt = -Infinity
-      let lastPhase: RemuxProgress['phase'] = 'inspect'
+      let lastPhase: RemuxProgress['phase'] = REMUX_PROGRESS_PHASE.inspect
 
       /**
        * Posts phase changes immediately and limits remux updates to one per 250 ms.
@@ -142,12 +147,12 @@ export function installMediaWorker(
 
         if (
           progress.phase !== lastPhase ||
-          progress.phase !== 'remux' ||
+          progress.phase !== REMUX_PROGRESS_PHASE.remux ||
           now - lastProgressAt >= 250
         ) {
           lastProgressAt = now
           lastPhase = progress.phase
-          scope.postMessage({ type: 'progress', progress })
+          scope.postMessage({ type: WORKER_MESSAGE_TYPE.progress, progress })
         }
       }
 
@@ -164,17 +169,17 @@ export function installMediaWorker(
       let result: RemuxResult
 
       switch (job.operation) {
-        case 'remux': {
+        case MEDIA_JOB_OPERATION.remux: {
           result = await remuxMedia(job.input, options)
           break
         }
 
-        case 'combine': {
+        case MEDIA_JOB_OPERATION.combine: {
           result = await combineTracks(job.video, job.audio, options)
           break
         }
 
-        case 'concat': {
+        case MEDIA_JOB_OPERATION.concat: {
           result = await concatMedia(job.inputs, options)
           break
         }
@@ -187,7 +192,7 @@ export function installMediaWorker(
       // Release spool handles before reporting completion: the parent removes
       // the spool directory as soon as it receives this response.
       await storage.dispose()
-      scope.postMessage({ type: 'complete', result })
+      scope.postMessage({ type: WORKER_MESSAGE_TYPE.complete, result })
     } catch (error) {
       const cleanup = await Promise.allSettled([
         storage?.dispose(),
@@ -197,7 +202,7 @@ export function installMediaWorker(
       const message = error instanceof Error ? error.message : String(error)
 
       scope.postMessage({
-        type: 'error',
+        type: WORKER_MESSAGE_TYPE.error,
         name: error instanceof Error ? error.name : 'Error',
         ...(isRemuxError(error) ? { code: error.code } : {}),
         message:

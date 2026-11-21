@@ -42,11 +42,15 @@ installMediaWorker()
 ```
 
 ```ts
-import { runMediaJob } from 'media-remux'
+import { MEDIA_JOB_OPERATION, runMediaJob } from 'media-remux'
 
 const controller = new AbortController()
 const result = await runMediaJob(
-  { operation: 'combine', video: videoFile, audio: audioFile },
+  {
+    operation: MEDIA_JOB_OPERATION.combine,
+    video: videoFile,
+    audio: audioFile,
+  },
   {
     createWorker: () =>
       new Worker(new URL('./remux.worker.ts', import.meta.url), {
@@ -67,13 +71,15 @@ try {
 其他任务示例：
 
 ```ts
+import { MEDIA_JOB_OPERATION, REMUX_TRACK_SELECTION } from 'media-remux'
+
 const audioJob = {
-  operation: 'remux',
+  operation: MEDIA_JOB_OPERATION.remux,
   input: mp4File,
-  tracks: 'audio',
+  tracks: REMUX_TRACK_SELECTION.audio,
 } as const
 const concatJob = {
-  operation: 'concat',
+  operation: MEDIA_JOB_OPERATION.concat,
   inputs: [firstFlv, secondFlv],
 } as const
 ```
@@ -94,7 +100,11 @@ const concatJob = {
 <summary>核心调用示例与自定义存储接入</summary>
 
 ```ts
-import { createOpfsStorage, remuxMedia } from 'media-remux'
+import {
+  createOpfsStorage,
+  REMUX_TRACK_SELECTION,
+  remuxMedia,
+} from 'media-remux'
 import type { MediaOutputChunk } from 'media-remux'
 
 // 在专用 Worker 中执行，并为此任务使用独占目录。
@@ -107,7 +117,12 @@ const writable = new WritableStream<MediaOutputChunk>({
 })
 
 try {
-  await remuxMedia(inputFile, { writable, storage, signal, tracks: 'all' })
+  await remuxMedia(inputFile, {
+    writable,
+    storage,
+    signal,
+    tracks: REMUX_TRACK_SELECTION.all,
+  })
 } finally {
   await storage.dispose()
 }
@@ -427,7 +442,7 @@ pnpm pack --dry-run
 
 测试覆盖真实媒体输出的字节保真、B 帧/AAC 预滚、异常 FLV、取消/I/O 失败、超过 4 GiB 的稀疏 MP4、常规索引/TFRA/moof 分页、部分磁盘 I/O、排序和清理失败。如果已安装 FFmpeg，还会使用它独立解码真实输出进行验证。
 
-浏览器检查需要先构建项目，再通过本地静态服务器提供仓库文件，并打开 `tests/browser/index.html`。页面按钮会检查真实 Worker/OPFS 环境下的重新封装、合并、拼接、取消、Worker 失败、并发任务和清理行为。`tests/browser/benchmark.html` 会对所选文件串行执行三轮性能测量。
+浏览器检查需要先运行 `pnpm build`，再通过本地静态服务器提供仓库文件，并打开 `tests/browser/index.html`。页面按钮会检查真实 Worker/OPFS 环境下的重新封装、合并、拼接、取消、Worker 失败、并发任务和清理行为。`tests/browser/benchmark.html` 会对所选文件串行执行三轮性能测量。
 
 内置的第三方代码保留上游声明和独立的格式规范，同时仍接受完整的严格 TypeScript 检查。参见[迁移说明](./src/vendor/mediabunny/MIGRATION.md)和[第三方声明](./THIRD_PARTY_NOTICES.md)。
 

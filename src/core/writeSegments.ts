@@ -1,5 +1,12 @@
 /* oxlint-disable no-await-in-loop -- Mux packets in decode order with stream backpressure. */
+
 import { checkAbort } from '../abort'
+import {
+  MEDIA_CODEC,
+  MEDIA_TRACK_KIND,
+  REMUX_MIME_TYPE,
+  REMUX_PROGRESS_PHASE,
+} from '../constants'
 import type {
   RemuxOptions,
   RemuxProgress,
@@ -282,7 +289,7 @@ export async function writeSegments(
           ),
         )
         bytesProcessed += packet.byteLength
-        progress('remux')
+        progress(REMUX_PROGRESS_PHASE.remux)
 
         await advance(cursor)
       }
@@ -294,8 +301,8 @@ export async function writeSegments(
   try {
     for (const track of baseline) {
       if (
-        track.kind === 'video' &&
-        track.codec !== 'aac' &&
+        track.kind === MEDIA_TRACK_KIND.video &&
+        track.codec !== MEDIA_CODEC.aac &&
         !('sampleRate' in track.config)
       ) {
         const { codec, config } = track
@@ -326,12 +333,12 @@ export async function writeSegments(
           close: () => source.close(),
         })
       } else if (
-        track.kind === 'audio' &&
-        track.codec === 'aac' &&
+        track.kind === MEDIA_TRACK_KIND.audio &&
+        track.codec === MEDIA_CODEC.aac &&
         'sampleRate' in track.config
       ) {
         const { config } = track
-        const source = new EncodedAudioPacketSource('aac')
+        const source = new EncodedAudioPacketSource(MEDIA_CODEC.aac)
 
         output.addAudioTrack(source, { decoderConfig: config })
 
@@ -364,15 +371,15 @@ export async function writeSegments(
       segmentIndex++
     }
 
-    progress('finalize')
+    progress(REMUX_PROGRESS_PHASE.finalize)
     await output.finalize()
 
     return {
       bytesProcessed,
       duration,
-      mimeType: baseline.some(track => track.kind === 'video')
-        ? 'video/mp4'
-        : 'audio/mp4',
+      mimeType: baseline.some(track => track.kind === MEDIA_TRACK_KIND.video)
+        ? REMUX_MIME_TYPE.video
+        : REMUX_MIME_TYPE.audio,
     }
   } catch (error) {
     try {

@@ -1,5 +1,8 @@
 /* oxlint-disable no-await-in-loop -- Paged I/O and merge cursors advance sequentially with bounded memory. */
 
+import type { ValueOf } from '@ntnyq/utils'
+import { FRAGMENT_SAMPLE_FILE_KIND, FRAGMENT_SAMPLE_TYPE } from '../constants'
+
 /**
  * One encoded sample descriptor persisted as a fixed 56-byte record.
  * Timestamps and duration are seconds; mediaOffset is a logical byte position.
@@ -26,9 +29,9 @@ export interface FragmentSample {
   size: number
 
   /**
-   * Whether the sample is independently decodable ('key') or dependent ('delta').
+   * Whether the sample is independently decodable or depends on other samples.
    */
-  type: 'key' | 'delta'
+  type: ValueOf<typeof FRAGMENT_SAMPLE_TYPE>
 
   /**
    * Sample duration in the track's integer timescale units, refined as subsequent
@@ -206,7 +209,10 @@ const IO_SIZE = 64 * 1024
  */
 const SORT_RUN = 4096
 
-type FileKind = 'records' | 'media' | 'sort-a' | 'sort-b'
+type FileKind = ValueOf<typeof FRAGMENT_SAMPLE_FILE_KIND>
+type SortFileKind =
+  | typeof FRAGMENT_SAMPLE_FILE_KIND.sortA
+  | typeof FRAGMENT_SAMPLE_FILE_KIND.sortB
 
 interface Page {
   index: number
@@ -232,7 +238,7 @@ interface Track {
   sortedCount: number
   sortedMemory: Float64Array<ArrayBuffer>
   externalSort: boolean
-  sortedFile: 'sort-a' | 'sort-b'
+  sortedFile: SortFileKind
   sortedPage: { offset: number; bytes: Uint8Array<ArrayBuffer> } | undefined
 }
 
@@ -397,10 +403,14 @@ export function createDiskFragmentSamples(
       }
 
       const files = {
-        records: await getFile('records'),
-        media: await getFile('media'),
-        'sort-a': await getFile('sort-a'),
-        'sort-b': await getFile('sort-b'),
+        records: await getFile(FRAGMENT_SAMPLE_FILE_KIND.records),
+        media: await getFile(FRAGMENT_SAMPLE_FILE_KIND.media),
+        [FRAGMENT_SAMPLE_FILE_KIND.sortA]: await getFile(
+          FRAGMENT_SAMPLE_FILE_KIND.sortA,
+        ),
+        [FRAGMENT_SAMPLE_FILE_KIND.sortB]: await getFile(
+          FRAGMENT_SAMPLE_FILE_KIND.sortB,
+        ),
       }
 
       track = {
@@ -419,7 +429,7 @@ export function createDiskFragmentSamples(
         sortedCount: 0,
         sortedMemory: new Float64Array(SORT_RUN),
         externalSort: false,
-        sortedFile: 'sort-a',
+        sortedFile: FRAGMENT_SAMPLE_FILE_KIND.sortA,
         sortedPage: undefined,
       }
 
@@ -571,7 +581,7 @@ export function createDiskFragmentSamples(
       sample.size > 0xff_ff_ff_ff ||
       !isNonnegativeSafeInteger(sample.timescaleUnitsToNextSample) ||
       !isNonnegativeSafeInteger(sample.mediaOffset) ||
-      !['key', 'delta'].includes(sample.type)
+      !Object.values(FRAGMENT_SAMPLE_TYPE).includes(sample.type)
     ) {
       throw new RangeError('Invalid sample storage field.')
     }
@@ -604,7 +614,7 @@ export function createDiskFragmentSamples(
       size: view.getFloat64(24),
       timescaleUnitsToNextSample: view.getFloat64(32),
       mediaOffset: view.getFloat64(40),
-      type: type ? 'key' : 'delta',
+      type: type ? FRAGMENT_SAMPLE_TYPE.key : FRAGMENT_SAMPLE_TYPE.delta,
     }
 
     assertValidSample(sample)
@@ -639,7 +649,7 @@ export function createDiskFragmentSamples(
     view.setFloat64(24, sample.size)
     view.setFloat64(32, sample.timescaleUnitsToNextSample)
     view.setFloat64(40, sample.mediaOffset)
-    view.setUint8(48, sample.type === 'key' ? 1 : 0)
+    view.setUint8(48, sample.type === FRAGMENT_SAMPLE_TYPE.key ? 1 : 0)
     page.dirty = true
   }
 
@@ -818,8 +828,8 @@ export function createDiskFragmentSamples(
 
         // Seed the first sort file with independently sorted, bounded runs.
         track.externalSort = true
-        let source: 'sort-a' | 'sort-b' = 'sort-a'
-        let destination: 'sort-a' | 'sort-b' = 'sort-b'
+        let source: SortFileKind = FRAGMENT_SAMPLE_FILE_KIND.sortA
+        let destination: SortFileKind = FRAGMENT_SAMPLE_FILE_KIND.sortB
         const values = track.sortedMemory
 
         for (let offset = 0; offset < count; offset += SORT_RUN) {
@@ -1139,8 +1149,8 @@ export function createDiskFragmentSamples(
         track.sortedPage = undefined
 
         if (track.externalSort) {
-          await track.files['sort-a'].truncate(0)
-          await track.files['sort-b'].truncate(0)
+          await track.files[FRAGMENT_SAMPLE_FILE_KIND.sortA].truncate(0)
+          await track.files[FRAGMENT_SAMPLE_FILE_KIND.sortB].truncate(0)
           track.externalSort = false
         }
       })

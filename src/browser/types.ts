@@ -1,3 +1,4 @@
+import type { MEDIA_JOB_OPERATION } from '../constants'
 import type { RemuxProgress, RemuxResult, RemuxTrackSelection } from '../types'
 
 /**
@@ -9,7 +10,7 @@ export type MediaJob =
       /**
        * Copies selected primary tracks from a single media input.
        */
-      operation: 'remux'
+      operation: typeof MEDIA_JOB_OPERATION.remux
 
       /**
        * Nonempty source MP4 or FLV Blob.
@@ -25,7 +26,7 @@ export type MediaJob =
       /**
        * Combines primary video and audio tracks from separate inputs.
        */
-      operation: 'combine'
+      operation: typeof MEDIA_JOB_OPERATION.combine
 
       /**
        * Nonempty MP4 or FLV Blob supplying the primary video track.
@@ -41,7 +42,7 @@ export type MediaJob =
       /**
        * Appends compatible media segments in playback order.
        */
-      operation: 'concat'
+      operation: typeof MEDIA_JOB_OPERATION.concat
 
       /**
        * Nonempty segment list with matching selected track layouts and decoder

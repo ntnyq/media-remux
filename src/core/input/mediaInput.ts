@@ -1,6 +1,15 @@
 /* oxlint-disable no-await-in-loop -- Packet cursors advance in decode order with backpressure. */
+import { isString } from '@ntnyq/utils'
+import type { ValueOf } from '@ntnyq/utils'
 import { checkAbort } from '../../abort'
+import {
+  MEDIA_CODEC,
+  MEDIA_TRACK_KIND,
+  REMUX_ERROR_CODE,
+  REMUX_TRACK_SELECTION,
+} from '../../constants'
 import { createRemuxError, withRemuxErrorCode } from '../../errors'
+import type { RemuxTrackSelection } from '../../types'
 import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
 import {
   Input,
@@ -25,12 +34,12 @@ export interface PacketTrack {
   /**
    * Media kind of the selected track.
    */
-  kind: 'video' | 'audio'
+  kind: ValueOf<typeof MEDIA_TRACK_KIND>
 
   /**
    * Validated codec family used by the encoded packet source.
    */
-  codec: 'avc' | 'hevc' | 'av1' | 'aac'
+  codec: ValueOf<typeof MEDIA_CODEC>
 
   /**
    * Decoder configuration matching kind, including codec initialization bytes.
@@ -84,22 +93,30 @@ export interface MediaInput {
  */
 function classifyMp4Error(error: unknown): unknown {
   if (error instanceof UnsupportedInputFormatError) {
-    return withRemuxErrorCode(error, 'UNSUPPORTED_CONTAINER')
+    return withRemuxErrorCode(error, REMUX_ERROR_CODE.unsupportedContainer)
   }
 
   if (error instanceof UnsupportedIsobmffInputError) {
-    return withRemuxErrorCode(error, 'UNSUPPORTED_MEDIA_FEATURE')
+    return withRemuxErrorCode(error, REMUX_ERROR_CODE.unsupportedMediaFeature)
   }
 
   if (
     error instanceof InvalidIsobmffInputError ||
     error instanceof InvalidAacDescriptionError
   ) {
-    return withRemuxErrorCode(error, 'INVALID_INPUT')
+    return withRemuxErrorCode(error, REMUX_ERROR_CODE.invalidInput)
   }
 
   return error
 }
+
+/**
+ * Track selection applied when opening an individual input.
+ */
+export type InputTrackSelection = Exclude<
+  RemuxTrackSelection,
+  typeof REMUX_TRACK_SELECTION.videoWithOptionalAudio
+>
 
 /**
  * Opens the selected primary encoded tracks from an MP4 or FLV Blob.
@@ -120,7 +137,7 @@ function classifyMp4Error(error: unknown): unknown {
 export async function openMediaInput(
   blob: Blob,
   signal?: AbortSignal,
-  selection: 'all' | 'audio' | 'video' = 'all',
+  selection: InputTrackSelection = REMUX_TRACK_SELECTION.all,
 ): Promise<MediaInput> {
   checkAbort(signal)
 
@@ -131,7 +148,7 @@ export async function openMediaInput(
   if (blob.size === 0) {
     throw withRemuxErrorCode(
       new TypeError('Media input must be a nonempty Blob.'),
-      'INVALID_INPUT',
+      REMUX_ERROR_CODE.invalidInput,
     )
   }
 
@@ -161,8 +178,12 @@ export async function openMediaInput(
     const tracks: PacketTrack[] = []
 
     for (const track of [
-      selection === 'audio' ? null : await input.getPrimaryVideoTrack(),
-      selection === 'video' ? null : await input.getPrimaryAudioTrack(),
+      selection === REMUX_TRACK_SELECTION.audio
+        ? null
+        : await input.getPrimaryVideoTrack(),
+      selection === REMUX_TRACK_SELECTION.video
+        ? null
+        : await input.getPrimaryAudioTrack(),
     ]) {
       checkAbort(signal)
 
@@ -173,11 +194,11 @@ export async function openMediaInput(
         const codecId = await track.getInternalCodecId()
 
         if (
-          typeof codecId === 'string' &&
+          isString(codecId) &&
           ['encv', 'enca'].includes(codecId.toLowerCase())
         ) {
           throw createRemuxError(
-            'UNSUPPORTED_MEDIA_FEATURE',
+            REMUX_ERROR_CODE.unsupportedMediaFeature,
             'Encrypted MP4 tracks are unsupported.',
           )
         }
@@ -185,13 +206,13 @@ export async function openMediaInput(
         const codec = await track.getCodec()
 
         if (
-          codec !== 'avc' &&
-          codec !== 'hevc' &&
-          codec !== 'av1' &&
-          codec !== 'aac'
+          codec !== MEDIA_CODEC.avc &&
+          codec !== MEDIA_CODEC.hevc &&
+          codec !== MEDIA_CODEC.av1 &&
+          codec !== MEDIA_CODEC.aac
         ) {
           throw createRemuxError(
-            'UNSUPPORTED_CODEC',
+            REMUX_ERROR_CODE.unsupportedCodec,
             `Unsupported codec: ${codec}. Expected H.264, HEVC, AV1, or AAC.`,
           )
         }
@@ -200,18 +221,18 @@ export async function openMediaInput(
 
         if (!config) {
           throw createRemuxError(
-            'INVALID_INPUT',
+            REMUX_ERROR_CODE.invalidInput,
             'Missing decoder configuration.',
           )
         }
 
         if (
-          (codec === 'hevc' || codec === 'av1') &&
+          (codec === MEDIA_CODEC.hevc || codec === MEDIA_CODEC.av1) &&
           !config.description?.byteLength
         ) {
           throw createRemuxError(
-            'INVALID_INPUT',
-            `Missing ${codec === 'hevc' ? 'hvcC' : 'av1C'} configuration in MP4 video track.`,
+            REMUX_ERROR_CODE.invalidInput,
+            `Missing ${codec === MEDIA_CODEC.hevc ? 'hvcC' : 'av1C'} configuration in MP4 video track.`,
           )
         }
 
@@ -221,7 +242,9 @@ export async function openMediaInput(
           : undefined
 
         tracks.push({
-          kind: track.isVideoTrack() ? 'video' : 'audio',
+          kind: track.isVideoTrack()
+            ? MEDIA_TRACK_KIND.video
+            : MEDIA_TRACK_KIND.audio,
           codec,
           config,
           ...(track.isVideoTrack()

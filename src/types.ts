@@ -1,3 +1,9 @@
+import type { ValueOf } from '@ntnyq/utils'
+import type {
+  REMUX_MIME_TYPE,
+  REMUX_PROGRESS_PHASE,
+  REMUX_TRACK_SELECTION,
+} from './constants'
 import type { FragmentIndexStore } from './storage/fragmentIndex'
 import type { FragmentSampleStore } from './storage/fragmentSamples'
 
@@ -6,11 +12,7 @@ import type { FragmentSampleStore } from './storage/fragmentSamples'
  * 'video-with-optional-audio' requires video in every input and retains audio
  * when present.
  */
-export type RemuxTrackSelection =
-  | 'all'
-  | 'audio'
-  | 'video'
-  | 'video-with-optional-audio'
+export type RemuxTrackSelection = ValueOf<typeof REMUX_TRACK_SELECTION>
 
 /**
  * A positioned output write. Awaiting write applies backpressure.
@@ -55,7 +57,7 @@ export interface RemuxProgress {
    * Current stage: inspect validates inputs, remux copies encoded packets, and
    * finalize writes the remaining container metadata.
    */
-  phase: 'inspect' | 'remux' | 'finalize'
+  phase: ValueOf<typeof REMUX_PROGRESS_PHASE>
 
   /**
    * Cumulative encoded payload bytes copied, excluding container overhead.
@@ -125,5 +127,5 @@ export interface RemuxResult {
   /**
    * video/mp4 when the output includes video, otherwise audio/mp4.
    */
-  mimeType: 'video/mp4' | 'audio/mp4'
+  mimeType: ValueOf<typeof REMUX_MIME_TYPE>
 }

@@ -1,19 +1,10 @@
-/**
- * Allowed media error codes shared by the core and Worker APIs.
- */
-const REMUX_ERROR_CODES = [
-  'UNSUPPORTED_CONTAINER',
-  'UNSUPPORTED_CODEC',
-  'UNSUPPORTED_MEDIA_FEATURE',
-  'INCOMPATIBLE_SEGMENTS',
-  'INVALID_INPUT',
-  'MISSING_REQUIRED_TRACK',
-] as const
+import type { ValueOf } from '@ntnyq/utils'
+import { REMUX_ERROR_CODE } from './constants'
 
 /**
  * Stable codes for media input and compatibility failures.
  */
-export type RemuxErrorCode = (typeof REMUX_ERROR_CODES)[number]
+export type RemuxErrorCode = ValueOf<typeof REMUX_ERROR_CODE>
 
 /**
  * A media error with a code shared by the core and Worker APIs.
@@ -32,7 +23,7 @@ export interface RemuxError extends Error {
  * @returns Whether the value is a recognized remux error code.
  */
 export function isRemuxErrorCode(value: unknown): value is RemuxErrorCode {
-  return REMUX_ERROR_CODES.some(code => code === value)
+  return Object.values(REMUX_ERROR_CODE).some(code => code === value)
 }
 
 /**

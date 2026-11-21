@@ -1,3 +1,4 @@
+import { MEDIA_CODEC, REMUX_ERROR_CODE } from '../constants'
 import { createRemuxError } from '../errors'
 import { GLOBAL_TIMESCALE } from '../vendor/mediabunny/src/isobmff/isobmff-muxer'
 import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
@@ -16,7 +17,7 @@ import type { SegmentInfo } from './mediaTracks'
  */
 export function createDecodeTimeline(tracks: PacketTrack[]) {
   const clocks = tracks.map(track => ({
-    isAv1: track.codec === 'av1',
+    isAv1: track.codec === MEDIA_CODEC.av1,
     timescale:
       'sampleRate' in track.config ? track.config.sampleRate : GLOBAL_TIMESCALE,
     units: 0,
@@ -46,7 +47,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
 
       if (!clock || duration === undefined) {
         throw createRemuxError(
-          'INVALID_INPUT',
+          REMUX_ERROR_CODE.invalidInput,
           'Missing packet decode duration.',
         )
       }
@@ -95,7 +96,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
             latest > clock.decodeStartUnits + 1
           ) {
             throw createRemuxError(
-              'UNSUPPORTED_MEDIA_FEATURE',
+              REMUX_ERROR_CODE.unsupportedMediaFeature,
               'AV1 timeline requires composition offsets or a decode discontinuity.',
             )
           }

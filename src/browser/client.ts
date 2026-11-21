@@ -1,6 +1,12 @@
 /* oxlint-disable no-await-in-loop -- Directory retries must wait for Worker locks to be released. */
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
+
 import { checkAbort } from '../abort'
+import {
+  MEDIA_JOB_OPERATION,
+  REMUX_MIME_TYPE,
+  WORKER_MESSAGE_TYPE,
+} from '../constants'
 import { withRemuxErrorCode } from '../errors'
 import type { RemuxResult } from '../types'
 import type { WorkerRequest, WorkerResponse } from './protocol'
@@ -16,26 +22,30 @@ import type { MediaJob, MediaJobOptions, MediaJobResult } from './types'
  */
 function captureJob(job: MediaJob): MediaJob {
   switch (job.operation) {
-    case 'remux': {
+    case MEDIA_JOB_OPERATION.remux: {
       const { input, tracks } = job
 
       return {
-        operation: 'remux',
+        operation: MEDIA_JOB_OPERATION.remux,
         input,
         ...(tracks === undefined ? {} : { tracks }),
       }
     }
-    case 'concat': {
+    case MEDIA_JOB_OPERATION.concat: {
       const { inputs, tracks } = job
 
       return {
-        operation: 'concat',
+        operation: MEDIA_JOB_OPERATION.concat,
         inputs: [...inputs],
         ...(tracks === undefined ? {} : { tracks }),
       }
     }
-    case 'combine': {
-      return { operation: 'combine', video: job.video, audio: job.audio }
+    case MEDIA_JOB_OPERATION.combine: {
+      return {
+        operation: MEDIA_JOB_OPERATION.combine,
+        video: job.video,
+        audio: job.audio,
+      }
     }
     default: {
       throw new TypeError('Unsupported media operation.')
@@ -218,15 +228,15 @@ export async function runMediaJob(
 
         const response: WorkerResponse = event.data
 
-        if (response.type === 'progress') {
+        if (response.type === WORKER_MESSAGE_TYPE.progress) {
           try {
             settings.onProgress?.(response.progress)
           } catch (error) {
             finish(error)
           }
-        } else if (response.type === 'complete') {
+        } else if (response.type === WORKER_MESSAGE_TYPE.complete) {
           finish(undefined, response.result)
-        } else if (response.type === 'error') {
+        } else if (response.type === WORKER_MESSAGE_TYPE.error) {
           const error = new Error(response.message)
 
           error.name = response.name
@@ -278,7 +288,7 @@ export async function runMediaJob(
       }
 
       const request: WorkerRequest = {
-        type: 'run',
+        type: WORKER_MESSAGE_TYPE.run,
         job: submittedJob,
         handle,
         directory: spools,
@@ -304,7 +314,7 @@ export async function runMediaJob(
 
     const outputFile = new File(
       [file],
-      result.mimeType === 'audio/mp4' ? 'output.m4a' : 'output.mp4',
+      result.mimeType === REMUX_MIME_TYPE.audio ? 'output.m4a' : 'output.mp4',
       { type: result.mimeType },
     )
 

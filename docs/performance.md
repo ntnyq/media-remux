@@ -19,7 +19,7 @@ Encoded bytes are copied rather than re-encoded. The important variables are inp
 
 ## Reproduce
 
-Build the package, serve the repository using a local static server, then open `tests/browser/benchmark.html`. Select files and run the benchmark. The page stages each input into OPFS before timing and disposes all benchmark outputs and staged inputs afterward. Use the browser integration page separately for output/cleanup correctness.
+Run `pnpm build`, serve the repository using a local static server, then open `tests/browser/benchmark.html`. Select files and run the benchmark. The page stages each input into OPFS before timing and disposes all benchmark outputs and staged inputs afterward. Use the browser integration page separately for output/cleanup correctness.
 
 The measured fixtures were generated with FFmpeg (not shipped in this package):
 

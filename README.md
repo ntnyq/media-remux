@@ -42,11 +42,15 @@ installMediaWorker()
 ```
 
 ```ts
-import { runMediaJob } from 'media-remux'
+import { MEDIA_JOB_OPERATION, runMediaJob } from 'media-remux'
 
 const controller = new AbortController()
 const result = await runMediaJob(
-  { operation: 'combine', video: videoFile, audio: audioFile },
+  {
+    operation: MEDIA_JOB_OPERATION.combine,
+    video: videoFile,
+    audio: audioFile,
+  },
   {
     createWorker: () =>
       new Worker(new URL('./remux.worker.ts', import.meta.url), {
@@ -67,13 +71,15 @@ try {
 Other jobs:
 
 ```ts
+import { MEDIA_JOB_OPERATION, REMUX_TRACK_SELECTION } from 'media-remux'
+
 const audioJob = {
-  operation: 'remux',
+  operation: MEDIA_JOB_OPERATION.remux,
   input: mp4File,
-  tracks: 'audio',
+  tracks: REMUX_TRACK_SELECTION.audio,
 } as const
 const concatJob = {
-  operation: 'concat',
+  operation: MEDIA_JOB_OPERATION.concat,
   inputs: [firstFlv, secondFlv],
 } as const
 ```
@@ -94,7 +100,11 @@ Core APIs accept a positioned stream and fresh stores. They do not create Worker
 <summary>Core usage example and custom storage integration</summary>
 
 ```ts
-import { createOpfsStorage, remuxMedia } from 'media-remux'
+import {
+  createOpfsStorage,
+  REMUX_TRACK_SELECTION,
+  remuxMedia,
+} from 'media-remux'
 import type { MediaOutputChunk } from 'media-remux'
 
 // Inside a dedicated Worker, with a directory exclusive to this job.
@@ -107,7 +117,12 @@ const writable = new WritableStream<MediaOutputChunk>({
 })
 
 try {
-  await remuxMedia(inputFile, { writable, storage, signal, tracks: 'all' })
+  await remuxMedia(inputFile, {
+    writable,
+    storage,
+    signal,
+    tracks: REMUX_TRACK_SELECTION.all,
+  })
 } finally {
   await storage.dispose()
 }
@@ -428,7 +443,7 @@ pnpm pack --dry-run
 
 Tests cover real byte-preserving output, B frames/AAC pre-roll, malformed FLV, cancellation/I/O failures, sparse >4 GiB MP4, regular/TFRA/moof paging, partial disk I/O, sorting, and cleanup failures. If installed, FFmpeg independently decodes real outputs.
 
-For browser checks, build, serve the repository with a local static server, and open `tests/browser/index.html`. Its button checks actual Worker/OPFS remux/combine/concat, cancellation, Worker failures, concurrent jobs, and cleanup. `tests/browser/benchmark.html` measures selected files serially over three rounds.
+For browser checks, run `pnpm build`, serve the repository with a local static server, and open `tests/browser/index.html`. Its button checks actual Worker/OPFS remux/combine/concat, cancellation, Worker failures, concurrent jobs, and cleanup. `tests/browser/benchmark.html` measures selected files serially over three rounds.
 
 Vendored code retains upstream notices and independent formatting; it remains fully checked by strict TypeScript. See [migration notes](./src/vendor/mediabunny/MIGRATION.md) and [third-party notices](./THIRD_PARTY_NOTICES.md).
 

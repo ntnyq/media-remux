@@ -1,3 +1,4 @@
+import { isFunction } from '@ntnyq/utils'
 import { createDiskFragmentSamples } from '../fragmentSamples'
 
 /**
@@ -60,7 +61,7 @@ function isSyncAccessFileHandle(
 ): handle is WorkerFileHandle {
   return (
     'createSyncAccessHandle' in handle &&
-    typeof handle.createSyncAccessHandle === 'function'
+    isFunction(handle.createSyncAccessHandle)
   )
 }
 

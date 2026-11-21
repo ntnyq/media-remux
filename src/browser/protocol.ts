@@ -1,3 +1,11 @@
+import { isFunction, isNumber, isString } from '@ntnyq/utils'
+import {
+  MEDIA_JOB_OPERATION,
+  REMUX_MIME_TYPE,
+  REMUX_PROGRESS_PHASE,
+  REMUX_TRACK_SELECTION,
+  WORKER_MESSAGE_TYPE,
+} from '../constants'
 import { isRemuxErrorCode } from '../errors'
 import type { RemuxErrorCode } from '../errors'
 import type { RemuxProgress, RemuxResult } from '../types'
@@ -10,7 +18,7 @@ export interface WorkerRequest {
   /**
    * Identifies a request to execute a media job.
    */
-  type: 'run'
+  type: typeof WORKER_MESSAGE_TYPE.run
 
   /**
    * Operation and source Blobs to process in the dedicated Worker.
@@ -38,7 +46,7 @@ export type WorkerResponse =
       /**
        * Identifies a nonterminal progress notification.
        */
-      type: 'progress'
+      type: typeof WORKER_MESSAGE_TYPE.progress
 
       /**
        * Current phase, copied payload bytes, and segment position.
@@ -49,7 +57,7 @@ export type WorkerResponse =
       /**
        * Identifies successful output finalization and temporary store disposal.
        */
-      type: 'complete'
+      type: typeof WORKER_MESSAGE_TYPE.complete
 
       /**
        * Completed job's duration, MIME type, and copied encoded payload byte count.
@@ -60,7 +68,7 @@ export type WorkerResponse =
       /**
        * Identifies a terminal job failure after attempted resource cleanup.
        */
-      type: 'error'
+      type: typeof WORKER_MESSAGE_TYPE.error
 
       /**
        * Original Error name, or 'Error' when the thrown value was not an Error.
@@ -95,7 +103,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * @returns Whether the value is a finite number greater than or equal to zero.
  */
 function isFiniteNumber(value: unknown): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+  return isNumber(value) && Number.isFinite(value) && value >= 0
 }
 
 /**
@@ -112,33 +120,31 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
     return false
   }
 
-  if (value['type'] === 'error') {
+  if (value['type'] === WORKER_MESSAGE_TYPE.error) {
     return (
-      typeof value['name'] === 'string' &&
-      typeof value['message'] === 'string' &&
+      isString(value['name']) &&
+      isString(value['message']) &&
       (value['code'] === undefined || isRemuxErrorCode(value['code']))
     )
   }
 
-  if (value['type'] === 'complete') {
+  if (value['type'] === WORKER_MESSAGE_TYPE.complete) {
     const { result } = value
 
     return (
       isRecord(result) &&
       isFiniteNumber(result['bytesProcessed']) &&
       isFiniteNumber(result['duration']) &&
-      typeof result['mimeType'] === 'string' &&
-      ['video/mp4', 'audio/mp4'].includes(result['mimeType'])
+      Object.values<unknown>(REMUX_MIME_TYPE).includes(result['mimeType'])
     )
   }
 
   const { progress } = value
 
   return (
-    value['type'] === 'progress' &&
+    value['type'] === WORKER_MESSAGE_TYPE.progress &&
     isRecord(progress) &&
-    typeof progress['phase'] === 'string' &&
-    ['inspect', 'remux', 'finalize'].includes(progress['phase']) &&
+    Object.values<unknown>(REMUX_PROGRESS_PHASE).includes(progress['phase']) &&
     isFiniteNumber(progress['bytesProcessed']) &&
     Number.isInteger(progress['segmentIndex']) &&
     isFiniteNumber(progress['segmentIndex'])
@@ -155,7 +161,7 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
  * WorkerRequest when true. Concatenation requires at least one Blob.
  */
 export function isWorkerRequest(value: unknown): value is WorkerRequest {
-  if (!isRecord(value) || value['type'] !== 'run') {
+  if (!isRecord(value) || value['type'] !== WORKER_MESSAGE_TYPE.run) {
     return false
   }
 
@@ -165,8 +171,8 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
     !isRecord(job) ||
     !isRecord(handle) ||
     !isRecord(directory) ||
-    typeof handle['createWritable'] !== 'function' ||
-    typeof directory['getFileHandle'] !== 'function'
+    !isFunction(handle['createWritable']) ||
+    !isFunction(directory['getFileHandle'])
   ) {
     return false
   }
@@ -175,22 +181,21 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   if (
     tracks !== undefined &&
-    (typeof tracks !== 'string' ||
-      !['all', 'audio', 'video', 'video-with-optional-audio'].includes(tracks))
+    !Object.values<unknown>(REMUX_TRACK_SELECTION).includes(tracks)
   ) {
     return false
   }
 
-  if (job['operation'] === 'remux') {
+  if (job['operation'] === MEDIA_JOB_OPERATION.remux) {
     return job['input'] instanceof Blob
   }
 
-  if (job['operation'] === 'combine') {
+  if (job['operation'] === MEDIA_JOB_OPERATION.combine) {
     return job['video'] instanceof Blob && job['audio'] instanceof Blob
   }
 
   return (
-    job['operation'] === 'concat' &&
+    job['operation'] === MEDIA_JOB_OPERATION.concat &&
     Array.isArray(job['inputs']) &&
     job['inputs'].length > 0 &&
     job['inputs'].every(input => input instanceof Blob)

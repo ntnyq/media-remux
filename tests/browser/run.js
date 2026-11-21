@@ -1,5 +1,10 @@
 /* oxlint-disable no-await-in-loop -- Browser scenarios intentionally run in isolation and exercise ordered I/O. */
-import { isRemuxError, runMediaJob } from '../../dist/index.js'
+import {
+  isRemuxError,
+  MEDIA_JOB_OPERATION,
+  REMUX_TRACK_SELECTION,
+  runMediaJob,
+} from '../../dist/index.js'
 
 const output = document.querySelector('#result')
 const checks = []
@@ -81,12 +86,12 @@ async function run() {
     const audio = await fixture('audio.m4a')
     const flv = await fixture('progressive.flv')
     const jobs = [
-      { operation: 'combine', video, audio },
-      { operation: 'remux', input: audio },
+      { operation: MEDIA_JOB_OPERATION.combine, video, audio },
+      { operation: MEDIA_JOB_OPERATION.remux, input: audio },
       {
-        operation: 'concat',
+        operation: MEDIA_JOB_OPERATION.concat,
         inputs: [flv, flv],
-        tracks: 'video-with-optional-audio',
+        tracks: REMUX_TRACK_SELECTION.videoWithOptionalAudio,
       },
     ]
 
@@ -136,20 +141,32 @@ async function run() {
     const vfr = await fixture('vfr-bframes.mp4')
     const vfrFlv = await fixture('vfr-bframes.flv')
     const playbackCases = [
-      ['cfr-av', { operation: 'combine', video, audio }, 1024 / 48_000],
+      [
+        'cfr-av',
+        { operation: MEDIA_JOB_OPERATION.combine, video, audio },
+        1024 / 48_000,
+      ],
       [
         'vfr-av',
-        { operation: 'combine', video: vfr, audio },
+        { operation: MEDIA_JOB_OPERATION.combine, video: vfr, audio },
         0.4 + 1024 / 48_000,
       ],
       [
         'vfr-flv-av',
-        { operation: 'combine', video: vfrFlv, audio },
+        { operation: MEDIA_JOB_OPERATION.combine, video: vfrFlv, audio },
         0.4 + 1024 / 48_000,
       ],
-      ['vfr-remux', { operation: 'remux', input: vfr }, 0],
-      ['vfr-mp4-flv', { operation: 'concat', inputs: [vfr, vfrFlv] }, 0],
-      ['vfr-flv-mp4', { operation: 'concat', inputs: [vfrFlv, vfr] }, 0],
+      ['vfr-remux', { operation: MEDIA_JOB_OPERATION.remux, input: vfr }, 0],
+      [
+        'vfr-mp4-flv',
+        { operation: MEDIA_JOB_OPERATION.concat, inputs: [vfr, vfrFlv] },
+        0,
+      ],
+      [
+        'vfr-flv-mp4',
+        { operation: MEDIA_JOB_OPERATION.concat, inputs: [vfrFlv, vfr] },
+        0,
+      ],
     ]
 
     if (
@@ -159,7 +176,11 @@ async function run() {
     ) {
       playbackCases.push([
         'av1-av',
-        { operation: 'combine', video: await fixture('av1-main10.mp4'), audio },
+        {
+          operation: MEDIA_JOB_OPERATION.combine,
+          video: await fixture('av1-main10.mp4'),
+          audio,
+        },
         1024 / 48_000,
       ])
     }
@@ -187,7 +208,7 @@ async function run() {
     const fractionalAv = await fixture('fractional-av.mp4')
     const concatenated = await runMediaJob(
       {
-        operation: 'concat',
+        operation: MEDIA_JOB_OPERATION.concat,
         inputs: Array.from({ length: 16 }, () => fractionalAv),
       },
       { createWorker, directory },
@@ -199,7 +220,7 @@ async function run() {
         'Fractional A/V output did not flush its initial OPFS page',
       )
       const repeated = await runMediaJob(
-        { operation: 'remux', input: concatenated.file },
+        { operation: MEDIA_JOB_OPERATION.remux, input: concatenated.file },
         { createWorker, directory },
       )
 
@@ -229,8 +250,8 @@ async function run() {
       const inputs = [audio, audio]
       const job =
         mutation === 'inherited-job'
-          ? Object.create({ operation: 'concat', inputs })
-          : { operation: 'concat', inputs }
+          ? Object.create({ operation: MEDIA_JOB_OPERATION.concat, inputs })
+          : { operation: MEDIA_JOB_OPERATION.concat, inputs }
       const options =
         mutation === 'inherited-options'
           ? Object.create({ createWorker, directory })
@@ -280,7 +301,11 @@ async function run() {
 
       try {
         await runMediaJob(
-          { operation: 'remux', input, tracks: 'video-with-optional-audio' },
+          {
+            operation: MEDIA_JOB_OPERATION.remux,
+            input,
+            tracks: REMUX_TRACK_SELECTION.videoWithOptionalAudio,
+          },
           { createWorker, directory },
         )
       } catch (error) {
@@ -305,7 +330,7 @@ async function run() {
     try {
       await runMediaJob(
         {
-          operation: 'concat',
+          operation: MEDIA_JOB_OPERATION.concat,
           inputs: Array.from({ length: 25 }, () => video),
         },
         {
@@ -342,7 +367,7 @@ async function run() {
 
       try {
         await runMediaJob(
-          { operation: 'remux', input: video },
+          { operation: MEDIA_JOB_OPERATION.remux, input: video },
           { createWorker: createFailure, directory },
         )
       } catch {
@@ -361,7 +386,7 @@ async function run() {
     const concurrent = await Promise.all(
       [1, 2].map(() =>
         runMediaJob(
-          { operation: 'remux', input: audio },
+          { operation: MEDIA_JOB_OPERATION.remux, input: audio },
           { createWorker, directory },
         ),
       ),

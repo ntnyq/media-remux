@@ -1,5 +1,9 @@
 /* oxlint-disable no-await-in-loop -- Benchmark runs and fixture writes must finish before the next measurement. */
-import { runMediaJob } from '../../dist/index.js'
+import {
+  MEDIA_JOB_OPERATION,
+  REMUX_TRACK_SELECTION,
+  runMediaJob,
+} from '../../dist/index.js'
 
 /**
  * Runs serially to avoid overlapping Workers and disk contention.
@@ -33,7 +37,11 @@ export async function benchmark(inputs, rounds = 3) {
         const started = performance.now()
         const phases = {}
         const result = await runMediaJob(
-          { operation: 'remux', input },
+          {
+            operation: MEDIA_JOB_OPERATION.remux,
+            input,
+            tracks: REMUX_TRACK_SELECTION.all,
+          },
           {
             createWorker: () =>
               new Worker(new URL('worker.js', import.meta.url), {
