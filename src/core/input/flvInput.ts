@@ -1,6 +1,10 @@
 /* oxlint-disable no-await-in-loop -- FLV tags are read in file order with bounded memory. */
 import { checkAbort } from '../../abort'
-import { parseAacAudioSpecificConfig } from '../../vendor/mediabunny/shared/aac-misc'
+import { createRemuxError, withRemuxErrorCode } from '../../errors'
+import {
+  InvalidAacDescriptionError,
+  parseAacAudioSpecificConfig,
+} from '../../vendor/mediabunny/shared/aac-misc'
 import { Bitstream } from '../../vendor/mediabunny/shared/bitstream'
 import { extractColorSpace } from '../../vendor/mediabunny/src/codec'
 import {
@@ -40,7 +44,7 @@ async function readBytes(
   checkAbort(signal)
 
   if (offset < 0 || length < 0 || offset + length > blob.size) {
-    throw new Error('Truncated FLV file.')
+    throw createRemuxError('INVALID_INPUT', 'Truncated FLV file.')
   }
 
   const bytes = new Uint8Array(
@@ -50,7 +54,7 @@ async function readBytes(
   checkAbort(signal)
 
   if (bytes.length !== length) {
-    throw new Error('Incomplete FLV read.')
+    throw createRemuxError('INVALID_INPUT', 'Incomplete FLV read.')
   }
 
   return bytes
@@ -92,19 +96,22 @@ async function* readTags(
   const header = await readBytes(blob, 0, 9, signal)
 
   if (header[3] !== 1 || ((header[4] ?? 0) & ~5) !== 0) {
-    throw new Error('Unsupported FLV header.')
+    throw createRemuxError(
+      'UNSUPPORTED_MEDIA_FEATURE',
+      'Unsupported FLV header.',
+    )
   }
 
   let offset = new DataView(header.buffer).getUint32(5)
 
   if (offset < 9) {
-    throw new Error('Invalid FLV data offset.')
+    throw createRemuxError('INVALID_INPUT', 'Invalid FLV data offset.')
   }
 
   const initialSize = await readBytes(blob, offset, 4, signal)
 
   if (new DataView(initialSize.buffer).getUint32(0) !== 0) {
-    throw new Error('Invalid FLV initial tag size.')
+    throw createRemuxError('INVALID_INPUT', 'Invalid FLV initial tag size.')
   }
 
   offset += 4
@@ -115,13 +122,16 @@ async function* readTags(
     const size = uint24(tagHeader, 1)
 
     if (uint24(tagHeader, 8) !== 0 || ![8, 9, 18].includes(type ?? 0)) {
-      throw new Error('Unsupported FLV tag or encrypted data.')
+      throw createRemuxError(
+        'UNSUPPORTED_MEDIA_FEATURE',
+        'Unsupported FLV tag or encrypted data.',
+      )
     }
 
     const tail = await readBytes(blob, offset + 11 + size, 4, signal)
 
     if (new DataView(tail.buffer).getUint32(0) !== 11 + size) {
-      throw new Error('Invalid FLV previous tag size.')
+      throw createRemuxError('INVALID_INPUT', 'Invalid FLV previous tag size.')
     }
 
     const tagKind = type === 9 ? 'video' : 'audio'
@@ -130,7 +140,7 @@ async function* readTags(
       const prefixSize = type === 9 ? 5 : 2
 
       if (size < prefixSize) {
-        throw new Error('Truncated FLV media tag.')
+        throw createRemuxError('INVALID_INPUT', 'Truncated FLV media tag.')
       }
 
       const prefix = await readBytes(blob, offset + 11, prefixSize, signal)
@@ -139,7 +149,10 @@ async function* readTags(
         (type === 9 && ((prefix[0] ?? 0) & 15) !== 7) ||
         (type === 8 && (prefix[0] ?? 0) >> 4 !== 10)
       ) {
-        throw new Error('FLV supports only H.264 video and AAC audio.')
+        throw createRemuxError(
+          'UNSUPPORTED_CODEC',
+          'FLV supports only H.264 video and AAC audio.',
+        )
       }
 
       const packetType = prefix[1] ?? -1
@@ -149,7 +162,10 @@ async function* readTags(
         packetType !== 1 &&
         !(type === 9 && packetType === 2)
       ) {
-        throw new Error('Unsupported FLV packet type.')
+        throw createRemuxError(
+          'UNSUPPORTED_MEDIA_FEATURE',
+          'Unsupported FLV packet type.',
+        )
       }
 
       const composition = type === 9 ? uint24(prefix, 2) : 0
@@ -212,7 +228,10 @@ function videoConfig(description: Uint8Array<ArrayBuffer>): VideoDecoderConfig {
   const info = sps && parseAvcSps(sps)
 
   if (!avc || !info || avc.pictureParameterSets.length === 0) {
-    throw new Error('Invalid FLV AVC decoder configuration.')
+    throw createRemuxError(
+      'INVALID_INPUT',
+      'Invalid FLV AVC decoder configuration.',
+    )
   }
 
   const profile = [...description.subarray(1, 4)]
@@ -252,7 +271,17 @@ function videoConfig(description: Uint8Array<ArrayBuffer>): VideoDecoderConfig {
  * @throws {Error} If AAC-LC, a channel count, or a positive sample rate are absent.
  */
 function audioConfig(description: Uint8Array<ArrayBuffer>): AudioDecoderConfig {
-  const info = parseAacAudioSpecificConfig(description)
+  let info
+
+  try {
+    info = parseAacAudioSpecificConfig(description)
+  } catch (error) {
+    if (error instanceof InvalidAacDescriptionError) {
+      throw withRemuxErrorCode(error, 'INVALID_INPUT')
+    }
+
+    throw error
+  }
 
   if (
     info.objectType !== 2 ||
@@ -261,7 +290,10 @@ function audioConfig(description: Uint8Array<ArrayBuffer>): AudioDecoderConfig {
     !info.outputSampleRate ||
     !(info.outputSampleRate > 0)
   ) {
-    throw new Error('FLV requires AAC-LC with a known channel layout.')
+    throw createRemuxError(
+      'UNSUPPORTED_CODEC',
+      'FLV requires AAC-LC with a known channel layout.',
+    )
   }
 
   return {
@@ -330,12 +362,18 @@ export async function openFlvInput(
       const previous = configs.get(tag.kind)
 
       if (previous && !sameBytes(previous, tag.data)) {
-        throw new Error('FLV decoder configuration changes within a segment.')
+        throw createRemuxError(
+          'UNSUPPORTED_MEDIA_FEATURE',
+          'FLV decoder configuration changes within a segment.',
+        )
       }
 
       configs.set(tag.kind, tag.data)
     } else if (tag.packetType === 1 && !configs.has(tag.kind)) {
-      throw new Error('FLV media packet precedes its decoder configuration.')
+      throw createRemuxError(
+        'INVALID_INPUT',
+        'FLV media packet precedes its decoder configuration.',
+      )
     }
   }
 
@@ -393,7 +431,8 @@ export async function openFlvInput(
               const delta = tag.timestamp - pending.timestamp
 
               if (delta < 0 || (delta === 0 && tag.packetType === 1)) {
-                throw new Error(
+                throw createRemuxError(
+                  'INVALID_INPUT',
                   'FLV decode timestamps must increase within each track.',
                 )
               }

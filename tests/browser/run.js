@@ -1,5 +1,5 @@
 /* oxlint-disable no-await-in-loop -- Browser scenarios intentionally run in isolation and exercise ordered I/O. */
-import { runMediaJob } from '../../dist/index.js'
+import { isRemuxError, runMediaJob } from '../../dist/index.js'
 
 const output = document.querySelector('#result')
 const checks = []
@@ -83,7 +83,11 @@ async function run() {
     const jobs = [
       { operation: 'combine', video, audio },
       { operation: 'remux', input: audio },
-      { operation: 'concat', inputs: [flv, flv] },
+      {
+        operation: 'concat',
+        inputs: [flv, flv],
+        tracks: 'video-with-optional-audio',
+      },
     ]
 
     for (const job of jobs) {
@@ -257,15 +261,26 @@ async function run() {
       checks.push({ capturedJob: mutation, cleanup: 'clean' })
     }
 
-    for (const [label, input, message] of [
-      ['truncated', video.slice(0, video.size - 1), 'sample payload'],
-      ['leading-delta', await fixture('leading-delta.mp4'), 'keyframe'],
+    for (const [label, input, message, code] of [
+      [
+        'truncated',
+        video.slice(0, video.size - 1),
+        'sample payload',
+        'INVALID_INPUT',
+      ],
+      [
+        'leading-delta',
+        await fixture('leading-delta.mp4'),
+        'keyframe',
+        'UNSUPPORTED_MEDIA_FEATURE',
+      ],
+      ['no-video', audio, 'required video track', 'MISSING_REQUIRED_TRACK'],
     ]) {
       let failure
 
       try {
         await runMediaJob(
-          { operation: 'remux', input },
+          { operation: 'remux', input, tracks: 'video-with-optional-audio' },
           { createWorker, directory },
         )
       } catch (error) {
@@ -273,14 +288,16 @@ async function run() {
       }
 
       assert(
-        failure instanceof Error && failure.message.includes(message),
-        `Invalid ${label} input did not reject with the expected error`,
+        isRemuxError(failure) &&
+          failure.code === code &&
+          failure.message.includes(message),
+        `Invalid ${label} input did not preserve its media error`,
       )
       assert(
         (await listNames(directory)).length === 0,
         'Invalid input left temporary files',
       )
-      checks.push({ invalidInput: label, cleanup: 'clean' })
+      checks.push({ invalidInput: label, code, cleanup: 'clean' })
     }
 
     const controller = new AbortController()
@@ -305,7 +322,7 @@ async function run() {
 
       throw new Error('Cancellation did not reject')
     } catch (error) {
-      assert(error.name === 'AbortError', error.message)
+      assert(error.name === 'AbortError' && !isRemuxError(error), error.message)
     }
 
     assert(

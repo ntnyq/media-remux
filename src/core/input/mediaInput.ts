@@ -1,7 +1,16 @@
 /* oxlint-disable no-await-in-loop -- Packet cursors advance in decode order with backpressure. */
 import { checkAbort } from '../../abort'
-import { Input } from '../../vendor/mediabunny/src/input'
+import { createRemuxError, withRemuxErrorCode } from '../../errors'
+import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
+import {
+  Input,
+  UnsupportedInputFormatError,
+} from '../../vendor/mediabunny/src/input'
 import { MP4 } from '../../vendor/mediabunny/src/input-format'
+import {
+  InvalidIsobmffInputError,
+  UnsupportedIsobmffInputError,
+} from '../../vendor/mediabunny/src/isobmff/isobmff-demuxer'
 import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { EncodedPacketSink } from '../../vendor/mediabunny/src/media-sink'
 import type { TransformationMatrix } from '../../vendor/mediabunny/src/misc'
@@ -71,6 +80,28 @@ export interface MediaInput {
 }
 
 /**
+ * Codes explicit MP4 parser failures without classifying filesystem read errors.
+ */
+function classifyMp4Error(error: unknown): unknown {
+  if (error instanceof UnsupportedInputFormatError) {
+    return withRemuxErrorCode(error, 'UNSUPPORTED_CONTAINER')
+  }
+
+  if (error instanceof UnsupportedIsobmffInputError) {
+    return withRemuxErrorCode(error, 'UNSUPPORTED_MEDIA_FEATURE')
+  }
+
+  if (
+    error instanceof InvalidIsobmffInputError ||
+    error instanceof InvalidAacDescriptionError
+  ) {
+    return withRemuxErrorCode(error, 'INVALID_INPUT')
+  }
+
+  return error
+}
+
+/**
  * Opens the selected primary encoded tracks from an MP4 or FLV Blob.
  * Detects FLV by its leading signature and otherwise attempts MP4 parsing.
  * Packet iterators read in decode order and can omit encoded payloads during
@@ -93,8 +124,15 @@ export async function openMediaInput(
 ): Promise<MediaInput> {
   checkAbort(signal)
 
-  if (!(blob instanceof Blob) || blob.size === 0) {
+  if (!(blob instanceof Blob)) {
     throw new TypeError('Media input must be a nonempty Blob.')
+  }
+
+  if (blob.size === 0) {
+    throw withRemuxErrorCode(
+      new TypeError('Media input must be a nonempty Blob.'),
+      'INVALID_INPUT',
+    )
   }
 
   const magic = new Uint8Array(await blob.slice(0, 3).arrayBuffer())
@@ -138,7 +176,10 @@ export async function openMediaInput(
           typeof codecId === 'string' &&
           ['encv', 'enca'].includes(codecId.toLowerCase())
         ) {
-          throw new Error('Encrypted MP4 tracks are unsupported.')
+          throw createRemuxError(
+            'UNSUPPORTED_MEDIA_FEATURE',
+            'Encrypted MP4 tracks are unsupported.',
+          )
         }
 
         const codec = await track.getCodec()
@@ -149,7 +190,8 @@ export async function openMediaInput(
           codec !== 'av1' &&
           codec !== 'aac'
         ) {
-          throw new Error(
+          throw createRemuxError(
+            'UNSUPPORTED_CODEC',
             `Unsupported codec: ${codec}. Expected H.264, HEVC, AV1, or AAC.`,
           )
         }
@@ -157,14 +199,18 @@ export async function openMediaInput(
         const config = await track.getDecoderConfig()
 
         if (!config) {
-          throw new Error('Missing decoder configuration.')
+          throw createRemuxError(
+            'INVALID_INPUT',
+            'Missing decoder configuration.',
+          )
         }
 
         if (
           (codec === 'hevc' || codec === 'av1') &&
           !config.description?.byteLength
         ) {
-          throw new Error(
+          throw createRemuxError(
+            'INVALID_INPUT',
             `Missing ${codec === 'hevc' ? 'hvcC' : 'av1C'} configuration in MP4 video track.`,
           )
         }
@@ -209,7 +255,7 @@ export async function openMediaInput(
               // Keep the caller's cancellation reason instead of that cleanup error.
               checkAbort(signal)
 
-              throw error
+              throw classifyMp4Error(error)
             }
           },
         })
@@ -234,6 +280,6 @@ export async function openMediaInput(
     input.dispose()
     checkAbort(signal)
 
-    throw error
+    throw classifyMp4Error(error)
   }
 }

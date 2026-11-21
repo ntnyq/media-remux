@@ -1,5 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Tracks and segments are consumed in order with bounded memory. */
 import { checkAbort } from '../abort'
+import { createRemuxError } from '../errors'
 import type { RemuxOptions, RemuxResult } from '../types'
 import { createDecodeTimeline } from './decodeTimeline'
 import type { DecodeTimeline } from './decodeTimeline'
@@ -74,6 +75,8 @@ export async function concatMedia(
   options: RemuxOptions,
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
+  const selection =
+    settings.tracks === 'video-with-optional-audio' ? 'all' : settings.tracks
 
   checkAbort(settings.signal)
   const blobs = [...inputs]
@@ -96,7 +99,7 @@ export async function concatMedia(
       segmentIndex: index,
     })
 
-    const input = await openMediaInput(blob, settings.signal, settings.tracks)
+    const input = await openMediaInput(blob, settings.signal, selection)
 
     try {
       const tracks = selectTracks(input, settings.tracks)
@@ -107,7 +110,8 @@ export async function concatMedia(
         signature = current
         decodeTimeline = createDecodeTimeline(tracks)
       } else if (current !== signature) {
-        throw new Error(
+        throw createRemuxError(
+          'INCOMPATIBLE_SEGMENTS',
           `Incompatible track layout or decoder configuration in segment ${index}.`,
         )
       }
@@ -127,7 +131,7 @@ export async function concatMedia(
    */
   async function* segments() {
     for (const [index, blob] of blobs.entries()) {
-      const input = await openMediaInput(blob, settings.signal, settings.tracks)
+      const input = await openMediaInput(blob, settings.signal, selection)
 
       try {
         const info = infos[index]
@@ -204,7 +208,8 @@ export async function combineTracks(
     const audioTrack = audioInput.tracks.find(track => track.kind === 'audio')
 
     if (!videoTrack || !audioTrack) {
-      throw new Error(
+      throw createRemuxError(
+        'MISSING_REQUIRED_TRACK',
         'combineTracks requires a video track followed by an audio track.',
       )
     }

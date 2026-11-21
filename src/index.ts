@@ -1,5 +1,6 @@
 export { remuxMedia, combineTracks, concatMedia } from './core/remux'
 export { runMediaJob } from './browser/client'
+export { isRemuxError } from './errors'
 export {
   createOpfsStorage,
   createDiskFragmentStore,
@@ -12,9 +13,11 @@ export type {
   RemuxResult,
   RemuxStorage,
   RemuxProgress,
+  RemuxTrackSelection,
   MediaOutputChunk,
 } from './types'
 export type { MediaJob, MediaJobOptions, MediaJobResult } from './browser/types'
+export type { RemuxError, RemuxErrorCode } from './errors'
 export type {
   DisposableRemuxStorage,
   FragmentStoreFile,

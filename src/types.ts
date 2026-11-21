@@ -2,6 +2,17 @@ import type { FragmentIndexStore } from './storage/fragmentIndex'
 import type { FragmentSampleStore } from './storage/fragmentSamples'
 
 /**
+ * Primary tracks to retain when remuxing or concatenating.
+ * 'video-with-optional-audio' requires video in every input and retains audio
+ * when present.
+ */
+export type RemuxTrackSelection =
+  | 'all'
+  | 'audio'
+  | 'video'
+  | 'video-with-optional-audio'
+
+/**
  * A positioned output write. Awaiting write applies backpressure.
  */
 export interface MediaOutputChunk {
@@ -94,7 +105,7 @@ export interface RemuxOptions {
   /**
    * Selects tracks for remux/concat. Defaults to all supported primary tracks.
    */
-  tracks?: 'all' | 'audio' | 'video'
+  tracks?: RemuxTrackSelection
 }
 
 /**

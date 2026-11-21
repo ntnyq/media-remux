@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { expect, test } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
+import { combineTracks, concatMedia, isRemuxError, remuxMedia } from '../src'
 import type { RemuxOptions, RemuxProgress, RemuxResult } from '../src'
 import { fixture, diskStorage, memoryTarget, packets } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
@@ -652,9 +652,68 @@ test('rejects incompatible segments before writing any output', async () => {
       writable: target.writable,
       storage: await diskStorage(),
     }),
-  ).rejects.toThrow('Incompatible')
+  ).rejects.toMatchObject({ code: 'INCOMPATIBLE_SEGMENTS' })
   expect(target.state.writes).toStrictEqual([])
   expect(target.writable.locked).toBe(false)
+})
+
+test.each(['progressive.mp4', 'progressive.flv', 'video.mp4'] as const)(
+  'requires video and copies available tracks from %s',
+  async name => {
+    const input = await fixture(name)
+    const target = memoryTarget()
+    const result = await remuxMedia(input, {
+      tracks: 'video-with-optional-audio',
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+
+    expect(result.mimeType).toBe('video/mp4')
+
+    for (const kind of ['video', 'audio'] as const) {
+      const source = await packets(input, kind)
+      const output = await packets(target.blob(), kind)
+
+      expect(output.map(packet => packet.data)).toStrictEqual(
+        source.map(packet => packet.data),
+      )
+    }
+  },
+)
+
+test('requires video in every segment before writing', async () => {
+  const audio = await fixture('audio.m4a')
+  const video = await fixture('video.mp4')
+  const target = memoryTarget()
+  const options: RemuxOptions = {
+    tracks: 'video-with-optional-audio',
+    writable: target.writable,
+    storage: await diskStorage(),
+  }
+
+  await expect(remuxMedia(audio, options)).rejects.toSatisfy(
+    (error: unknown) =>
+      isRemuxError(error) && error.code === 'MISSING_REQUIRED_TRACK',
+  )
+  await expect(concatMedia([video, audio], options)).rejects.toMatchObject({
+    code: 'MISSING_REQUIRED_TRACK',
+  })
+  await expect(
+    concatMedia([video, await fixture('progressive.mp4')], options),
+  ).rejects.toMatchObject({
+    code: 'INCOMPATIBLE_SEGMENTS',
+  })
+  expect(target.state.writes).toStrictEqual([])
+  expect(target.writable.locked).toBe(false)
+})
+
+test('reports an unrecognized container with a stable code', async () => {
+  await expect(
+    remuxMedia(new Blob(['unrecognized file']), {
+      storage: await diskStorage(),
+      writable: memoryTarget().writable,
+    }),
+  ).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTAINER' })
 })
 
 test('rejects empty/truncated FLV and invalid track selection', async () => {
@@ -673,7 +732,10 @@ test('rejects empty/truncated FLV and invalid track selection', async () => {
       storage,
       writable: memoryTarget().writable,
     }),
-  ).rejects.toThrow('Truncated FLV')
+  ).rejects.toMatchObject({
+    code: 'INVALID_INPUT',
+    message: 'Truncated FLV file.',
+  })
   await expect(
     remuxMedia(await fixture('audio.m4a'), {
       tracks: 'video',

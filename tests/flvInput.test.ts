@@ -169,6 +169,19 @@ async function withAacDescription(description: Uint8Array) {
   ])
 }
 
+test('reports a truncated FLV AAC configuration as invalid input', async () => {
+  const input = await withAacDescription(Uint8Array.of(0x12))
+  const target = memoryTarget()
+
+  await expect(
+    remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({ name: 'TypeError', code: 'INVALID_INPUT' })
+  expect(target.state.writes).toStrictEqual([])
+})
+
 test.each([
   { name: 'double-rate SBR', hex: '118856e580' },
   { name: 'same-rate SBR', hex: '118856e598' },
@@ -388,7 +401,10 @@ test('rejects unsupported FLV codecs before writing output', async () => {
       writable: target.writable,
       storage: await diskStorage(),
     }),
-  ).rejects.toThrow('only H.264')
+  ).rejects.toMatchObject({
+    code: 'UNSUPPORTED_CODEC',
+    message: 'FLV supports only H.264 video and AAC audio.',
+  })
   expect(target.state.writes).toStrictEqual([])
 })
 

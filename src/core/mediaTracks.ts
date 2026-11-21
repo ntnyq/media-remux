@@ -1,5 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Inspect one track at a time to bound packet metadata reads. */
 import { checkAbort } from '../abort'
+import { createRemuxError } from '../errors'
 import type { RemuxOptions } from '../types'
 import { resolveIsobmffColorInformation } from '../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { simplifyRational } from '../vendor/mediabunny/src/misc'
@@ -27,9 +28,9 @@ export interface SegmentInfo {
  * mutating the input's track list.
  *
  * @param input - Open media input whose tracks are available for selection.
- * @param selection - Requested kind; undefined or 'all' includes every track.
+ * @param selection - Requested track kinds, including any required track.
  * @returns A new nonempty array containing the original selected track objects.
- * @throws {Error} If no tracks match the selection.
+ * @throws {Error} If no tracks match the selection or required video is missing.
  */
 export function selectTracks(
   input: MediaInput,
@@ -37,7 +38,11 @@ export function selectTracks(
 ): PacketTrack[] {
   const tracks = input.tracks
     .filter(
-      track => !selection || selection === 'all' || track.kind === selection,
+      track =>
+        !selection ||
+        selection === 'all' ||
+        selection === 'video-with-optional-audio' ||
+        track.kind === selection,
     )
     .toSorted((left, right) => {
       if (left.kind === right.kind) {
@@ -47,8 +52,21 @@ export function selectTracks(
       return left.kind === 'video' ? -1 : 1
     })
 
+  if (
+    selection === 'video-with-optional-audio' &&
+    tracks[0]?.kind !== 'video'
+  ) {
+    throw createRemuxError(
+      'MISSING_REQUIRED_TRACK',
+      'Input has no required video track.',
+    )
+  }
+
   if (tracks.length === 0) {
-    throw new Error('Input has no selected media tracks.')
+    throw createRemuxError(
+      'MISSING_REQUIRED_TRACK',
+      'Input has no selected media tracks.',
+    )
   }
 
   return tracks
@@ -162,11 +180,17 @@ export async function inspectTracks(
         packet.duration < 0 ||
         packet.byteLength === 0
       ) {
-        throw new Error('Invalid encoded packet timing or size.')
+        throw createRemuxError(
+          'INVALID_INPUT',
+          'Invalid encoded packet timing or size.',
+        )
       }
 
       if (count === 0 && track.kind === 'video' && packet.type !== 'key') {
-        throw new Error('Each video segment must begin with a keyframe.')
+        throw createRemuxError(
+          'UNSUPPORTED_MEDIA_FEATURE',
+          'Each video segment must begin with a keyframe.',
+        )
       }
 
       // Match the muxer's GOP timing constraint before acquiring the output.
@@ -176,7 +200,8 @@ export async function inspectTracks(
       }
 
       if (packet.timestamp < maxTimestampBeforeLastKeyPacket) {
-        throw new Error(
+        throw createRemuxError(
+          'UNSUPPORTED_MEDIA_FEATURE',
           'Timestamps cannot be smaller than the largest timestamp of the previous GOP.',
         )
       }
@@ -192,12 +217,18 @@ export async function inspectTracks(
     }
 
     if (count === 0) {
-      throw new Error(`The ${track.kind} track has no packets.`)
+      throw createRemuxError(
+        'INVALID_INPUT',
+        `The ${track.kind} track has no packets.`,
+      )
     }
   }
 
   if (!(end > start)) {
-    throw new Error('Media segment has no positive duration.')
+    throw createRemuxError(
+      'INVALID_INPUT',
+      'Media segment has no positive duration.',
+    )
   }
 
   const info = { start, duration: end - start }

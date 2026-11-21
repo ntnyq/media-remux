@@ -178,6 +178,9 @@ importers:
       '@ntnyq/tsconfig':
         specifier: ^3.1.0
         version: 3.1.0
+      '@ntnyq/utils':
+        specifier: ^0.27.0
+        version: 0.27.0
       '@types/node':
         specifier: ^26.6.6
         version: 26.6.6
@@ -313,6 +316,10 @@ packages:
 
   '@ntnyq/utils@0.26.0':
     resolution: {integrity: sha512-ejxU8uzfL7DJ+EJtGBr28L20r+z/TZ5gUgIfcXe9SMtWZ7AEYz0iWBaZGW+AMuJQ/aaAd8t1D/0Vz+HfjUS0qg==}
+    engines: {node: ^22.19.0 || >=24.11.0}
+
+  '@ntnyq/utils@0.27.0':
+    resolution: {integrity: sha512-+JP3fvSQNCNboUQTWBoDdhX13YFbknR/Jnote5e/vcvEuKB7HnSdlpx31in2gDIDN4VNI/OaUS7j8KWxohPOgg==}
     engines: {node: ^22.19.0 || >=24.11.0}
 
   '@oxc-project/types@0.156.0':
@@ -1835,6 +1842,8 @@ snapshots:
   '@ntnyq/tsconfig@3.1.0': {}
 
   '@ntnyq/utils@0.26.0': {}
+
+  '@ntnyq/utils@0.27.0': {}
 
   '@oxc-project/types@0.156.0': {}
 

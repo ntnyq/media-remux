@@ -1,5 +1,6 @@
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
 import { remuxMedia, combineTracks, concatMedia } from '../core/remux'
+import { isRemuxError } from '../errors'
 import { createOpfsStorage } from '../storage'
 import type { DisposableRemuxStorage } from '../storage'
 import type {
@@ -198,6 +199,7 @@ export function installMediaWorker(
       scope.postMessage({
         type: 'error',
         name: error instanceof Error ? error.name : 'Error',
+        ...(isRemuxError(error) ? { code: error.code } : {}),
         message:
           cleanupError?.status === 'rejected'
             ? `${message} (cleanup: ${String(cleanupError.reason)})`

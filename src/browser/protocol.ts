@@ -1,3 +1,5 @@
+import { isRemuxErrorCode } from '../errors'
+import type { RemuxErrorCode } from '../errors'
 import type { RemuxProgress, RemuxResult } from '../types'
 import type { MediaJob } from './types'
 
@@ -69,6 +71,11 @@ export type WorkerResponse =
        * Failure description, including a cleanup failure suffix when applicable.
        */
       message: string
+
+      /**
+       * Stable media failure code when available.
+       */
+      code?: RemuxErrorCode
     }
 
 /**
@@ -107,7 +114,9 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
 
   if (value['type'] === 'error') {
     return (
-      typeof value['name'] === 'string' && typeof value['message'] === 'string'
+      typeof value['name'] === 'string' &&
+      typeof value['message'] === 'string' &&
+      (value['code'] === undefined || isRemuxErrorCode(value['code']))
     )
   }
 
@@ -166,7 +175,8 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   if (
     tracks !== undefined &&
-    (typeof tracks !== 'string' || !['all', 'audio', 'video'].includes(tracks))
+    (typeof tracks !== 'string' ||
+      !['all', 'audio', 'video', 'video-with-optional-audio'].includes(tracks))
   ) {
     return false
   }

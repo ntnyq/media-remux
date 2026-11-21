@@ -1,4 +1,4 @@
-import type { RemuxProgress, RemuxResult } from '../types'
+import type { RemuxProgress, RemuxResult, RemuxTrackSelection } from '../types'
 
 /**
  * One isolated Worker operation, discriminated by operation. Inputs are MP4 or
@@ -19,7 +19,7 @@ export type MediaJob =
       /**
        * Track kinds to retain; defaults to all supported primary tracks.
        */
-      tracks?: 'all' | 'audio' | 'video'
+      tracks?: RemuxTrackSelection
     }
   | {
       /**
@@ -52,7 +52,7 @@ export type MediaJob =
       /**
        * Track kinds to retain from every segment; defaults to all primary tracks.
        */
-      tracks?: 'all' | 'audio' | 'video'
+      tracks?: RemuxTrackSelection
     }
 
 /**

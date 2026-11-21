@@ -30,6 +30,7 @@ test.each([
 
 test.each([
   { tracks: 'audio', isValid: true },
+  { tracks: 'video-with-optional-audio', isValid: true },
   { tracks: ['audio'], isValid: false },
 ])(
   'checks the actual track selection type: $isValid',
@@ -44,3 +45,19 @@ test.each([
     ).toBe(isValid)
   },
 )
+
+test.each([
+  { code: undefined, isValid: true },
+  { code: 'UNSUPPORTED_CODEC', isValid: true },
+  { code: 'QuotaExceededError', isValid: false },
+  { code: ['UNSUPPORTED_CODEC'], isValid: false },
+])('checks the optional media error code: $isValid', ({ code, isValid }) => {
+  expect(
+    isWorkerResponse({
+      type: 'error',
+      name: 'Error',
+      message: 'Failure',
+      code,
+    }),
+  ).toBe(isValid)
+})

@@ -1,6 +1,7 @@
 /* oxlint-disable no-await-in-loop -- Directory retries must wait for Worker locks to be released. */
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
 import { checkAbort } from '../abort'
+import { withRemuxErrorCode } from '../errors'
 import type { RemuxResult } from '../types'
 import type { WorkerRequest, WorkerResponse } from './protocol'
 import { isWorkerResponse } from './protocol'
@@ -229,7 +230,9 @@ export async function runMediaJob(
           const error = new Error(response.message)
 
           error.name = response.name
-          finish(error)
+          finish(
+            response.code ? withRemuxErrorCode(error, response.code) : error,
+          )
         }
       }
 

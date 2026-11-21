@@ -154,7 +154,7 @@ function runMediaJob(
 | `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary video from `video` and primary AAC audio from `audio`.                         |
 | `'concat'`  | `inputs: readonly Blob[]`    | `tracks`        | Join a nonempty list in playback order; selected layouts and decoder configurations must match. |
 
-`tracks` is `'all'`, `'audio'`, or `'video'`, defaulting to `'all'`. `'all'` retains the available supported primary tracks; it does not require both audio and video. An explicit selection with no matching track fails. Combine jobs do not accept `tracks`.
+`tracks` defaults to `'all'`, which retains the available primary tracks. `'audio'` and `'video'` require and retain only the selected kind. Use `'video-with-optional-audio'` to require a primary video track in every input and keep its primary audio track when present. Concat still requires matching track layouts. Combine jobs select video from the first input and audio from the second.
 
 | `options` field | Type                                | Required / default           | Description                                                                                                                                                                     |
 | --------------- | ----------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -170,7 +170,7 @@ The promise resolves after the Worker has terminated and temporary spools have b
 | `file`    | `File`                | `output.mp4` / `video/mp4` when video exists; otherwise `output.m4a` / `audio/mp4`. Read or save it before disposal.                                                               |
 | `dispose` | `() => Promise<void>` | Remove the retained job directory and output. Idempotent after success, shares concurrent attempts, and allows retry after failed removal. Always await it after consuming `file`. |
 
-Failures reject the promise. Worker job errors cross the message boundary as an `Error` preserving its name/message. Cancellation propagates the signal's original abort reason when cleanup succeeds. If the job and directory cleanup both fail, an `AggregateError` contains both errors. Cleanup retries transient filesystem locks; abandoned directories after a browser crash remain the application's responsibility.
+Failures reject the promise. Worker job errors cross the message boundary as an `Error` preserving its name, message, and any media error code. Cancellation propagates the signal's original abort reason when cleanup succeeds. If the job and directory cleanup both fail, an `AggregateError` contains both errors. Cleanup retries transient filesystem locks; abandoned directories after a browser crash remain the application's responsibility.
 
 </details>
 
@@ -204,7 +204,7 @@ function concatMedia(
 | -------------------- | ----------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `writable`           | `WritableStream<MediaOutputChunk>`  | Required           | Must support absolute positioned writes, including revisiting earlier offsets. Awaited writes apply backpressure.                                          |
 | `storage`            | `RemuxStorage`                      | Required           | Fresh, job-exclusive `fragmentIndex` and `fragmentSamples` stores. The caller disposes them in `finally` after success, failure, or cancellation.          |
-| `tracks`             | `'all' \| 'audio' \| 'video'`       | Optional; `'all'`  | Select primary track kinds for remux/concat. Unsupported for `combineTracks`, which always selects one video and one audio track.                          |
+| `tracks`             | `RemuxTrackSelection`               | Optional; `'all'`  | Select primary track kinds for remux/concat. Unsupported for `combineTracks`, which always selects one video and one audio track.                          |
 | `signal`             | `AbortSignal`                       | Optional           | Checked during inspection, packet copying, and storage operations. Rejection uses the original abort reason.                                               |
 | `onProgress`         | `(progress: RemuxProgress) => void` | Optional           | Synchronous notifications in the core API's execution context, without Worker throttling. Throwing fails the operation; returned promises are not awaited. |
 
@@ -361,12 +361,27 @@ Pass this adapter as `storage.fragmentSamples` alongside a fresh `createDiskFrag
 
 </details>
 
+## Media errors
+
+Use `isRemuxError(error)` from `media-remux` to narrow an error thrown by a core API or `runMediaJob` to `RemuxError`. Branch on `error.code` for fallback or localization. The message provides diagnostics.
+
+| Code                        | Meaning                                                                                                                    |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `UNSUPPORTED_CONTAINER`     | The input container is unsupported or unrecognizable.                                                                      |
+| `UNSUPPORTED_CODEC`         | A selected track uses an unsupported codec or profile.                                                                     |
+| `UNSUPPORTED_MEDIA_FEATURE` | A recognized media feature exceeds the remuxer's capabilities, such as some MP4 edit lists or an AV1 decode discontinuity. |
+| `INCOMPATIBLE_SEGMENTS`     | The selected track layouts or decoder configurations differ between segments.                                              |
+| `INVALID_INPUT`             | A media validation check found malformed data, such as a truncated box or invalid packet timing.                           |
+| `MISSING_REQUIRED_TRACK`    | An input lacks a track required by the operation or selection.                                                             |
+
+I/O, quota, cancellation, callback, and Worker infrastructure failures follow their existing error paths. For a compatibility fallback, allow only the codes the alternate backend can handle.
+
 ## Timeline and compatibility
 
 <details>
 <summary>Track limits, segment compatibility, and timestamp rules</summary>
 
-- Only primary tracks are used. Remux/concat accept `tracks: 'all' | 'audio' | 'video'` (default `all`). Combine selects video from its first input and audio from its second.
+- Only primary tracks are used. Remux/concat accept `tracks: RemuxTrackSelection` (default `all`). Combine selects video from its first input and audio from its second.
 - MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), and AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and changing FLV sequence headers are rejected. A selected MP4 track must have a single sample description.
 - HEVC and AV1 MP4 tracks require their codec configuration boxes (`hvcC` or `av1C`). The output preserves their sample entry type and configuration bytes.
 - AV1 uses a continuous decode clock aligned with presentation time. A delayed start uses `tfdt`. Timelines that would require composition offsets or a decode discontinuity are rejected before writing, including AV1 concatenations that create a gap between video segments.

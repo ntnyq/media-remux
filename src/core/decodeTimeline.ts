@@ -1,3 +1,4 @@
+import { createRemuxError } from '../errors'
 import { GLOBAL_TIMESCALE } from '../vendor/mediabunny/src/isobmff/isobmff-muxer'
 import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
 import type { EncodedPacket } from '../vendor/mediabunny/src/packet'
@@ -44,7 +45,10 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
       const duration = packet.sideData.decodeDuration
 
       if (!clock || duration === undefined) {
-        throw new Error('Missing packet decode duration.')
+        throw createRemuxError(
+          'INVALID_INPUT',
+          'Missing packet decode duration.',
+        )
       }
 
       const decodeOrigin = packet.timestamp - clock.units / clock.timescale
@@ -90,7 +94,8 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
             earliest < clock.decodeStartUnits - 1 ||
             latest > clock.decodeStartUnits + 1
           ) {
-            throw new Error(
+            throw createRemuxError(
+              'UNSUPPORTED_MEDIA_FEATURE',
               'AV1 timeline requires composition offsets or a decode discontinuity.',
             )
           }

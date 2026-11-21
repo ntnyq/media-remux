@@ -52,9 +52,11 @@ export const aacFrequencyTable = [
 export const aacChannelMap = [-1, 1, 2, 3, 4, 5, 6, 8];
 // The object types whose config is a GASpecificConfig, except for AAC-LD, for which frameLengthFlag means 480 vs. 512
 const generalAudioObjectTypes = [1, 2, 3, 4, 6, 7, 17, 19, 20, 21, 22];
+/** @internal Missing or truncated AudioSpecificConfig. */
+export class InvalidAacDescriptionError extends TypeError {}
 export const parseAacAudioSpecificConfig = (bytes: Uint8Array | null): AacAudioSpecificConfig => {
     if (!bytes || bytes.byteLength < 2) {
-        throw new TypeError('AAC description must be at least 2 bytes long.');
+        throw new InvalidAacDescriptionError('AAC description must be at least 2 bytes long.');
     }
     const bitstream = new Bitstream(bytes);
     const objectType = readAacObjectType(bitstream);

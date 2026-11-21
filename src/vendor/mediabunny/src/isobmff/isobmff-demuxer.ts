@@ -24,6 +24,11 @@ import { AC3_SAMPLE_RATES } from '../../shared/ac3-misc';
 import { Bitstream } from '../../shared/bitstream';
 import { Aes128CbcContext } from '../aes';
 import { Logging } from '../logging';
+/** @internal Explicit validation failure while reading the input container. */
+export class InvalidIsobmffInputError extends RangeError {}
+/** @internal Recognized container feature this reader cannot handle. */
+export class UnsupportedIsobmffInputError extends Error {}
+
 type InternalTrack = {
     id: number;
     demuxer: IsobmffDemuxer;
@@ -61,7 +66,7 @@ type InternalTrack = {
      */
     editListMediaEdit: { mediaTime: number; segmentDuration: number } | null;
     /** Unsupported playback features affect only callers that read this track. */
-    unsupportedTrackFeature: string | null;
+    trackValidationError: Error | null;
     /** Set when the track's samples are encrypted using a supported scheme (cenc/cens/cbcs), parsed from sinf/tenc. */
     encryptionInfo: TrackEncryptionInfo | null;
     /** For non-fragmented encrypted tracks: parsed saiz+saio from stbl; aux info is fetched lazily on first use. */
@@ -275,24 +280,24 @@ export class IsobmffDemuxer extends Demuxer {
      */
     async readTopLevelBox(startPos: number) {
         if (!Number.isSafeInteger(startPos) || startPos < 0) {
-            throw new RangeError('Unsafe top-level box offset.');
+            throw new InvalidIsobmffInputError('Unsafe top-level box offset.');
         }
         const slice = await this.reader.requestSliceRange(startPos, MIN_BOX_HEADER_SIZE, MAX_BOX_HEADER_SIZE);
         const fileEnd = this.reader.fileSizeNonStrict;
         if (!slice) {
             if (fileEnd !== null && startPos !== fileEnd) {
-                throw new RangeError('Truncated top-level box header.');
+                throw new InvalidIsobmffInputError('Truncated top-level box header.');
             }
             return null;
         }
         const boxInfo = readBoxHeader(slice, fileEnd);
         if (!boxInfo) {
-            throw new RangeError('Invalid top-level box header.');
+            throw new InvalidIsobmffInputError('Invalid top-level box header.');
         }
         const end = startPos + boxInfo.totalSize;
         if (!Number.isSafeInteger(boxInfo.totalSize) || !Number.isSafeInteger(end)
             || (fileEnd !== null && end > fileEnd)) {
-            throw new RangeError('Top-level box extends beyond the input or has an unsafe size.');
+            throw new InvalidIsobmffInputError('Top-level box extends beyond the input or has an unsafe size.');
         }
         return { slice, boxInfo };
     }
@@ -316,12 +321,12 @@ export class IsobmffDemuxer extends Demuxer {
                     this.moovEnd = startPos + boxInfo.totalSize;
                     if (!Number.isSafeInteger(this.moovEnd)
                         || (this.reader.fileSize !== null && this.moovEnd > this.reader.fileSize)) {
-                        throw new RangeError('Invalid moov box extent.');
+                        throw new InvalidIsobmffInputError('Invalid moov box extent.');
                     }
                     const range = new FileSlice(new Uint8Array(0), new DataView(new ArrayBuffer(0)), 0, slice.filePos, this.moovEnd);
                     await this.withBoxParser(() => this.readContiguousBoxes(range, true));
                     if (this.movieTimescale === -1) {
-                        throw new Error('Invalid moov box: missing mvhd box.');
+                        throw new InvalidIsobmffInputError('Invalid moov box: missing mvhd box.');
                     }
                     for (const track of this.tracks) {
                         // Modify the edit list offset based on the previous segment durations. They are in different
@@ -337,7 +342,7 @@ export class IsobmffDemuxer extends Demuxer {
                 }
                 else if (boxInfo.name === 'moof') {
                     if (!this.input._initInput) {
-                        throw new Error('"moof" box encountered with no "moov" box present; this file is likely a Segment as'
+                        throw new UnsupportedIsobmffInputError('"moof" box encountered with no "moov" box present; this file is likely a Segment as'
                             + ' described in ISO/IEC 14496-12 Section 8.16. A separate init file that contains a "moov"'
                             + ' box is required to read this file, please provide it using InputOptions.initInput.');
                     }
@@ -371,7 +376,7 @@ export class IsobmffDemuxer extends Demuxer {
                         if (boxInfo && boxInfo.name === 'mfra') {
                             const end = potentialMfraPos + boxInfo.totalSize;
                             if (!Number.isSafeInteger(end) || end !== this.reader.fileSize) {
-                                throw new RangeError('Invalid mfra box extent.');
+                                throw new InvalidIsobmffInputError('Invalid mfra box extent.');
                             }
                             const range = new FileSlice(new Uint8Array(0), new DataView(new ArrayBuffer(0)), 0, mfraHeaderSlice.filePos, end);
                             await this.withBoxParser(() => this.readContiguousBoxes(range, true));
@@ -417,7 +422,7 @@ export class IsobmffDemuxer extends Demuxer {
                 editListPreviousSegmentDurations: foreignTrack.editListPreviousSegmentDurations,
                 editListOffset: foreignTrack.editListOffset,
                 editListMediaEdit: foreignTrack.editListMediaEdit,
-                unsupportedTrackFeature: foreignTrack.unsupportedTrackFeature,
+                trackValidationError: foreignTrack.trackValidationError,
                 encryptionInfo: foreignTrack.encryptionInfo,
                 encryptionAuxInfo: null,
                 frmaCodecString: null,
@@ -528,7 +533,7 @@ export class IsobmffDemuxer extends Demuxer {
             return null;
         const box = header.boxInfo;
         if (box.name !== 'moof')
-            throw new RangeError('Expected a moof box.');
+            throw new InvalidIsobmffInputError('Expected a moof box.');
         const end = startPos + box.totalSize;
         const slice = new FileSlice(new Uint8Array(0), new DataView(new ArrayBuffer(0)), 0, startPos, end);
         await this.traverseBox(slice, true);
@@ -607,14 +612,14 @@ export class IsobmffDemuxer extends Demuxer {
         while (position < targetOffset) {
             const header = await this.readTopLevelBox(position);
             if (!header)
-                throw new RangeError('Truncated fragment timeline.');
+                throw new InvalidIsobmffInputError('Truncated fragment timeline.');
             const box = header.boxInfo;
             if (position + box.totalSize > targetOffset)
-                throw new RangeError('Invalid fragment timeline.');
+                throw new InvalidIsobmffInputError('Invalid fragment timeline.');
             if (box.name === 'moof') {
                 const fragment = await this.parseFragment(position);
                 if (!fragment)
-                    throw new RangeError('Truncated fragment timeline.');
+                    throw new InvalidIsobmffInputError('Truncated fragment timeline.');
                 const data = fragment.trackData.get(track.id);
                 if (data) {
                     if (!data.startTimestampIsFinal) {
@@ -633,15 +638,15 @@ export class IsobmffDemuxer extends Demuxer {
     async readMovieSlice(start: number, end: number, maxLength = 64 * 1024) {
         const length = Math.min(maxLength, end - start);
         if (length <= 0)
-            throw new RangeError('Truncated movie box payload.');
+            throw new InvalidIsobmffInputError('Truncated movie box payload.');
         const slice = await this.reader.requestSlice(start, length);
         if (!slice)
-            throw new RangeError('Truncated movie box payload.');
+            throw new InvalidIsobmffInputError('Truncated movie box payload.');
         return slice;
     }
     async readContiguousBoxes(slice: FileSlice, fromFile = false) {
         if (this.boxNestingDepth === MAX_BOX_NESTING_DEPTH) {
-            throw new Error('Invalid file: boxes are nested too deeply.');
+            throw new InvalidIsobmffInputError('Invalid file: boxes are nested too deeply.');
         }
         const startIndex = slice.filePos;
         this.boxNestingDepth++;
@@ -677,16 +682,16 @@ export class IsobmffDemuxer extends Demuxer {
         if (fromFile) {
             const header = await this.reader.requestSliceRange(startPos, MIN_BOX_HEADER_SIZE, Math.min(MAX_BOX_HEADER_SIZE, slice.end - startPos));
             if (!header)
-                throw new RangeError('Truncated movie box header.');
+                throw new InvalidIsobmffInputError('Truncated movie box header.');
             headerSlice = header;
         }
         const boxInfo = readBoxHeader(headerSlice, this.reader.fileSizeNonStrict);
         if (!boxInfo)
-            throw new RangeError('Invalid movie box header.');
+            throw new InvalidIsobmffInputError('Invalid movie box header.');
         const contentStartPos = headerSlice.filePos;
         const boxEndPos = startPos + boxInfo.totalSize;
         if (!Number.isSafeInteger(boxEndPos) || boxEndPos > containerSlice.end) {
-            throw new RangeError('Movie box extends beyond its container.');
+            throw new InvalidIsobmffInputError('Movie box extends beyond its container.');
         }
         if (fromFile) {
             const containers = ['mdia', 'minf', 'dinf', 'mfra', 'edts', 'sinf', 'schi', 'trak', 'stbl', 'mvex', 'moof', 'traf'];
@@ -699,7 +704,7 @@ export class IsobmffDemuxer extends Demuxer {
                 const track = this.idToTrack.get(table.trackId);
                 if (track) {
                     if (track.fragmentLookupTable)
-                        throw new RangeError('Duplicate tfra track index.');
+                        throw new InvalidIsobmffInputError('Duplicate tfra track index.');
                     track.fragmentLookupTable = table;
                 }
                 containerSlice.filePos = boxEndPos;
@@ -749,7 +754,7 @@ export class IsobmffDemuxer extends Demuxer {
                         this.movieDurationInTimescale = readU32Be(slice);
                     }
                     if (this.movieTimescale === 0) {
-                        throw new Error('Invalid mvhd box: timescale must not be 0.');
+                        throw new InvalidIsobmffInputError('Invalid mvhd box: timescale must not be 0.');
                     }
                     slice.skip(4 + 2 + 2 + 2 * 4); // Rate, volume, reserved
                     this.movieMatrix = readMatrix(slice);
@@ -786,7 +791,7 @@ export class IsobmffDemuxer extends Demuxer {
                         editListPreviousSegmentDurations: 0,
                         editListOffset: 0,
                         editListMediaEdit: null,
-                        unsupportedTrackFeature: null,
+                        trackValidationError: null,
                         encryptionInfo: null,
                         encryptionAuxInfo: null,
                         frmaCodecString: null,
@@ -842,7 +847,7 @@ export class IsobmffDemuxer extends Demuxer {
                         track.durationInMovieTimescale = readU64Be(slice);
                     }
                     else {
-                        throw new Error(`Incorrect track header version ${version}.`);
+                        throw new UnsupportedIsobmffInputError(`Incorrect track header version ${version}.`);
                     }
                     slice.skip(2 * 4 + 2 + 2 + 2 + 2);
                     const trackMatrix = readMatrix(slice);
@@ -871,7 +876,7 @@ export class IsobmffDemuxer extends Demuxer {
                             : readI32Be(slice);
                         const mediaRate = readFixed_16_16(slice);
                         if (relevantEntryFound) {
-                            track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list: multiple edits after the first media edit.';
+                            track.trackValidationError ??= new UnsupportedIsobmffInputError('Unsupported MP4 edit list: multiple edits after the first media edit.');
                             continue;
                         }
                         if (mediaTime === -1) {
@@ -879,7 +884,7 @@ export class IsobmffDemuxer extends Demuxer {
                             continue;
                         }
                         if (mediaRate !== 1) {
-                            track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list entry: media rate must be 1.';
+                            track.trackValidationError ??= new UnsupportedIsobmffInputError('Unsupported MP4 edit list entry: media rate must be 1.');
                         }
                         track.editListPreviousSegmentDurations = previousSegmentDurations;
                         track.editListOffset = mediaTime;
@@ -887,7 +892,7 @@ export class IsobmffDemuxer extends Demuxer {
                         relevantEntryFound = true;
                     }
                     if (entryCount > 0 && !relevantEntryFound) {
-                        track.unsupportedTrackFeature ??= 'Unsupported MP4 edit list: no media edit.';
+                        track.trackValidationError ??= new UnsupportedIsobmffInputError('Unsupported MP4 edit list: no media edit.');
                     }
                 }
                 ;
@@ -914,7 +919,7 @@ export class IsobmffDemuxer extends Demuxer {
                         track.durationInMediaTimescale = -1; // An all-ones duration is unknown.
                     }
                     if (track.timescale === 0) {
-                        throw new Error('Invalid mdhd box: timescale must not be 0.');
+                        throw new InvalidIsobmffInputError('Invalid mdhd box: timescale must not be 0.');
                     }
                     let language = readU16Be(slice);
                     if (language > 0) {
@@ -1002,13 +1007,13 @@ export class IsobmffDemuxer extends Demuxer {
                     const entries = readU32Be(slice);
                     // A remux track has one decoder configuration for its whole lifetime.
                     if (entries > 1) {
-                        track.unsupportedTrackFeature ??= 'Multiple MP4 sample descriptions are unsupported.';
+                        track.trackValidationError ??= new UnsupportedIsobmffInputError('Multiple MP4 sample descriptions are unsupported.');
                     }
                     for (let i = 0; i < entries; i++) {
                         const sampleBoxStartPos = slice.filePos;
                         const sampleBoxInfo = readBoxHeader(slice);
                         if (!sampleBoxInfo || sampleBoxStartPos + sampleBoxInfo.totalSize > boxEndPos) {
-                            throw new RangeError('Invalid MP4 sample description box.');
+                            throw new InvalidIsobmffInputError('Invalid MP4 sample description box.');
                         }
                         if (i > 0) {
                             // Keep the first description for track discovery.
@@ -1375,7 +1380,7 @@ export class IsobmffDemuxer extends Demuxer {
                     track.info.codecDescription = readBytes(slice, boxInfo.contentSize);
                     const config = deserializeHevcDecoderConfigurationRecord(track.info.codecDescription);
                     if (config?.configurationVersion !== 1) {
-                        track.unsupportedTrackFeature ??= 'Invalid hvcC configuration in MP4 video track.';
+                        track.trackValidationError ??= new InvalidIsobmffInputError('Invalid hvcC configuration in MP4 video track.');
                         break;
                     }
                     const sps = config.arrays.find(x => x.nalUnitType === HevcNalUnitType.SPS_NUT)?.nalUnits[0];
@@ -1423,7 +1428,7 @@ export class IsobmffDemuxer extends Demuxer {
                     }
                     const description = readBytes(slice, boxInfo.contentSize);
                     if (description.length < 4 || description[0] !== 0x81) {
-                        track.unsupportedTrackFeature ??= 'Invalid av1C configuration in MP4 video track.';
+                        track.trackValidationError ??= new InvalidIsobmffInputError('Invalid av1C configuration in MP4 video track.');
                         break;
                     }
                     track.info.codecDescription = description;
@@ -1877,7 +1882,7 @@ export class IsobmffDemuxer extends Demuxer {
                     const trackId = readU32Be(slice);
                     const track = this.idToTrack.get(trackId);
                     if (this.currentFragment.trackData.has(trackId)) {
-                        throw new Error(`Unsupported MP4 fragment: multiple traf boxes for track ${trackId} in the same moof.`);
+                        throw new UnsupportedIsobmffInputError(`Unsupported MP4 fragment: multiple traf boxes for track ${trackId} in the same moof.`);
                     }
                     const defaults = this.fragmentTrackDefaults.get(trackId);
                     this.currentTrack = track ?? null;
@@ -1986,7 +1991,7 @@ export class IsobmffDemuxer extends Demuxer {
                     let sampleSizesOffset: number | undefined;
                     if (defaultSampleInfoSize === 0 && sampleCount > 0) {
                         if (sampleCount > boxEndPos - slice.filePos)
-                            throw new RangeError('Truncated saiz samples.');
+                            throw new InvalidIsobmffInputError('Truncated saiz samples.');
                         if (this.currentFragment)
                             sampleSizesOffset = slice.filePos;
                         else
@@ -2052,7 +2057,7 @@ export class IsobmffDemuxer extends Demuxer {
                     const sampleCount = readU32Be(slice);
                     const ivSize = track.encryptionInfo.defaultPerSampleIvSize;
                     if (ivSize === null) {
-                        throw new Error('Invalid file: encrypted track is missing its tenc box.');
+                        throw new InvalidIsobmffInputError('Invalid file: encrypted track is missing its tenc box.');
                     }
                     trackData.samples.setSenc(slice.filePos, boxEndPos, sampleCount, useSubsamples);
                 }
@@ -2650,7 +2655,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         const fileSize = this.internalTrack.demuxer.reader.fileSizeNonStrict;
         if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(size) || size < 0
             || !Number.isSafeInteger(end) || (fileSize !== null && end > fileSize)) {
-            throw new RangeError('MP4 sample payload extends beyond the input.');
+            throw new InvalidIsobmffInputError('MP4 sample payload extends beyond the input.');
         }
     }
     /**
@@ -2666,7 +2671,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             return;
         }
         if (track.info?.type === 'video' && presentationTimestamp < edit.mediaTime) {
-            throw new Error('Unsupported MP4 edit list: media edit trims video sample presentation.');
+            throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims video sample presentation.');
         }
         if (edit.segmentDuration === 0) {
             return;
@@ -2675,12 +2680,12 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             (presentationTimestamp + duration - edit.mediaTime) / track.timescale * track.demuxer.movieTimescale,
         );
         if (endInMovieTimescale > edit.segmentDuration) {
-            throw new Error('Unsupported MP4 edit list: media edit trims sample presentation.');
+            throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims sample presentation.');
         }
     }
     private assertSupportedTrack() {
-        if (this.internalTrack.unsupportedTrackFeature) {
-            throw new Error(this.internalTrack.unsupportedTrackFeature);
+        if (this.internalTrack.trackValidationError) {
+            throw this.internalTrack.trackValidationError;
         }
     }
     private async fetchPacketForSampleIndex(sampleIndex: number, options: PacketRetrievalOptions) {
@@ -2704,7 +2709,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             if (isThenable(slice))
                 slice = await slice;
             if (!slice) {
-                throw new RangeError('Truncated MP4 sample payload.');
+                throw new InvalidIsobmffInputError('Truncated MP4 sample payload.');
             }
             data = readBytes(slice, sampleInfo.sampleSize);
             if (this.internalTrack.encryptionInfo) {
@@ -2748,7 +2753,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             if (isThenable(slice))
                 slice = await slice;
             if (!slice) {
-                throw new RangeError('Truncated MP4 sample payload.');
+                throw new InvalidIsobmffInputError('Truncated MP4 sample payload.');
             }
             data = readBytes(slice, fragmentSample.byteSize);
             if (this.internalTrack.encryptionInfo) {
@@ -3063,7 +3068,7 @@ const offsetFragmentTrackDataByTimestamp = (trackData: FragmentTrackData, timest
     if (trackData.firstKeyFrameTimestamp !== null)
         trackData.firstKeyFrameTimestamp += timestamp;
     if (![trackData.startTimestamp, trackData.endTimestamp, trackData.currentTimestamp].every(Number.isSafeInteger)) {
-        throw new RangeError('Unsafe fragment timeline.');
+        throw new InvalidIsobmffInputError('Unsafe fragment timeline.');
     }
 };
 const readMatrix = (slice: FileSlice): TransformationMatrix => {
@@ -3145,7 +3150,7 @@ const resolveEncryptionAuxInfo = async (reader: Reader, encryptionInfo: TrackEnc
     }
     const ivSize = encryptionInfo.defaultPerSampleIvSize;
     if (ivSize === null) {
-        throw new Error('Invalid file: encrypted track is missing its tenc box.');
+        throw new InvalidIsobmffInputError('Invalid file: encrypted track is missing its tenc box.');
     }
     // Each aux entry has the same byte layout as a senc entry: IV (of size ivSize, or the constant IV from tenc
     // when ivSize is 0), then optionally subsample count + [clearLen, protectedLen] pairs. Subsamples are present
@@ -3196,7 +3201,7 @@ const decryptSample = async (track: InternalTrack, sampleEncryption: SampleEncry
     assert(track.encryptionInfo);
     const encryptionInfo = track.encryptionInfo;
     if (encryptionInfo.defaultKid === null) {
-        throw new Error('Invalid file: encrypted track is missing its tenc box.');
+        throw new InvalidIsobmffInputError('Invalid file: encrypted track is missing its tenc box.');
     }
     const keyId = encryptionInfo.defaultKid;
     let keyBytes: Uint8Array;
@@ -3513,12 +3518,12 @@ class FragmentSampleTable {
             const limit = this.reader.fileSize ?? (position < this.end ? this.end : position + 1);
             const length = Math.min(16 * 1024, limit - start);
             if (!Number.isSafeInteger(position) || position < 0 || length <= position - start)
-                throw new RangeError('Invalid fragment metadata offset.');
+                throw new InvalidIsobmffInputError('Invalid fragment metadata offset.');
             const slice = await this.reader.requestSlice(start, length);
             if (this.reader.source._disposed)
                 throw new InputDisposedError();
             if (!slice)
-                throw new RangeError('Truncated fragment metadata page.');
+                throw new InvalidIsobmffInputError('Truncated fragment metadata page.');
             // Buffer.slice is a view. Always copy into an independent typed array.
             view = toDataView(new Uint8Array(readBytes(slice, length)));
         }
@@ -3547,42 +3552,42 @@ class FragmentSampleTable {
     private async header(position: number, number: number, sampleStart: number): Promise<FragmentRun> {
         const slice = await this.reader.requestSliceRange(position, 8, Math.min(16, this.end - position));
         if (!slice)
-            throw new RangeError('Truncated fragment run header.');
+            throw new InvalidIsobmffInputError('Truncated fragment run header.');
         const box = readBoxHeader(slice);
         if (!box || box.name !== 'trun')
-            throw new RangeError('Expected a trun box.');
+            throw new InvalidIsobmffInputError('Expected a trun box.');
         const end = position + box.totalSize;
         if (!Number.isSafeInteger(end) || end > this.end || box.contentSize < 8)
-            throw new RangeError('Invalid trun extent.');
+            throw new InvalidIsobmffInputError('Invalid trun extent.');
         const content = slice.filePos;
         const versionFlags = await this.word(content);
         const version = versionFlags >>> 24;
         if (version > 1)
-            throw new RangeError('Unsupported trun version.');
+            throw new UnsupportedIsobmffInputError('Unsupported trun version.');
         const flags = versionFlags & 0xffffff;
         const count = await this.word(content + 4);
         let entries = content + 8;
         let dataOffset: number | null = null, firstFlags: number | null = null;
         if (flags & 1) {
             if (entries + 4 > end)
-                throw new RangeError('Truncated trun offset.');
+                throw new InvalidIsobmffInputError('Truncated trun offset.');
             dataOffset = await this.word(entries, true);
             entries += 4;
         }
         if (flags & 4) {
             if (entries + 4 > end)
-                throw new RangeError('Truncated trun flags.');
+                throw new InvalidIsobmffInputError('Truncated trun flags.');
             firstFlags = await this.word(entries);
             entries += 4;
         }
         const rowSize = 4 * (+!!(flags & 0x100) + +!!(flags & 0x200) + +!!(flags & 0x400) + +!!(flags & 0x800));
         if (count > Math.floor((end - entries) / (rowSize || 1)) && rowSize)
-            throw new RangeError('Truncated trun samples.');
+            throw new InvalidIsobmffInputError('Truncated trun samples.');
         if (count
             && ((!(flags & 0x100) && this.defaults.defaultSampleDuration === null)
                 || (!(flags & 0x200) && this.defaults.defaultSampleSize === null)
                 || (!(flags & 0x400) && this.defaults.defaultSampleFlags === null))) {
-            throw new RangeError('Invalid trun box: sample values are missing and there are no defaults.');
+            throw new InvalidIsobmffInputError('Invalid trun box: sample values are missing and there are no defaults.');
         }
         return { start: position, end, entries, count, rowSize, flags, version, firstFlags, dataOffset, number, sampleStart };
     }
@@ -3591,10 +3596,10 @@ class FragmentSampleTable {
         while (position + 8 <= this.end) {
             const slice = await this.reader.requestSliceRange(position, 8, Math.min(16, this.end - position));
             if (!slice)
-                throw new RangeError('Truncated traf header.');
+                throw new InvalidIsobmffInputError('Truncated traf header.');
             const box = readBoxHeader(slice);
             if (!box || !Number.isSafeInteger(position + box.totalSize) || position + box.totalSize > this.end)
-                throw new RangeError('Invalid traf child extent.');
+                throw new InvalidIsobmffInputError('Invalid traf child extent.');
             if (box.name === 'trun')
                 return this.header(position, run.number + 1, run.sampleStart + run.count);
             position += box.totalSize;
@@ -3606,7 +3611,7 @@ class FragmentSampleTable {
         while (entry >= run.count) {
             const next = await this.nextRun(run);
             if (!next)
-                throw new RangeError('Missing fragment sample run.');
+                throw new InvalidIsobmffInputError('Missing fragment sample run.');
             run = next;
             entry = 0;
             if (run.dataOffset !== null)
@@ -3644,7 +3649,7 @@ class FragmentSampleTable {
             || !Number.isSafeInteger(offset)
             || offset < 0
             || !Number.isSafeInteger(offset + size))
-            throw new RangeError('Unsafe fragment sample timestamp or offset.');
+            throw new InvalidIsobmffInputError('Unsafe fragment sample timestamp or offset.');
         return {
             index: cursor.index,
             decodeTimestamp: time,
@@ -3705,7 +3710,7 @@ class FragmentSampleTable {
                 const endTime = cursor.time + length * duration;
                 const endOffset = cursor.offset + length * size;
                 if (!Number.isSafeInteger(endTime) || !Number.isSafeInteger(endOffset) || cursor.offset < 0)
-                    throw new RangeError('Unsafe fragment default totals.');
+                    throw new InvalidIsobmffInputError('Unsafe fragment default totals.');
                 const lastTime = cursor.time + (length - 1) * duration;
                 bucket.min = Math.min(bucket.min, cursor.time);
                 bucket.max = Math.max(bucket.max, lastTime);
@@ -3764,17 +3769,17 @@ class FragmentSampleTable {
         }
         this.length += run.count;
         if (!Number.isSafeInteger(this.length))
-            throw new RangeError('Unsafe fragment sample count.');
+            throw new InvalidIsobmffInputError('Unsafe fragment sample count.');
         this.endTimestamp = this.maxPresentation + this.lastMaxDuration;
         if (this.length && !Number.isSafeInteger(this.endTimestamp))
-            throw new RangeError('Unsafe fragment end timestamp.');
+            throw new InvalidIsobmffInputError('Unsafe fragment end timestamp.');
         return { time: cursor.time, offset: cursor.offset };
     }
     private async readRaw(index: number): Promise<FragmentRaw> {
         if (this.reader.source._disposed)
             throw new InputDisposedError();
         if (!Number.isSafeInteger(index) || index < 0 || index >= this.length)
-            throw new RangeError('Invalid fragment sample index.');
+            throw new InvalidIsobmffInputError('Invalid fragment sample index.');
         const existing = this.rawCache.get(index);
         if (existing) {
             this.rawCache.delete(index);
@@ -3826,10 +3831,10 @@ class FragmentSampleTable {
                 while (position + 8 <= this.end) {
                     const slice = await this.reader.requestSliceRange(position, 8, Math.min(16, this.end - position));
                     if (!slice)
-                        throw new RangeError('Truncated traf reference.');
+                        throw new InvalidIsobmffInputError('Truncated traf reference.');
                     const box = readBoxHeader(slice);
                     if (!box || position + box.totalSize > this.end)
-                        throw new RangeError('Invalid traf reference.');
+                        throw new InvalidIsobmffInputError('Invalid traf reference.');
                     if (box.name === 'trun') {
                         const current = await this.header(position, ++number, start);
                         if (number === runNumber) {
@@ -4037,10 +4042,10 @@ class FragmentSampleTable {
             return null;
         const ivSize = info.defaultPerSampleIvSize;
         if (ivSize === null || ivSize < 0 || ivSize > 16)
-            throw new RangeError('Missing fragment encryption IV size.');
+            throw new InvalidIsobmffInputError('Missing fragment encryption IV size.');
         const start = this.senc?.start ?? aux?.offset;
         if (start === null || start === undefined)
-            throw new RangeError('Incomplete fragment encryption offsets.');
+            throw new InvalidIsobmffInputError('Incomplete fragment encryption offsets.');
         const sizeFor = async (at: number) => aux!.defaultSampleInfoSize
             || (aux!.sampleSizesOffset !== undefined
                 ? await this.byte(aux!.sampleSizesOffset + at)
@@ -4053,7 +4058,7 @@ class FragmentSampleTable {
             const length = await this.short(position + ivSize);
             const end = position + ivSize + 2 + 6 * length;
             if (end > this.senc.end)
-                throw new RangeError('Truncated senc subsamples.');
+                throw new InvalidIsobmffInputError('Truncated senc subsamples.');
             return end;
         };
         let position: number;
@@ -4080,7 +4085,7 @@ class FragmentSampleTable {
         }
         const limit = this.senc?.end ?? position + (await sizeFor(index));
         if (!Number.isSafeInteger(position) || position < 0 || position + ivSize > limit)
-            throw new RangeError('Truncated sample IV.');
+            throw new InvalidIsobmffInputError('Truncated sample IV.');
         const iv = new Uint8Array(16);
         if (ivSize)
             for (let at = 0; at < ivSize; at++)
@@ -4088,7 +4093,7 @@ class FragmentSampleTable {
         else if (info.defaultConstantIv)
             iv.set(info.defaultConstantIv);
         else
-            throw new RangeError('Missing constant sample IV.');
+            throw new InvalidIsobmffInputError('Missing constant sample IV.');
         position += ivSize;
         const hasSubsamples = this.senc?.subsamples ?? limit > position;
         let subsamples: SampleEncryptionInfo['subsamples'] = null;
@@ -4096,7 +4101,7 @@ class FragmentSampleTable {
             const length = await this.short(position);
             position += 2;
             if (position + length * 6 > limit)
-                throw new RangeError('Truncated sample encryption subsamples.');
+                throw new InvalidIsobmffInputError('Truncated sample encryption subsamples.');
             subsamples = [];
             for (let at = 0; at < length; at++) {
                 subsamples.push({ clearLen: await this.short(position), protectedLen: await this.word(position + 2) });
@@ -4151,10 +4156,10 @@ class SampleTable {
         const isSize = name === 'stsz' || name === 'stz2';
         const headerSize = isSize ? 12 : 8;
         if (end - start < headerSize)
-            throw new RangeError(`Truncated ${name} sample table.`);
+            throw new InvalidIsobmffInputError(`Truncated ${name} sample table.`);
         const slice = await this.reader.requestSlice(start, headerSize);
         if (!slice)
-            throw new RangeError(`Truncated ${name} sample table.`);
+            throw new InvalidIsobmffInputError(`Truncated ${name} sample table.`);
         const version = readU8(slice);
         slice.skip(3);
         let constant = 0;
@@ -4166,25 +4171,25 @@ class SampleTable {
             else {
                 bits = field & 255;
                 if (![4, 8, 16].includes(bits))
-                    throw new RangeError('Invalid stz2 field size.');
+                    throw new InvalidIsobmffInputError('Invalid stz2 field size.');
             }
         }
         if (name === 'ctts' && version > 1)
-            throw new RangeError('Invalid ctts version.');
+            throw new InvalidIsobmffInputError('Invalid ctts version.');
         const count = readU32Be(slice);
         if (!constant && count > Math.floor((end - start - headerSize) * 8 / bits)) {
-            throw new RangeError(`Truncated ${name} sample table.`);
+            throw new InvalidIsobmffInputError(`Truncated ${name} sample table.`);
         }
         const key = isSize ? 'size' : name === 'co64' ? 'stco' : name;
         if (this.boxes.has(key))
-            throw new RangeError(`Duplicate ${name} sample table.`);
+            throw new InvalidIsobmffInputError(`Duplicate ${name} sample table.`);
         this.boxes.set(key, { name, start: start + headerSize, count, bits, constant, signed: version === 1 });
     }
     private async row(box: SampleTableBox, index: number): Promise<number[]> {
         if (this.reader.source._disposed)
             throw new InputDisposedError();
         if (index < 0 || index >= box.count)
-            throw new RangeError(`Invalid ${box.name} entry index.`);
+            throw new InvalidIsobmffInputError(`Invalid ${box.name} entry index.`);
         if (box.constant)
             return [box.constant];
         const entriesPerPage = Math.floor(16 * 1024 * 8 / box.bits);
@@ -4197,7 +4202,7 @@ class SampleTable {
             if (this.reader.source._disposed)
                 throw new InputDisposedError();
             if (!slice)
-                throw new RangeError(`Truncated ${box.name} sample table.`);
+                throw new InvalidIsobmffInputError(`Truncated ${box.name} sample table.`);
             // Copy the page: a source cache may return a view into a much larger buffer.
             view = toDataView(readBytes(slice, length).slice());
         }
@@ -4215,7 +4220,7 @@ class SampleTable {
         if (box.name === 'co64') {
             const value = view.getUint32(offset) * 2 ** 32 + view.getUint32(offset + 4);
             if (!Number.isSafeInteger(value))
-                throw new RangeError('Unsafe co64 chunk offset.');
+                throw new InvalidIsobmffInputError('Unsafe co64 chunk offset.');
             return [value];
         }
         const result = [view.getUint32(offset)];
@@ -4234,12 +4239,12 @@ class SampleTable {
             chunk = row[0]! - 1;
             const next = entry + 1 < box.count ? (await this.row(box, entry + 1))[0]! - 1 : Infinity;
             if (chunk < 0 || next <= chunk || value === 0 || row[2] === 0) {
-                throw new RangeError('Invalid stsc sample table.');
+                throw new InvalidIsobmffInputError('Invalid stsc sample table.');
             }
             count = Math.max(0, Math.min(next, this.boxes.get('stco')?.count ?? 0) - chunk) * value;
         }
         if (!Number.isSafeInteger(start + count) || !Number.isSafeInteger(box.name === 'stts' ? time + count * value : time)) {
-            throw new RangeError(`Unsafe ${box.name} sample table prefix.`);
+            throw new InvalidIsobmffInputError(`Unsafe ${box.name} sample table prefix.`);
         }
         return { entry, start, count, time, value, chunk };
     }
@@ -4273,7 +4278,7 @@ class SampleTable {
         this.rawSampleCount = sizes?.count ?? 0;
         if (this.rawSampleCount !== (this.timing?.total ?? 0)
             || this.rawSampleCount !== (this.chunks?.total ?? 0)) {
-            throw new RangeError('Inconsistent MP4 sample counts in size, timing, or chunk tables.');
+            throw new InvalidIsobmffInputError('Inconsistent MP4 sample counts in size, timing, or chunk tables.');
         }
         this.sampleCount = this.rawSampleCount;
         this.decodeDuration = this.timing?.duration ?? 0;
@@ -4477,7 +4482,7 @@ class SampleTable {
             }
         }
         if (!Number.isSafeInteger(sampleOffset) || !Number.isSafeInteger(sampleOffset + sampleSize)) {
-            throw new RangeError('Unsafe sample byte offset.');
+            throw new InvalidIsobmffInputError('Unsafe sample byte offset.');
         }
         return { presentationTimestamp, duration, decodeDuration: this.pcm ? duration : timing.value, sampleOffset, sampleSize, chunkOffset,
             isKeyFrame: await this.keyIndex(index) === index };
@@ -4511,13 +4516,13 @@ class FragmentLookupTable {
     }
     static async read(reader: Reader, start: number, end: number) {
         if (end - start < 16)
-            throw new RangeError('Truncated tfra header.');
+            throw new InvalidIsobmffInputError('Truncated tfra header.');
         const slice = await reader.requestSlice(start, 16);
         if (!slice)
-            throw new RangeError('Truncated tfra header.');
+            throw new InvalidIsobmffInputError('Truncated tfra header.');
         const version = readU8(slice);
         if (version > 1)
-            throw new RangeError('Unsupported tfra version.');
+            throw new UnsupportedIsobmffInputError('Unsupported tfra version.');
         slice.skip(3);
         const trackId = readU32Be(slice);
         const word = readU32Be(slice);
@@ -4525,7 +4530,7 @@ class FragmentLookupTable {
         const count = readU32Be(slice);
         const entrySize = (version === 1 ? 16 : 8) + widths[0]! + widths[1]! + widths[2]!;
         if (count > Math.floor((end - start - 16) / entrySize))
-            throw new RangeError('Truncated tfra entries.');
+            throw new InvalidIsobmffInputError('Truncated tfra entries.');
         return new FragmentLookupTable(reader, trackId, start + 16, count, version, widths, entrySize);
     }
     async at(index: number): Promise<FragmentLookupTableEntry | null> {
@@ -4542,7 +4547,7 @@ class FragmentLookupTable {
             if (this.reader.source._disposed)
                 throw new InputDisposedError();
             if (!slice)
-                throw new RangeError('Truncated tfra page.');
+                throw new InvalidIsobmffInputError('Truncated tfra page.');
             view = toDataView(new Uint8Array(readBytes(slice, length)));
         }
         this.pages.delete(first);
@@ -4555,7 +4560,7 @@ class FragmentLookupTable {
             for (let i = 0; i < width; i++)
                 value = value * 256 + view!.getUint8(offset++);
             if (!Number.isSafeInteger(value))
-                throw new RangeError('Unsafe tfra timestamp or offset.');
+                throw new InvalidIsobmffInputError('Unsafe tfra timestamp or offset.');
             return value;
         };
         const timestamp = readWord(this.version === 1 ? 8 : 4);
