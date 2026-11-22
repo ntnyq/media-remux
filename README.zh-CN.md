@@ -447,9 +447,9 @@ pnpm build
 pnpm pack --dry-run
 ```
 
-测试覆盖真实媒体输出的字节保真、B 帧/AAC 预滚、异常 FLV、取消/I/O 失败、超过 4 GiB 的稀疏 MP4、常规索引/TFRA/moof 分页、部分磁盘 I/O、排序和清理失败。如果已安装 FFmpeg，还会使用它独立解码真实输出进行验证。
+测试覆盖真实媒体输出的字节保真、B 帧/AAC 预滚、异常 FLV/MKV、AAC lacing、取消/I/O 失败、超过 4 GiB 的稀疏 MP4、常规索引/TFRA/moof 分页、部分磁盘 I/O、排序和清理失败。如果已安装 FFmpeg，还会使用它独立解码真实输出进行验证。
 
-浏览器检查需要先运行 `pnpm build`，再通过本地静态服务器提供仓库文件，并打开 `tests/browser/index.html`。页面按钮会检查真实 Worker/OPFS 环境下的重新封装、合并、拼接、取消、Worker 失败、并发任务和清理行为。`tests/browser/benchmark.html` 会对所选文件串行执行三轮性能测量。
+在装有 Google Chrome 的 macOS 上运行 `pnpm build` 和 `pnpm test:browser`，即可运行与 CI 相同的 Worker、OPFS、播放及原生 AAC 检查。手动检查时，可通过本地静态服务器提供仓库文件并打开 `tests/browser/index.html`。`tests/browser/benchmark.html` 会对所选文件串行执行三轮性能测量。
 
 内置的第三方代码保留上游声明和独立的格式规范，同时仍接受完整的严格 TypeScript 检查。参见[迁移说明](./src/vendor/mediabunny/MIGRATION.md)和[第三方声明](./THIRD_PARTY_NOTICES.md)。
 

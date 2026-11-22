@@ -448,9 +448,9 @@ pnpm build
 pnpm pack --dry-run
 ```
 
-Tests cover real byte-preserving output, B frames/AAC pre-roll, malformed FLV, cancellation/I/O failures, sparse >4 GiB MP4, regular/TFRA/moof paging, partial disk I/O, sorting, and cleanup failures. If installed, FFmpeg independently decodes real outputs.
+Tests cover real byte-preserving output, B frames/AAC pre-roll, malformed FLV/MKV, AAC lacing, cancellation/I/O failures, sparse >4 GiB MP4, regular/TFRA/moof paging, partial disk I/O, sorting, and cleanup failures. If installed, FFmpeg independently decodes real outputs.
 
-For browser checks, run `pnpm build`, serve the repository with a local static server, and open `tests/browser/index.html`. Its button checks actual Worker/OPFS remux/combine/concat, cancellation, Worker failures, concurrent jobs, and cleanup. `tests/browser/benchmark.html` measures selected files serially over three rounds.
+Run `pnpm build` and `pnpm test:browser` on macOS with Google Chrome installed to run the same Worker, OPFS, playback, and native AAC checks as CI. To run interactively, serve the repository with a local static server and open `tests/browser/index.html`. `tests/browser/benchmark.html` measures selected files serially over three rounds.
 
 Vendored code retains upstream notices and independent formatting; it remains fully checked by strict TypeScript. See [migration notes](./src/vendor/mediabunny/MIGRATION.md) and [third-party notices](./THIRD_PARTY_NOTICES.md).
 
