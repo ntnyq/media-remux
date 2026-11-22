@@ -351,7 +351,9 @@ export const mvhd = (creationTime: number, trackDatas: IsobmffTrackData[]) => {
  */
 export const trak = (trackData: IsobmffTrackData, creationTime: number) => {
     const trackMetadata = getTrackMetadata(trackData);
-    const needsEditList = trackData.startTimestampOffset !== null && trackData.startTimestampOffset !== 0;
+    const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
+    const needsEditList = timing?.hasLeadingTrim
+        || (trackData.startTimestampOffset !== null && trackData.startTimestampOffset !== 0);
     return box('trak', undefined, [
         tkhd(trackData, creationTime),
         needsEditList ? edts(trackData) : null,
@@ -419,6 +421,21 @@ export const tkhd = (trackData: IsobmffTrackData, creationTime: number) => {
 export const edts = (trackData: IsobmffTrackData) => {
     const offset = trackData.startTimestampOffset;
     assert(offset !== null);
+    const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
+    if (timing?.hasLeadingTrim) {
+        const delay = intoTimescale(timing.presentationStart, GLOBAL_TIMESCALE);
+        const mediaTime = intoTimescale(timing.presentationStart - offset, trackData.timescale);
+        const mediaDuration = movieTrackDuration(trackData) - delay;
+        return box('edts', undefined, [
+            fullBox('elst', 1, 0, [
+                u32(delay > 0 ? 2 : 1),
+                ...(delay > 0 ? [u64(delay), i64(-1), fixed_16_16(1)] : []),
+                u64(mediaDuration),
+                i64(mediaTime),
+                fixed_16_16(1),
+            ]),
+        ]);
+    }
     if (offset > 0) {
         // Positive offset: empty segment at the start, then the full media afterwards
         const startOffset = intoTimescale(offset, GLOBAL_TIMESCALE);
@@ -470,8 +487,14 @@ export const mdia = (trackData: IsobmffTrackData, creationTime: number) => box('
 ]);
 /** Media Header Box: Specifies the characteristics of a media, including timescale and duration. */
 export const mdhd = (trackData: IsobmffTrackData, creationTime: number) => {
-    // Since _this_ duration represents the raw media duration, edit list offsets are not taken into account here
-    const localDuration = intoTimescale(presentationSpan(trackData), trackData.timescale);
+    // Safari may add fragment durations to mdhd. Use zero here when the
+    // initialization movie contains no samples for these outputs.
+    const emptyMediaHeader = trackData.muxer.isFragmented
+        && (trackData.muxer.formatOptions._fragmentedEmptyMediaHeaders
+            || trackData.muxer.trackDatas.some(track => track.track.source._codec === 'ac3'));
+    const localDuration = emptyMediaHeader
+        ? 0
+        : intoTimescale(presentationSpan(trackData), trackData.timescale);
     const needsU64 = !isU32(creationTime) || !isU32(localDuration);
     const u32OrU64 = needsU64 ? u64 : u32;
     return fullBox('mdhd', +needsU64, 0, [
@@ -743,17 +766,19 @@ export const soundSampleDescription = (compressionType: string, trackData: Isobm
         version = trackData.info.sampleRate < 2 ** 16 && trackData.info.numberOfChannels <= 2 ? 1 : 2;
     }
     if (version === 0) {
+        // ETSI TS 102 366 Annex F defines the AC-3 format fields in dac3.
+        const isAc3 = compressionType === 'ac-3';
         contents = [
             Array(6).fill(0), // Reserved
             u16(1), // Data reference index
             u16(version), // Version
             u16(0), // Revision level
             u32(0), // Vendor
-            u16(trackData.info.numberOfChannels), // Number of channels
+            u16(isAc3 ? 2 : trackData.info.numberOfChannels), // Number of channels
             u16(sampleSizeInBits), // Sample size (bits)
             u16(0), // Compression ID
             u16(0), // Packet size
-            u16(sampleEntrySampleRate < 2 ** 16 ? sampleEntrySampleRate : 0), // Sample rate (upper)
+            u16(!isAc3 && sampleEntrySampleRate < 2 ** 16 ? sampleEntrySampleRate : 0), // Sample rate (upper)
             u16(0), // Sample rate (lower)
         ];
     }
@@ -979,6 +1004,13 @@ const pcmC = (trackData: IsobmffAudioTrackData) => {
 };
 /** AC3SpecificBox */
 const dac3 = (trackData: IsobmffAudioTrackData) => {
+    const { description } = trackData.info.decoderConfig;
+    if (description) {
+        if (description.byteLength !== 3) {
+            throw new Error('Invalid AC-3 dac3 description.');
+        }
+        return box('dac3', [...toUint8Array(description)]);
+    }
     assert(trackData.info.primingPacket);
     const frameInfo = parseAc3SyncFrame(trackData.info.primingPacket.data);
     if (!frameInfo) {

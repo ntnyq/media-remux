@@ -17,7 +17,7 @@ export type IsobmffColorInformation = Readonly<{
 /** Resolves the same identifiers for output and segment compatibility checks. */
 export const resolveIsobmffColorInformation = (
     colorSpace: VideoColorSpaceInit | undefined,
-    container: IsobmffColorInformation | undefined,
+    container: Partial<IsobmffColorInformation> | undefined,
 ): IsobmffColorInformation => ({
     primaries: container?.primaries ?? (colorSpace?.primaries != null ? COLOR_PRIMARIES_MAP[colorSpace.primaries] : 2),
     transfer: container?.transfer ?? (colorSpace?.transfer != null ? TRANSFER_CHARACTERISTICS_MAP[colorSpace.transfer] : 2),

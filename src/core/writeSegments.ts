@@ -24,6 +24,7 @@ import { EncodedPacket } from '../vendor/mediabunny/src/packet'
 import { StreamTarget } from '../vendor/mediabunny/src/target'
 import type { PacketTrack } from './input/mediaInput'
 import type { SegmentInfo } from './mediaTracks'
+import { normalizeAudio } from './normalizeAudio'
 
 /**
  * Wraps each temporary store operation with cancellation checks without taking
@@ -168,27 +169,47 @@ interface TrackWriter {
  *
  * @param baseline - Ordered output tracks defining codec configurations and
  * optional video transforms; kinds must match their decoder configurations.
- * @param segments - Segments in playback order, with validated timing in seconds
- * and tracks matching the baseline's order and configurations.
+ * @param segments - Opens an independent pass over the inspected segments.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback. Track selection is already applied.
  * @param trackTimings - Preflight timing keyed by one-based output track ID.
+ * @param totalDuration - Combined presentation span in seconds.
  * @returns A promise resolving to the total duration in seconds, output MIME
- * type, and copied encoded payload bytes excluding container overhead.
+ * type, and encoded payload bytes written, excluding container overhead.
  * @throws {Error} If a baseline kind disagrees with its decoder configuration.
  * Also propagates packet, muxing, storage, stream, and progress callback failures.
  * @throws The signal's abort reason if cancellation is detected.
  */
 export async function writeSegments(
   baseline: PacketTrack[],
-  segments: AsyncIterable<OutputSegment>,
+  segments: () => AsyncIterable<OutputSegment>,
   options: RemuxOptions,
-  trackTimings: ReadonlyMap<number, IsobmffTrackTiming>,
+  trackTimings: Map<number, IsobmffTrackTiming>,
+  totalDuration: number,
 ): Promise<RemuxResult> {
   checkAbort(options.signal)
 
   let isCommitting = false
   const storage = abortableStorage(options.storage, options.signal)
+  const audioIndex = baseline.findIndex(
+    track => track.kind === MEDIA_TRACK_KIND.audio,
+  )
+  const normalizedAudio =
+    options.normalizeAudio && audioIndex !== -1
+      ? await normalizeAudio(
+          segments(),
+          totalDuration,
+          storage.fragmentSamples,
+          options.signal,
+        )
+      : undefined
+  const audioPackets = normalizedAudio?.packets()
+  let pendingAudio: IteratorResult<EncodedPacket, void> | undefined
+
+  if (normalizedAudio) {
+    trackTimings.set(audioIndex + 1, normalizedAudio.timing)
+  }
+
   const output = new Output({
     format: new Mp4OutputFormat({
       fastStart: 'fragmented',
@@ -196,6 +217,7 @@ export async function writeSegments(
       _fragmentIndexStore: storage.fragmentIndex,
       _fragmentSampleStore: storage.fragmentSamples,
       _fragmentTrackTimings: trackTimings,
+      _fragmentedEmptyMediaHeaders: normalizedAudio !== undefined,
     }),
     target: new StreamTarget(options.writable, {
       chunked: true,
@@ -225,6 +247,29 @@ export async function writeSegments(
   }
 
   /**
+   * Supplies the continuous encoded audio packets that start in this segment.
+   * @yields Normalized audio packets on the segment's original time base.
+   */
+  async function* segmentAudio(info: SegmentInfo, isLast: boolean) {
+    if (!audioPackets) {
+      return
+    }
+
+    pendingAudio ??= await audioPackets.next()
+
+    const end = isLast ? Infinity : duration + info.duration
+
+    while (!pendingAudio.done && pendingAudio.value.timestamp < end) {
+      const packet = pendingAudio.value
+
+      yield packet.clone({
+        timestamp: packet.timestamp - duration + info.start,
+      })
+      pendingAudio = await audioPackets.next()
+    }
+  }
+
+  /**
    * Interleaves a segment's tracks while preserving decode order within each
    * track, normalizing timestamps, and closing every iterator on exit.
    *
@@ -233,11 +278,30 @@ export async function writeSegments(
    * @throws If packet iteration, writing, progress reporting, or cancellation fails.
    */
   async function writeSegment(segment: OutputSegment) {
-    const cursors = segment.tracks.map((track, index) => ({
-      iterator: track.packets(),
-      writer: writers[index],
-      next: undefined as IteratorResult<EncodedPacket, void> | undefined,
-    }))
+    const cursors = segment.tracks.flatMap((track, index) =>
+      normalizedAudio && track.kind === MEDIA_TRACK_KIND.audio
+        ? []
+        : [
+            {
+              iterator: track.packets(
+                false,
+                segment.info.skippedPackets?.[index],
+              ),
+              writer: writers[index],
+              next: undefined as
+                | IteratorResult<EncodedPacket, void>
+                | undefined,
+            },
+          ],
+    )
+
+    if (normalizedAudio) {
+      cursors.push({
+        iterator: segmentAudio(segment.info, segment.isLast),
+        writer: writers[audioIndex],
+        next: undefined,
+      })
+    }
 
     /**
      * Advances one track and closes its writer if no later segment can use it.
@@ -299,13 +363,20 @@ export async function writeSegments(
   }
 
   try {
-    for (const track of baseline) {
+    for (const [index, track] of baseline.entries()) {
+      const transcodes = normalizedAudio !== undefined && index === audioIndex
+      const codec = transcodes ? MEDIA_CODEC.aac : track.codec
+      const config = transcodes ? normalizedAudio.config : track.config
+      const isAudioCodec =
+        codec === MEDIA_CODEC.aac ||
+        codec === MEDIA_CODEC.mp3 ||
+        codec === MEDIA_CODEC.ac3
+
       if (
         track.kind === MEDIA_TRACK_KIND.video &&
-        track.codec !== MEDIA_CODEC.aac &&
-        !('sampleRate' in track.config)
+        !isAudioCodec &&
+        !('sampleRate' in config)
       ) {
-        const { codec, config } = track
         const source = new EncodedVideoPacketSource(codec)
 
         output.addVideoTrack(source, {
@@ -334,17 +405,16 @@ export async function writeSegments(
         })
       } else if (
         track.kind === MEDIA_TRACK_KIND.audio &&
-        track.codec === MEDIA_CODEC.aac &&
-        'sampleRate' in track.config
+        isAudioCodec &&
+        'sampleRate' in config
       ) {
-        const { config } = track
-        const source = new EncodedAudioPacketSource(MEDIA_CODEC.aac)
+        const source = new EncodedAudioPacketSource(codec)
 
         output.addAudioTrack(source, { decoderConfig: config })
 
         writers.push({
           /**
-           * Adds a normalized AAC packet with the baseline decoder configuration.
+           * Adds a normalized audio packet with the baseline decoder configuration.
            *
            * @param packet - Encoded audio packet to copy into the output.
            * @returns A promise resolving when the audio source accepts the packet.
@@ -365,7 +435,7 @@ export async function writeSegments(
 
     await output.start()
 
-    for await (const segment of segments) {
+    for await (const segment of segments()) {
       await writeSegment(segment)
       duration += segment.info.duration
       segmentIndex++
@@ -393,5 +463,7 @@ export async function writeSegments(
     }
 
     throw error
+  } finally {
+    await audioPackets?.return()
   }
 }

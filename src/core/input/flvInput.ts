@@ -8,19 +8,17 @@ import {
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
 } from '../../constants'
-import { createRemuxError, withRemuxErrorCode } from '../../errors'
-import {
-  InvalidAacDescriptionError,
-  parseAacAudioSpecificConfig,
-} from '../../vendor/mediabunny/shared/aac-misc'
-import { Bitstream } from '../../vendor/mediabunny/shared/bitstream'
-import { extractColorSpace } from '../../vendor/mediabunny/src/codec'
-import {
-  deserializeAvcDecoderConfigurationRecord,
-  parseAvcSps,
-} from '../../vendor/mediabunny/src/codec-data'
+import { createRemuxError } from '../../errors'
+import type { RemuxTrackSelection } from '../../types'
 import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
-import type { InputTrackSelection, MediaInput, PacketTrack } from './mediaInput'
+import {
+  aacFrameSamples,
+  aacLcDecoderConfig,
+  avcDecoderConfig,
+} from './codecConfig'
+import type { MediaInput, PacketTrack } from './mediaInput'
+import { parseMp3FrameHeader } from './mp3Frame'
+import type { Mp3FrameHeader } from './mp3Frame'
 
 interface FlvTag {
   kind: PacketTrack['kind']
@@ -30,7 +28,19 @@ interface FlvTag {
   isKey: boolean
   data: Uint8Array<ArrayBuffer>
   size: number
+  mp3?: Mp3FrameHeader
 }
+
+type FlvTrackFormat =
+  | {
+      codec: typeof MEDIA_CODEC.avc | typeof MEDIA_CODEC.aac
+      description: Uint8Array<ArrayBuffer>
+    }
+  | {
+      codec: typeof MEDIA_CODEC.mp3
+      sampleRate: number
+      numberOfChannels: number
+    }
 
 /**
  * Reads an exact FLV byte range with cancellation checks around the Blob read.
@@ -87,6 +97,56 @@ function uint24(bytes: Uint8Array, offset: number): number {
 }
 
 /**
+ * Splits a legacy FLV MP3 payload into whole frames. Only frame headers are
+ * read during preflight. A tag timestamps its first frame.
+ *
+ * @yields {FlvTag} One sample per complete MP3 frame.
+ */
+async function* readMp3Frames(
+  blob: Blob,
+  tag: { offset: number; size: number; timestamp: number },
+  metadataOnly: boolean,
+  signal?: AbortSignal,
+): AsyncGenerator<FlvTag, void, unknown> {
+  const end = tag.offset + tag.size
+  let offset = tag.offset
+  let elapsed = 0
+
+  while (offset < end) {
+    const header = await readBytes(
+      blob,
+      offset,
+      Math.min(4, end - offset),
+      signal,
+    )
+    const mp3 = parseMp3FrameHeader(header)
+
+    if (!mp3 || offset + mp3.size > end) {
+      throw createRemuxError(
+        REMUX_ERROR_CODE.invalidInput,
+        'Invalid or truncated FLV MP3 frame.',
+      )
+    }
+
+    yield {
+      kind: MEDIA_TRACK_KIND.audio,
+      timestamp: tag.timestamp + elapsed,
+      compositionTime: 0,
+      packetType: 1,
+      isKey: true,
+      data: metadataOnly
+        ? new Uint8Array(0)
+        : await readBytes(blob, offset, mp3.size, signal),
+      size: mp3.size,
+      mp3,
+    }
+
+    offset += mp3.size
+    elapsed += mp3.duration
+  }
+}
+
+/**
  * Walks tags by range; script data and unselected media payloads stay on disk.
  *
  * @param blob - Source FLV media.
@@ -94,7 +154,7 @@ function uint24(bytes: Uint8Array, offset: number): number {
  * @param metadataOnly - Skip encoded payloads except decoder configurations.
  * @param signal - Cancellation signal checked around reads.
  * @returns An asynchronous generator that completes without a return value.
- * @yields {FlvTag} One validated media tag at a time.
+ * @yields {FlvTag} One validated media tag or MP3 frame at a time.
  * @throws {Error} If FLV structure, selected codecs, or packet types are invalid.
  * @throws The signal's abort reason if cancellation is detected.
  */
@@ -155,6 +215,9 @@ async function* readTags(
     }
 
     const tagKind = type === 9 ? MEDIA_TRACK_KIND.video : MEDIA_TRACK_KIND.audio
+    const payloadOffset = offset + 11
+
+    offset += 11 + size + 4
 
     if (type !== 18 && (!kind || kind === tagKind)) {
       const prefixSize = type === 9 ? 5 : 2
@@ -166,15 +229,29 @@ async function* readTags(
         )
       }
 
-      const prefix = await readBytes(blob, offset + 11, prefixSize, signal)
+      const prefix = await readBytes(blob, payloadOffset, prefixSize, signal)
+      const soundFormat = (prefix[0] ?? 0) >> 4
+      const timestamp =
+        (uint24(tagHeader, 4) + (tagHeader[7] ?? 0) * 16_777_216) / 1000
+
+      // Legacy MP3 has no packet-type byte after the audio tag header.
+      if (type === 8 && (soundFormat === 2 || soundFormat === 14)) {
+        yield* readMp3Frames(
+          blob,
+          { offset: payloadOffset + 1, size: size - 1, timestamp },
+          metadataOnly,
+          signal,
+        )
+        continue
+      }
 
       if (
         (type === 9 && ((prefix[0] ?? 0) & 15) !== 7) ||
-        (type === 8 && (prefix[0] ?? 0) >> 4 !== 10)
+        (type === 8 && soundFormat !== 10)
       ) {
         throw createRemuxError(
           REMUX_ERROR_CODE.unsupportedCodec,
-          'FLV supports only H.264 video and AAC audio.',
+          'FLV supports only H.264 video and AAC or MP3 audio.',
         )
       }
 
@@ -196,8 +273,7 @@ async function* readTags(
 
       yield {
         kind: tagKind,
-        timestamp:
-          (uint24(tagHeader, 4) + (tagHeader[7] ?? 0) * 16_777_216) / 1000,
+        timestamp,
 
         // FLV composition offsets are signed 24-bit milliseconds; uint24 reads
         // them unsigned, so restore the sign before converting to seconds.
@@ -211,7 +287,7 @@ async function* readTags(
           packetType === 0 || !metadataOnly
             ? await readBytes(
                 blob,
-                offset + 11 + prefixSize,
+                payloadOffset + prefixSize,
                 payloadSize,
                 signal,
               )
@@ -219,8 +295,6 @@ async function* readTags(
         size: payloadSize,
       }
     }
-
-    offset += 11 + size + 4
   }
 }
 
@@ -239,119 +313,8 @@ function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
 }
 
 /**
- * Builds an H.264 decoder configuration from an FLV AVC sequence header.
- *
- * @param description - AVCDecoderConfigurationRecord bytes.
- * @returns Codec identifier, display dimensions, and original initialization bytes.
- * @throws {Error} If AVC parsing fails or required parameter sets are missing.
- */
-function videoConfig(description: Uint8Array<ArrayBuffer>): VideoDecoderConfig {
-  const avc = deserializeAvcDecoderConfigurationRecord(description)
-  const sps = avc?.sequenceParameterSets[0]
-  const info = sps && parseAvcSps(sps)
-
-  if (!avc || !info || avc.pictureParameterSets.length === 0) {
-    throw createRemuxError(
-      REMUX_ERROR_CODE.invalidInput,
-      'Invalid FLV AVC decoder configuration.',
-    )
-  }
-
-  const profile = [...description.subarray(1, 4)]
-    .map(byte => byte.toString(16).padStart(2, '0'))
-    .join('')
-
-  return {
-    codec: `avc1.${profile}`,
-    codedWidth: info.displayWidth,
-    codedHeight: info.displayHeight,
-    // Use the same SPS-derived color fields as the MP4 reader, including the
-    // limited-range default when the SPS omits video signal metadata.
-    colorSpace: extractColorSpace({
-      codec: MEDIA_CODEC.avc,
-      codecDescription: description,
-      avcCodecInfo: avc,
-      hevcCodecInfo: null,
-      vp9CodecInfo: null,
-      av1CodecInfo: null,
-      proresCodecInfo: null,
-    }),
-    ...(info.pixelAspectRatio.num === info.pixelAspectRatio.den
-      ? {}
-      : {
-          displayAspectWidth: info.displayWidth * info.pixelAspectRatio.num,
-          displayAspectHeight: info.displayHeight * info.pixelAspectRatio.den,
-        }),
-    description,
-  }
-}
-
-/**
- * Builds an AAC-LC decoder configuration from an FLV audio sequence header.
- *
- * @param description - AudioSpecificConfig bytes.
- * @returns Codec identifier, channel count, sample rate, and initialization bytes.
- * @throws {Error} If AAC-LC, a channel count, or a positive sample rate are absent.
- */
-function audioConfig(description: Uint8Array<ArrayBuffer>): AudioDecoderConfig {
-  let info
-
-  try {
-    info = parseAacAudioSpecificConfig(description)
-  } catch (error) {
-    if (error instanceof InvalidAacDescriptionError) {
-      throw withRemuxErrorCode(error, REMUX_ERROR_CODE.invalidInput)
-    }
-
-    throw error
-  }
-
-  if (
-    info.objectType !== 2 ||
-    info.sbrPresent ||
-    !info.outputNumberOfChannels ||
-    !info.outputSampleRate ||
-    !(info.outputSampleRate > 0)
-  ) {
-    throw createRemuxError(
-      REMUX_ERROR_CODE.unsupportedCodec,
-      'FLV requires AAC-LC with a known channel layout.',
-    )
-  }
-
-  return {
-    codec: 'mp4a.40.2',
-    numberOfChannels: info.outputNumberOfChannels,
-    sampleRate: info.outputSampleRate,
-    description,
-  }
-}
-
-/**
- * Reads the AAC frame-length flag used to derive each audio packet's duration.
- *
- * @param description - AAC AudioSpecificConfig containing the frame-length flag.
- * @returns Samples per frame: 960 when the flag is set, otherwise 1024.
- */
-function aacFrameSamples(description: Uint8Array): number {
-  const bits = new Bitstream(description)
-
-  // Skip the object type and sample-rate field, whose escape value introduces
-  // an explicit 24-bit frequency, then skip channels to reach frameLengthFlag.
-  bits.skipBits(5)
-
-  if (bits.readBits(4) === 15) {
-    bits.skipBits(24)
-  }
-
-  bits.skipBits(4)
-
-  return bits.readBits(1) === 1 ? 960 : 1024
-}
-
-/**
  * Scans FLV tag structure and selected decoder configurations before exposing
- * H.264 video and AAC-LC audio tracks. Unselected media payloads stay on disk.
+ * H.264 video and AAC-LC or MP3 audio tracks. Unselected payloads stay on disk.
  * Each packet iterator rereads its track, derives durations from decode timing
  * or codec defaults, and optionally skips encoded payloads. Disposal is a no-op
  * because this Blob-backed input owns no file handles.
@@ -370,29 +333,62 @@ function aacFrameSamples(description: Uint8Array): number {
 export async function openFlvInput(
   blob: Blob,
   signal?: AbortSignal,
-  selection: InputTrackSelection = REMUX_TRACK_SELECTION.all,
+  selection: RemuxTrackSelection = REMUX_TRACK_SELECTION.all,
 ): Promise<MediaInput> {
-  const configs = new Map<PacketTrack['kind'], Uint8Array<ArrayBuffer>>()
+  const formats = new Map<PacketTrack['kind'], FlvTrackFormat>()
 
   // Validate the entire file before creating output, including later sequence headers.
   for await (const tag of readTags(
     blob,
-    selection === REMUX_TRACK_SELECTION.all ? undefined : selection,
+    selection === REMUX_TRACK_SELECTION.audio ||
+      selection === REMUX_TRACK_SELECTION.video
+      ? selection
+      : undefined,
     true,
     signal,
   )) {
-    if (tag.packetType === 0) {
-      const previous = configs.get(tag.kind)
+    const previous = formats.get(tag.kind)
 
-      if (previous && !sameBytes(previous, tag.data)) {
+    if (tag.mp3) {
+      const { sampleRate, numberOfChannels } = tag.mp3
+
+      if (
+        previous &&
+        (previous.codec !== MEDIA_CODEC.mp3 ||
+          previous.sampleRate !== sampleRate ||
+          previous.numberOfChannels !== numberOfChannels)
+      ) {
         throw createRemuxError(
           REMUX_ERROR_CODE.unsupportedMediaFeature,
           'FLV decoder configuration changes within a segment.',
         )
       }
 
-      configs.set(tag.kind, tag.data)
-    } else if (tag.packetType === 1 && !configs.has(tag.kind)) {
+      if (!previous) {
+        formats.set(tag.kind, {
+          codec: MEDIA_CODEC.mp3,
+          sampleRate,
+          numberOfChannels,
+        })
+      }
+    } else if (
+      previous &&
+      (previous.codec === MEDIA_CODEC.mp3 ||
+        (tag.packetType === 0 && !sameBytes(previous.description, tag.data)))
+    ) {
+      throw createRemuxError(
+        REMUX_ERROR_CODE.unsupportedMediaFeature,
+        'FLV decoder configuration changes within a segment.',
+      )
+    } else if (tag.packetType === 0) {
+      formats.set(tag.kind, {
+        codec:
+          tag.kind === MEDIA_TRACK_KIND.video
+            ? MEDIA_CODEC.avc
+            : MEDIA_CODEC.aac,
+        description: tag.data,
+      })
+    } else if (tag.packetType === 1 && !previous) {
       throw createRemuxError(
         REMUX_ERROR_CODE.invalidInput,
         'FLV media packet precedes its decoder configuration.',
@@ -402,40 +398,51 @@ export async function openFlvInput(
 
   const tracks: PacketTrack[] = []
 
-  for (const [kind, description] of configs) {
-    const config =
-      kind === MEDIA_TRACK_KIND.video
-        ? videoConfig(description)
-        : audioConfig(description)
+  for (const [kind, format] of formats) {
+    const { codec } = format
+    let config: PacketTrack['config']
+    let defaultDuration = 1 / 30
+
+    if (codec === MEDIA_CODEC.mp3) {
+      config = {
+        codec,
+        sampleRate: format.sampleRate,
+        numberOfChannels: format.numberOfChannels,
+      }
+    } else if (codec === MEDIA_CODEC.aac) {
+      const aac = aacLcDecoderConfig(format.description, 'FLV')
+
+      config = aac
+      defaultDuration = aacFrameSamples(format.description) / aac.sampleRate
+    } else {
+      config = avcDecoderConfig(format.description, 'FLV')
+    }
 
     tracks.push({
       kind,
-      codec:
-        kind === MEDIA_TRACK_KIND.video ? MEDIA_CODEC.avc : MEDIA_CODEC.aac,
+      codec,
       config,
 
       /**
        * Rereads this FLV track, deriving packet durations from codec or tag timing.
        *
        * @param metadataOnly - Whether to omit encoded payloads; defaults to false.
+       * @param skipPackets - Number of leading packets to skip in decode order.
        * @returns An asynchronous generator that completes without a return value.
        * @yields {EncodedPacket} Packets with presentation timing and decode sequence numbers.
        * @throws If tag parsing, decode timestamp ordering, or cancellation fails.
        */
-      async *packets(metadataOnly = false) {
+      async *packets(metadataOnly = false, skipPackets = 0) {
         let pending: FlvTag | undefined
         let sequence = 0
-        let lastDuration =
-          kind === MEDIA_TRACK_KIND.audio && 'sampleRate' in config
-            ? aacFrameSamples(description) / config.sampleRate
-            : 1 / 30
+        let lastDuration = defaultDuration
 
         /**
-         * Converts a media tag to a packet and advances this iterator's sequence.
+         * Converts a media tag to a packet at the current sequence number.
          *
          * @param tag - Media tag whose payload and composition offset to preserve.
          * @param duration - Decode duration in seconds, also used as a presentation estimate.
-         * @returns An encoded packet with the next decode sequence number.
+         * @returns An encoded packet with its source decode sequence number.
          */
         function packet(tag: FlvTag, duration: number) {
           return new EncodedPacket(
@@ -443,7 +450,7 @@ export async function openFlvInput(
             tag.isKey ? FRAGMENT_SAMPLE_TYPE.key : FRAGMENT_SAMPLE_TYPE.delta,
             tag.timestamp + tag.compositionTime,
             duration,
-            sequence++,
+            sequence,
             tag.size,
             { decodeDuration: duration },
           )
@@ -467,15 +474,19 @@ export async function openFlvInput(
                 lastDuration = delta
               }
 
-              yield packet(pending, lastDuration)
+              if (sequence >= skipPackets) {
+                yield packet(pending, pending.mp3?.duration ?? lastDuration)
+              }
+
+              sequence++
             }
 
             pending = tag.packetType === 1 ? tag : undefined
           }
         }
 
-        if (pending) {
-          yield packet(pending, lastDuration)
+        if (pending && sequence >= skipPackets) {
+          yield packet(pending, pending.mp3?.duration ?? lastDuration)
         }
       },
     })

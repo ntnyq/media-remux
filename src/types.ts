@@ -9,8 +9,8 @@ import type { FragmentSampleStore } from './storage/fragmentSamples'
 
 /**
  * Primary tracks to retain when remuxing or concatenating.
- * 'video-with-optional-audio' requires video in every input and retains audio
- * when present.
+ * Both optional-audio modes require video in every input. The first-track mode
+ * selects video and audio in file order.
  */
 export type RemuxTrackSelection = ValueOf<typeof REMUX_TRACK_SELECTION>
 
@@ -60,7 +60,7 @@ export interface RemuxProgress {
   phase: ValueOf<typeof REMUX_PROGRESS_PHASE>
 
   /**
-   * Cumulative encoded payload bytes copied, excluding container overhead.
+   * Cumulative encoded payload bytes written, excluding container overhead.
    */
   bytesProcessed: number
 
@@ -99,7 +99,7 @@ export interface RemuxOptions {
   /**
    * Receives synchronous progress notifications. Throwing fails the job.
    *
-   * @param progress - Current phase, copied payload bytes, and segment position.
+   * @param progress - Current phase, encoded payload bytes, and segment position.
    * @returns Nothing; asynchronous callback results are not awaited.
    */
   onProgress?: (progress: RemuxProgress) => void
@@ -108,6 +108,12 @@ export interface RemuxOptions {
    * Selects tracks for remux/concat. Defaults to all supported primary tracks.
    */
   tracks?: RemuxTrackSelection
+
+  /**
+   * Normalize selected mono/stereo audio to one continuous AAC-LC track using
+   * WebCodecs. Video is copied. Defaults to copying the selected audio packets.
+   */
+  normalizeAudio?: boolean
 }
 
 /**
@@ -115,7 +121,7 @@ export interface RemuxOptions {
  */
 export interface RemuxResult {
   /**
-   * Total encoded payload bytes copied, excluding container headers and indexes.
+   * Total encoded payload bytes written, excluding container headers and indexes.
    */
   bytesProcessed: number
 

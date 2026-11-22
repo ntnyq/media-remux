@@ -7,17 +7,17 @@
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-Disk-backed browser media remuxing, track combining, and segment concatenation without re-encoding. No runtime dependencies; the required patched Mediabunny source subset is included directly.
+Disk-backed browser media remuxing, track combining, and segment concatenation. The default mode copies encoded packets. The patched Mediabunny source subset is included directly, with no runtime dependencies.
 
 ## Features
 
-- `remuxMedia`: MP4/FLV primary tracks → fragmented MP4; select AAC alone for M4A.
-- `combineTracks`: combine supported video and AAC audio from separate files.
+- `remuxMedia`: MP4/FLV/MKV primary tracks → fragmented MP4; select an audio track alone for M4A.
+- `combineTracks`: combine supported video and audio from separate files.
 - `concatMedia`: join compatible segments in order, checking configurations/timelines before writing output.
 - `runMediaJob`: dedicated Worker execution with OPFS, progress, cancellation, and temporary-file cleanup.
 - Paged MP4 tables/TFRA/moof records; output descriptors, payloads, and fragment indexes on disk.
 
-Inputs are complete `Blob`/`File` objects. Downloading, authentication, manifests, quality selection, transcoding, filters, DRM, and frame-accurate editing remain outside this package.
+Inputs are complete `Blob`/`File` objects. Downloading, authentication, manifests, quality selection, video transcoding, filters, DRM, and frame-accurate video editing remain outside this package.
 
 ## Installation
 
@@ -88,7 +88,7 @@ const concatJob = {
 
 The job owns and terminates its Worker. Use a fresh Worker per call. Cancellation can interrupt synchronous parsing/I/O. Imports do not start jobs or install message listeners automatically. WXT/Vite hosts can use their existing Worker factories; neither framework is required.
 
-Requires a secure context, OPFS, module Workers, and Worker-side synchronous OPFS handles. By default jobs create random subdirectories in the OPFS root; pass `directory` for an application-owned parent. Success removes spools, retaining output until `dispose()`. Failure/cancellation removes the entire job directory, retrying transient locks. Cleanup errors surface to the caller. Applications must remove abandoned directories after tab/browser crashes.
+Requires a secure context, OPFS, module Workers, and Worker-side synchronous OPFS handles. By default jobs create random subdirectories in the OPFS root. Pass `directory` for an application-owned parent. On browsers that cannot clone OPFS handles, the Worker reopens the job directory relative to its own OPFS root. Success removes spools, retaining output until `dispose()`. Failure/cancellation removes the entire job directory, retrying transient locks. Cleanup errors surface to the caller. Applications must remove abandoned directories after tab/browser crashes.
 
 Consume/save `result.file` before disposing. Audio files have an `.m4a` name and `audio/mp4` MIME type; video files use `.mp4` and `video/mp4`. Disposal is idempotent and failed removal can be retried.
 
@@ -142,7 +142,7 @@ All functions below are named exports. Import `installMediaWorker` and its `Medi
 | Export                                 | Purpose                                                       | Returns                                             |
 | -------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------- |
 | `runMediaJob(job, options)`            | Run an isolated browser Worker job with managed OPFS files.   | `Promise<MediaJobResult>`                           |
-| `remuxMedia(input, options)`           | Copy selected tracks from one MP4/FLV into fMP4/M4A.          | `Promise<RemuxResult>`                              |
+| `remuxMedia(input, options)`           | Copy selected tracks from one MP4/FLV/MKV into fMP4/M4A.      | `Promise<RemuxResult>`                              |
 | `combineTracks(video, audio, options)` | Combine video and audio from separate files.                  | `Promise<RemuxResult>`                              |
 | `concatMedia(inputs, options)`         | Join compatible segments in the supplied order.               | `Promise<RemuxResult>`                              |
 | `createOpfsStorage(directory)`         | Create temporary stores for a core job in a dedicated Worker. | `DisposableRemuxStorage`                            |
@@ -161,15 +161,17 @@ function runMediaJob(
 ): Promise<MediaJobResult>
 ```
 
-`job` is a discriminated union selected by `operation`. Inputs must be complete, nonempty MP4/FLV `Blob` objects; `File` is also accepted because it extends `Blob`.
+`job` is a discriminated union selected by `operation`. Inputs must be complete, nonempty MP4/FLV/MKV `Blob` objects; `File` is also accepted because it extends `Blob`.
 
-| `operation` | Required fields              | Optional fields | Behavior                                                                                        |
-| ----------- | ---------------------------- | --------------- | ----------------------------------------------------------------------------------------------- |
-| `'remux'`   | `input: Blob`                | `tracks`        | Copy selected primary tracks from one input.                                                    |
-| `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary video from `video` and primary AAC audio from `audio`.                         |
-| `'concat'`  | `inputs: readonly Blob[]`    | `tracks`        | Join a nonempty list in playback order; selected layouts and decoder configurations must match. |
+| `operation` | Required fields              | Optional fields | Behavior                                                                                                |
+| ----------- | ---------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
+| `'remux'`   | `input: Blob`                | `tracks`        | Copy selected primary tracks from one input.                                                            |
+| `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary video from `video` and primary audio from `audio`.                                     |
+| `'concat'`  | `inputs: readonly Blob[]`    | `tracks`        | Join a nonempty list in playback order. Copy mode requires matching layouts and decoder configurations. |
 
-`tracks` defaults to `'all'`, which retains the available primary tracks. `'audio'` and `'video'` require and retain only the selected kind. Use `'video-with-optional-audio'` to require a primary video track in every input and keep its primary audio track when present. Concat still requires matching track layouts. Combine jobs select video from the first input and audio from the second.
+`tracks` defaults to `'all'`, which retains the available primary tracks. `'audio'` and `'video'` require and retain only the selected kind. Use `'video-with-optional-audio'` to require a primary video track in every input and keep its primary audio track when present. Use `'first-video-with-optional-audio'` to select the first video and first available audio in file order, matching FFmpeg's `-map 0:v:0 -map 0:a:0?`. Concat in copy mode requires matching track layouts. Combine jobs select video from the first input and audio from the second.
+
+Set `normalizeAudio: true` on any job to encode the selected audio as one stereo, 48 kHz AAC-LC track. This allows segments with compatible video to have different audio configurations or omit audio. The output fills missing audio with silence, and video packets are copied. The browser must provide WebCodecs AAC encoding and decoding for the selected mono or stereo input. With leading-dependent H.264/MP3 MP4, this mode decodes the MP3 prefix so its bit reservoir is available before cropping the PCM at the retained audio start.
 
 | `options` field | Type                                | Required / default           | Description                                                                                                                                                                     |
 | --------------- | ----------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -207,25 +209,26 @@ function concatMedia(
 ): Promise<RemuxResult>
 ```
 
-| Argument  | Used by         | Description                                                                                                                                            |
-| --------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV `Blob` or `File`; selected primary tracks are copied without re-encoding.                                               |
-| `video`   | `combineTracks` | MP4/FLV input supplying the primary video track; any audio in this input is ignored.                                                                   |
-| `audio`   | `combineTracks` | MP4/FLV input supplying primary AAC audio; any video in this input is ignored.                                                                         |
-| `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
-| `options` | All three       | Output stream, fresh stores, and optional hooks described below.                                                                                       |
+| Argument  | Used by         | Description                                                                                                                                                |
+| --------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV/MKV `Blob` or `File` providing the selected primary tracks.                                                                 |
+| `video`   | `combineTracks` | MP4/FLV/MKV input supplying the primary video track; any audio in this input is ignored.                                                                   |
+| `audio`   | `combineTracks` | MP4/FLV/MKV input supplying primary audio; any video in this input is ignored.                                                                             |
+| `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV/MKV inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
+| `options` | All three       | Output stream, fresh stores, and optional hooks described below.                                                                                           |
 
 | `RemuxOptions` field | Type                                | Required / default | Description                                                                                                                                                |
 | -------------------- | ----------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `writable`           | `WritableStream<MediaOutputChunk>`  | Required           | Must support absolute positioned writes, including revisiting earlier offsets. Awaited writes apply backpressure.                                          |
 | `storage`            | `RemuxStorage`                      | Required           | Fresh, job-exclusive `fragmentIndex` and `fragmentSamples` stores. The caller disposes them in `finally` after success, failure, or cancellation.          |
 | `tracks`             | `RemuxTrackSelection`               | Optional; `'all'`  | Select primary track kinds for remux/concat. Unsupported for `combineTracks`, which always selects one video and one audio track.                          |
+| `normalizeAudio`     | `boolean`                           | Optional; `false`  | Encode selected mono or stereo audio as continuous 48 kHz stereo AAC-LC via WebCodecs. The encoded audio is spooled before muxing.                         |
 | `signal`             | `AbortSignal`                       | Optional           | Checked during inspection, packet copying, and storage operations. Rejection uses the original abort reason.                                               |
 | `onProgress`         | `(progress: RemuxProgress) => void` | Optional           | Synchronous notifications in the core API's execution context, without Worker throttling. Throwing fails the operation; returned promises are not awaited. |
 
 These APIs return a summary, not a `File`. The caller owns the output destination and temporary files. Successful processing closes/unlocks `writable`; write-stage failure aborts/unlocks it. Preflight failure leaves the supplied stream untouched, so the caller must close or abort it as needed. Cancellation can stop the job until the output stream starts closing. Once closing starts, the stream's commit result determines the outcome. Store disposal closes handles but does not remove files.
 
-Remux and combine normalize the earliest selected presentation timestamp to zero, preserving relative A/V offsets. Concat places each normalized segment after the preceding presentation end. Missing tracks, incompatible segment configurations, malformed media/timing, or video without an initial keyframe reject the promise. I/O and callback errors also propagate.
+Remux and combine normalize the earliest playable timestamp to zero, preserving relative A/V offsets. Concat places each normalized segment after the preceding presentation end. H.264 MP4 with leading dependent frames starts at the first sync sample verified to contain an IDR picture. Whole audio packets with presentation timestamps before that picture are discarded. Copy mode rejects a cut where the first retained MP3 frame needs the discarded data. Use `normalizeAudio: true` for such cuts. Missing tracks, incompatible segment configurations, malformed media or timing, and video without a usable keyframe at the start of the retained segment reject the promise. I/O and callback errors also propagate.
 
 </details>
 
@@ -234,18 +237,18 @@ Remux and combine normalize the earliest selected presentation timestamp to zero
 
 `RemuxResult` is returned by all core operations and inherited by `MediaJobResult`.
 
-| Field            | Type                         | Meaning                                                                                                                                             |
-| ---------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bytesProcessed` | `number`                     | Total copied encoded payload bytes, excluding container headers and indexes. This is not output file size.                                          |
-| `duration`       | `number`                     | Output presentation span in seconds, from the earliest selected PTS to the latest selected packet end. Concatenation sums normalized segment spans. |
-| `mimeType`       | `'video/mp4' \| 'audio/mp4'` | Video MIME type whenever a video track exists; audio MIME type otherwise.                                                                           |
+| Field            | Type                         | Meaning                                                                                                                                                |
+| ---------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bytesProcessed` | `number`                     | Total encoded payload bytes written, excluding container headers and indexes.                                                                          |
+| `duration`       | `number`                     | Output presentation span in seconds, from the first playable timestamp to the latest selected packet end. Concatenation sums normalized segment spans. |
+| `mimeType`       | `'video/mp4' \| 'audio/mp4'` | Video MIME type whenever a video track exists; audio MIME type otherwise.                                                                              |
 
 `RemuxProgress` is passed to `onProgress`:
 
 | Field            | Type                                 | Meaning                                                                                                                                                                        |
 | ---------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `phase`          | `'inspect' \| 'remux' \| 'finalize'` | Validate inputs/timing, copy encoded packets, then finish container metadata.                                                                                                  |
-| `bytesProcessed` | `number`                             | Cumulative copied payload bytes; zero during inspection. It excludes container overhead and has no total/percentage field.                                                     |
+| `bytesProcessed` | `number`                             | Cumulative encoded payload bytes written. Zero during inspection.                                                                                                              |
 | `segmentIndex`   | `number`                             | Zero-based segment index during inspection/copying. During finalization, the number of segments already written; normally `1` for remux/combine or `inputs.length` for concat. |
 
 `MediaOutputChunk` describes one absolute output write:
@@ -380,14 +383,14 @@ Pass this adapter as `storage.fragmentSamples` alongside a fresh `createDiskFrag
 
 Use `isRemuxError(error)` from `media-remux` to narrow an error thrown by a core API or `runMediaJob` to `RemuxError`. Branch on `error.code` for fallback or localization. The message provides diagnostics.
 
-| Code                        | Meaning                                                                                                                    |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| `UNSUPPORTED_CONTAINER`     | The input container is unsupported or unrecognizable.                                                                      |
-| `UNSUPPORTED_CODEC`         | A selected track uses an unsupported codec or profile.                                                                     |
-| `UNSUPPORTED_MEDIA_FEATURE` | A recognized media feature exceeds the remuxer's capabilities, such as some MP4 edit lists or an AV1 decode discontinuity. |
-| `INCOMPATIBLE_SEGMENTS`     | The selected track layouts or decoder configurations differ between segments.                                              |
-| `INVALID_INPUT`             | A media validation check found malformed data, such as a truncated box or invalid packet timing.                           |
-| `MISSING_REQUIRED_TRACK`    | An input lacks a track required by the operation or selection.                                                             |
+| Code                        | Meaning                                                                                                                        |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `UNSUPPORTED_CONTAINER`     | The input container is unsupported or unrecognizable.                                                                          |
+| `UNSUPPORTED_CODEC`         | A selected track uses an unsupported codec or profile.                                                                         |
+| `UNSUPPORTED_MEDIA_FEATURE` | A recognized media feature exceeds the remuxer's capabilities, such as some MP4 edit lists or an AV1 gap before a delta frame. |
+| `INCOMPATIBLE_SEGMENTS`     | The selected track layouts or decoder configurations differ between segments.                                                  |
+| `INVALID_INPUT`             | A media validation check found malformed data, such as a truncated box or invalid packet timing.                               |
+| `MISSING_REQUIRED_TRACK`    | An input lacks a track required by the operation or selection.                                                                 |
 
 I/O, quota, cancellation, callback, and Worker infrastructure failures follow their existing error paths. For a compatibility fallback, allow only the codes the alternate backend can handle.
 
@@ -396,22 +399,26 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 <details>
 <summary>Track limits, segment compatibility, and timestamp rules</summary>
 
-- Only primary tracks are used. Remux/concat accept `tracks: RemuxTrackSelection` (default `all`). Combine selects video from its first input and audio from its second.
-- MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), and AAC. FLV supports standard AVC and AAC-LC, including 960/1024-sample AAC frames. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and changing FLV sequence headers are rejected. A selected MP4 track must have a single sample description.
+- Remux and concat use primary tracks by default and offer file-order selection through `tracks`. Combine selects the primary video from the first input and the primary audio from the second.
+- MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), AAC, MP3, and AC-3 (`ac-3`). FLV supports standard AVC, AAC-LC with 960/1024-sample frames, and MP3 with complete Layer III frames at a signaled bitrate. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and mid-stream decoder configuration changes are rejected. A selected MP4 track must have a single sample description.
+- MKV accepts one Matroska segment with selected H.264 and/or AAC-LC tracks and standard `CodecPrivate`. AAC lacing is supported. Selected tracks with content encodings or legacy offsets, laced video, video cropping, and blocks with codec changes, additions, or nonzero discard padding are rejected.
+- AC-3 tracks require a valid `dac3` box, whose payload is copied to the output. Playback requires a browser with AC-3 decoding support. A 5.1-channel sample played with audio in Safari 27.0.1 on macOS.
+- Chrome supports direct `<video src>` playback of H.264/MP3 MP4 files. MP3 support in MP4 varies by browser and playback API.
 - HEVC and AV1 MP4 tracks require their codec configuration boxes (`hvcC` or `av1C`). The output preserves their sample entry type and configuration bytes.
-- AV1 uses a continuous decode clock aligned with presentation time. A delayed start uses `tfdt`. Timelines that would require composition offsets or a decode discontinuity are rejected before writing, including AV1 concatenations that create a gap between video segments.
-- MP4 edit lists support leading empty edits followed by a single media edit at rate 1. Empty-only lists, additional edits after the media edit, non-unit media rates, video prefix edits that trim any part of a frame, and finite media edits that trim a sample's presentation end are rejected during preflight for selected tracks instead of silently changing playback. A zero-duration media edit remains open-ended; movie-timescale rounding is tolerated.
+- AV1 uses the same timestamp for decoding and presentation. Delayed video starts and gaps followed by a keyframe use the fragment's `tfdt` timestamp, preserving the gap without adding or extending video frames. Overlaps and gaps before a delta frame are rejected during preflight.
+- MP4 edit lists support leading empty edits followed by a single media edit at rate 1. Audio starts at the edit's playable position. Copy mode drops complete audio packets before the edit. The first segment can retain an intersecting packet and hide its trimmed portion with an output edit. An edit that starts inside an audio packet in a later segment requires `normalizeAudio: true`. A tail edit can shorten the final presented video frame. Audio tail edits discard packets wholly outside the edit and shorten the final intersecting packet while retaining its payload. Selected tracks fail preflight for empty-only lists, additional edits after the media edit, non-unit rates, video prefix trims, and edits that exclude an entire video sample. A zero-duration media edit remains open-ended. Movie-timescale rounding is tolerated.
 - Multiple track fragments (`traf`) for the same track within one `moof` are rejected during preflight instead of silently dropping packets.
 - Jobs capture the submitted segment list and top-level job/options fields. Later changes to the caller's arrays or option fields do not alter an active job; the referenced signal and storage resources remain live.
 - Selected encrypted MP4 tracks are rejected during preflight, including unsupported encryption schemes or missing sample encryption metadata. Unselected protected tracks can be discarded.
-- Selected segments must match track layouts, codec strings, decoder-description bytes, dimensions/aspect/color configuration, sample rate/channel count, and video transformation. Every video segment must start with a keyframe. Matching is strict and can reject files needing normalization.
-- MP4 numeric color identifiers from nclx or nclc are carried into the output and used to compare segments.
+- Selected segments must match track layouts, codec strings, decoder-description bytes, dimensions/aspect/color configuration, sample rate/channel count, and video transformation. Each retained video segment starts with a keyframe. Matching is strict and can reject files needing normalization.
+- MP4 numeric color identifiers from nclx or nclc and MKV Colour fields representable in nclx are carried into the output and used to compare segments.
 - Video sample aspect ratios remain exact across repeated remuxes. Compatibility compares reduced display aspect ratios, so proportional display dimensions match. Explicit MP4 `pasp` signaling takes precedence over SPS metadata regardless of box order.
-- Each segment's earliest selected presentation timestamp becomes the preceding segment's presentation end, preserving internal A/V offsets and gaps. Single remux/combine also normalize earliest PTS to zero, including negative AAC pre-roll. Delay/padding remains; gapless audio is not guaranteed.
+- Each segment's earliest playable timestamp becomes the preceding segment's presentation end, preserving internal A/V offsets and gaps. Single remux/combine normalize the earliest playable timestamp to zero. Codec delay and padding may remain where the input does not provide an edit. Gapless audio is not guaranteed.
 - Packet order stays decode order. B-frame PTS is not sorted before copying. Output timestamps round to their container timescale.
 - Preflight plans each track's decode lead across all segments. Output uses nonnegative composition offsets and media edits to preserve the shared presentation origin in players; header durations include the complete presentation tail.
 - Sample durations and nonnegative composition offsets must fit unsigned 32-bit output track units. Values outside these ranges reject the operation instead of wrapping.
-- FLV DTS must increase within a track; rollover/discontinuities require separate segments. Video duration comes from the next DTS/end marker; the final frame uses the previous interval, or 1/30 second for a lone frame without an end marker. AAC duration comes from its configuration.
+- FLV DTS must increase within a track; rollover/discontinuities require separate segments. Video duration comes from the next DTS/end marker; the final frame uses the previous interval, or 1/30 second for a lone frame without an end marker. AAC duration comes from its configuration. MP3 sample rate, channel count, and frame duration come from the MPEG audio header. A tag timestamps its first MP3 frame, and additional frames use successive frame durations.
+- MKV block timestamps carry PTS. The output keeps decode order and applies the track timestamp scale and codec delay. Video uses block or track duration when declared. Missing durations use the final PTS interval, or 1/30 second with no such interval. AAC decode durations come from its configuration.
 - Progress phases are `inspect`, `remux`, and `finalize`. `bytesProcessed` counts encoded payload, excluding container overhead. Worker packet progress is throttled to 250 ms; phase transitions always report. Inspection scans timing metadata before output is created.
 
 </details>
@@ -425,7 +432,7 @@ Input tables/indexes are paged and padding is skipped by range. Output uses two 
 
 These are bounds on specific structures, not constant total memory or a process-peak guarantee. Individual packets, codec/metadata boxes, source caches, track count, caller inputs, and runtime overhead have separate costs. Long GOPs use temporary disk/sorting I/O. OPFS must accommodate inputs, output, and spools; actual quota/I/O errors are authoritative. There is no arbitrary maximum file size or disk-space reservation.
 
-Remuxing copies encoded data without decoding/re-encoding. Throughput depends on payload size, packet count, metadata scans, GOP shape, and storage. Use `tests/browser/benchmark.html` to measure real OPFS/Worker timing for selected local files; input loading is excluded and startup, inspection, copying, and finalization are included. Results are machine/browser-specific. See the [measured baseline](./docs/performance.md).
+Copy-mode throughput depends on payload size, packet count, metadata scans, GOP shape, and storage. Audio normalization adds a decode, resample, and encode pass and uses an additional temporary audio spool. Use `tests/browser/benchmark.html` to measure real OPFS/Worker timing for selected local files; input loading is excluded and startup, inspection, copying, and finalization are included. Results are machine/browser-specific. See the [measured baseline](./docs/performance.md).
 
 </details>
 

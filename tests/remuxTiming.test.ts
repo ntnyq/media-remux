@@ -42,15 +42,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
 
     const copies = operation === 'concat' ? 2 : 1
     // Combining preserves the shared A/V offset rather than normalizing video alone.
-    const timelineStart =
-      operation === 'combine'
-        ? Math.min(
-            start,
-            ...(await packets(await fixture('audio.m4a'), 'audio')).map(
-              packet => packet.timestamp,
-            ),
-          )
-        : start
+    const timelineStart = operation === 'combine' ? Math.min(start, 0) : start
     const repeated = memoryTarget()
     const repeatedResult = await remuxMedia(target.blob(), {
       storage: await diskStorage(),
@@ -191,9 +183,9 @@ test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
     const audio = await fixture('audio.m4a')
     const sources = [
       await packets(video, 'video'),
-      await packets(audio, 'audio'),
+      await packets(audio, 'audio', { applyAudioEdit: true }),
     ]
-    const start = Math.min(...sources.flat().map(packet => packet.timestamp))
+    const start = Math.min(0, ...sources[0]!.map(packet => packet.timestamp))
     const target = memoryTarget()
     const result = await combineTracks(video, audio, {
       storage: await diskStorage(),

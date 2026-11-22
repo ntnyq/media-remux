@@ -888,6 +888,7 @@ const toPixelAspectRatio = (num: number, den: number) => {
 };
 export interface InputAudioTrackBacking extends InputTrackBacking {
     getType(): 'audio';
+    getMediaEditStart?(): number | undefined;
     getCodec(): MaybePromise<AudioCodec | null>;
     getNumberOfChannels(): MaybePromise<number>;
     getSampleRate(): MaybePromise<number>;
@@ -907,6 +908,10 @@ export class InputAudioTrack extends InputTrack {
     }
     get type(): TrackType {
         return 'audio';
+    }
+    /** @internal The presentation timestamp of the first playable audio sample position. */
+    getMediaEditStart() {
+        return this._backing.getMediaEditStart?.();
     }
     /** The codec of the track's packets. */
     async getCodec(): Promise<AudioCodec | null> {

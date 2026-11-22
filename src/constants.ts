@@ -28,6 +28,12 @@ export const REMUX_TRACK_SELECTION = {
    * Require a primary video track in every input and retain audio when present.
    */
   videoWithOptionalAudio: 'video-with-optional-audio',
+
+  /**
+   * Require the first video track and retain the first audio track when present.
+   * Both are selected in file order.
+   */
+  firstVideoWithOptionalAudio: 'first-video-with-optional-audio',
 } as const
 
 /**
@@ -168,6 +174,16 @@ export const MEDIA_CODEC = {
    * AAC audio.
    */
   aac: 'aac',
+
+  /**
+   * MPEG Layer III audio.
+   */
+  mp3: 'mp3',
+
+  /**
+   * Dolby Digital (AC-3) audio.
+   */
+  ac3: 'ac3',
 } as const
 
 /**

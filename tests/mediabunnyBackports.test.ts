@@ -180,7 +180,11 @@ test('signals one packet of AAC seek pre-roll in each applicable fragment', asyn
 
   expect(
     (await packets(output, 'audio')).map(packet => packet.data),
-  ).toStrictEqual((await packets(input, 'audio')).map(packet => packet.data))
+  ).toStrictEqual(
+    (await packets(input, 'audio', { applyAudioEdit: true })).map(
+      packet => packet.data,
+    ),
+  )
 })
 
 test('remuxes AAC-LC FLV with a channel layout in the program config element', async () => {

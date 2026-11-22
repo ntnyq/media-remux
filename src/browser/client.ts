@@ -21,6 +21,9 @@ import type { MediaJob, MediaJobOptions, MediaJobResult } from './types'
  * @throws {TypeError} If the operation is unsupported.
  */
 function captureJob(job: MediaJob): MediaJob {
+  const { normalizeAudio } = job
+  const audioOptions = normalizeAudio === undefined ? {} : { normalizeAudio }
+
   switch (job.operation) {
     case MEDIA_JOB_OPERATION.remux: {
       const { input, tracks } = job
@@ -28,6 +31,7 @@ function captureJob(job: MediaJob): MediaJob {
       return {
         operation: MEDIA_JOB_OPERATION.remux,
         input,
+        ...audioOptions,
         ...(tracks === undefined ? {} : { tracks }),
       }
     }
@@ -37,6 +41,7 @@ function captureJob(job: MediaJob): MediaJob {
       return {
         operation: MEDIA_JOB_OPERATION.concat,
         inputs: [...inputs],
+        ...audioOptions,
         ...(tracks === undefined ? {} : { tracks }),
       }
     }
@@ -45,6 +50,7 @@ function captureJob(job: MediaJob): MediaJob {
         operation: MEDIA_JOB_OPERATION.combine,
         video: job.video,
         audio: job.audio,
+        ...audioOptions,
       }
     }
     default: {
@@ -297,7 +303,36 @@ export async function runMediaJob(
       try {
         activeWorker.postMessage(request)
       } catch (error) {
-        finish(error)
+        if (
+          !(error instanceof DOMException) ||
+          error.name !== 'DataCloneError'
+        ) {
+          finish(error)
+
+          return
+        }
+
+        // Some WebKit versions reject structured cloning OPFS handles. Resolve
+        // the job from the Worker's own root while retaining parent ownership.
+        void (async () => {
+          const path = settings.directory
+            ? await (
+                await globalThis.navigator?.storage?.getDirectory()
+              )?.resolve(temporary)
+            : [name]
+
+          if (!path?.length) {
+            throw error
+          }
+
+          if (!isSettled) {
+            activeWorker.postMessage({
+              type: WORKER_MESSAGE_TYPE.run,
+              job: submittedJob,
+              path,
+            } satisfies WorkerRequest)
+          }
+        })().catch(finish)
       }
     })
 

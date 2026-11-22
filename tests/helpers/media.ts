@@ -161,9 +161,14 @@ export function memoryTarget(strategy?: QueuingStrategy<MediaOutputChunk>) {
  *
  * @param blob - Media file to inspect.
  * @param kind - Track kind to collect.
+ * @param options - Whether to omit complete audio packets outside the media edit.
  * @returns Packet bytes, types, timestamps, and durations, or an empty array if absent.
  */
-export async function packets(blob: Blob, kind: 'video' | 'audio') {
+export async function packets(
+  blob: Blob,
+  kind: 'video' | 'audio',
+  options?: { applyAudioEdit: boolean },
+) {
   const input = await openMediaInput(blob)
 
   try {
@@ -174,8 +179,17 @@ export async function packets(blob: Blob, kind: 'video' | 'audio') {
     }
 
     const encoded = []
+    const editStart = options?.applyAudioEdit ? track.audioEditStart : undefined
 
     for await (const packet of track.packets()) {
+      if (
+        editStart !== undefined &&
+        packet.timestamp < editStart &&
+        packet.timestamp + packet.duration <= editStart + 1e-9
+      ) {
+        continue
+      }
+
       encoded.push({
         data: packet.data,
         type: packet.type,

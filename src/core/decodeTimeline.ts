@@ -1,4 +1,8 @@
-import { MEDIA_CODEC, REMUX_ERROR_CODE } from '../constants'
+import {
+  FRAGMENT_SAMPLE_TYPE,
+  MEDIA_CODEC,
+  REMUX_ERROR_CODE,
+} from '../constants'
 import { createRemuxError } from '../errors'
 import { GLOBAL_TIMESCALE } from '../vendor/mediabunny/src/isobmff/isobmff-muxer'
 import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
@@ -7,10 +11,10 @@ import type { PacketTrack } from './input/mediaInput'
 import type { SegmentInfo } from './mediaTracks'
 
 /**
- * Plans continuous decode clocks without retaining individual packet metadata.
+ * Plans decode clocks without retaining individual packet metadata.
  * The earliest PTS minus elapsed decode time determines each track's required
- * decode lead. AV1 instead requires the decode clock to match presentation
- * time, including any delay relative to the other tracks.
+ * decode lead. AV1 matches presentation time and permits forward jumps at
+ * keyframes to represent gaps with a new fragment decode base.
  *
  * @param tracks - Output tracks in muxer order; video uses the default MP4 timescale.
  * @returns A bounded accumulator shared by segment inspections and output setup.
@@ -24,9 +28,12 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
     remainder: 0,
     decodeStartUnits: 0,
     segmentMinimum: Infinity,
-    segmentMaximum: -Infinity,
     segmentStart: Infinity,
     segmentEnd: -Infinity,
+    segmentLastAv1Timestamp: -Infinity,
+    segmentAv1DecodeEnd: -Infinity,
+    av1DecodeEnd: -Infinity,
+    hasLeadingTrim: false,
     start: Infinity,
     end: -Infinity,
   }))
@@ -38,10 +45,15 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
      *
      * @param index - Zero-based output track position.
      * @param packet - Packet retaining the source decode duration.
+     * @param presentationStart - Visible start after any track-level audio edit.
      * @returns Nothing.
      * @throws {Error} If source decode timing is missing.
      */
-    addPacket(index: number, packet: EncodedPacket) {
+    addPacket(
+      index: number,
+      packet: EncodedPacket,
+      presentationStart = packet.timestamp,
+    ) {
       const clock = clocks[index]
       const duration = packet.sideData.decodeDuration
 
@@ -52,20 +64,39 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
         )
       }
 
-      const decodeOrigin = packet.timestamp - clock.units / clock.timescale
+      if (clock.isAv1) {
+        const tick = 1 / clock.timescale
+        const gap = packet.timestamp - clock.segmentAv1DecodeEnd
 
-      clock.segmentMinimum = Math.min(clock.segmentMinimum, decodeOrigin)
-      clock.segmentMaximum = Math.max(clock.segmentMaximum, decodeOrigin)
-      clock.segmentStart = Math.min(clock.segmentStart, packet.timestamp)
+        if (
+          packet.timestamp < clock.segmentLastAv1Timestamp ||
+          gap < -tick ||
+          (gap > tick && packet.type !== FRAGMENT_SAMPLE_TYPE.key)
+        ) {
+          throw createRemuxError(
+            REMUX_ERROR_CODE.unsupportedMediaFeature,
+            'AV1 decode time must match presentation time with gaps only at keyframes.',
+          )
+        }
+
+        clock.segmentLastAv1Timestamp = packet.timestamp
+        clock.segmentAv1DecodeEnd = packet.timestamp + duration
+      } else {
+        const decodeOrigin = packet.timestamp - clock.units / clock.timescale
+        const precise = duration * clock.timescale + clock.remainder
+        const units = Math.round(precise)
+
+        clock.segmentMinimum = Math.min(clock.segmentMinimum, decodeOrigin)
+        clock.remainder = precise - units
+        clock.units += units
+      }
+
+      clock.hasLeadingTrim ||= presentationStart > packet.timestamp
+      clock.segmentStart = Math.min(clock.segmentStart, presentationStart)
       clock.segmentEnd = Math.max(
         clock.segmentEnd,
         packet.timestamp + packet.duration,
       )
-      const precise = duration * clock.timescale + clock.remainder
-      const units = Math.round(precise)
-
-      clock.remainder = precise - units
-      clock.units += units
     },
 
     /**
@@ -76,31 +107,27 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
      */
     finishSegment(info: SegmentInfo) {
       for (const clock of clocks) {
+        if (clock.segmentStart === Infinity) {
+          // Audio can end before a trimmed segment's video starts.
+          continue
+        }
+
         const segmentStart = clock.segmentStart - info.start + elapsed
-        const earliestOrigin = clock.segmentMinimum - info.start + elapsed
 
         if (clock.isAv1) {
-          if (clock.start === Infinity) {
-            clock.decodeStartUnits = Math.round(segmentStart * clock.timescale)
-          }
-
-          // Independently rounding the starting PTS and cumulative decode
-          // durations can differ from rounding the final PTS by one tick.
-          const earliest = Math.round(earliestOrigin * clock.timescale)
-          const latest = Math.round(
-            (clock.segmentMaximum - info.start + elapsed) * clock.timescale,
-          )
-
-          if (
-            earliest < clock.decodeStartUnits - 1 ||
-            latest > clock.decodeStartUnits + 1
-          ) {
+          if (clock.av1DecodeEnd - segmentStart > 1 / clock.timescale) {
             throw createRemuxError(
               REMUX_ERROR_CODE.unsupportedMediaFeature,
-              'AV1 timeline requires composition offsets or a decode discontinuity.',
+              'AV1 decode time overlaps the previous segment.',
             )
           }
+
+          clock.av1DecodeEnd = clock.segmentAv1DecodeEnd - info.start + elapsed
+          clock.segmentAv1DecodeEnd = -Infinity
+          clock.segmentLastAv1Timestamp = -Infinity
         } else {
+          const earliestOrigin = clock.segmentMinimum - info.start + elapsed
+
           clock.decodeStartUnits = Math.min(
             clock.decodeStartUnits,
             Math.floor(earliestOrigin * clock.timescale),
@@ -108,7 +135,6 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
         }
 
         clock.segmentMinimum = Infinity
-        clock.segmentMaximum = -Infinity
         clock.start = Math.min(clock.start, segmentStart)
         clock.end = Math.max(clock.end, clock.segmentEnd - info.start + elapsed)
         clock.segmentStart = Infinity
@@ -132,8 +158,9 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
             decodeStart: clock.isAv1
               ? clock.start
               : clock.decodeStartUnits / clock.timescale,
-            presentationStart: clock.start,
-            presentationEnd: clock.end,
+            presentationStart: clock.start === Infinity ? 0 : clock.start,
+            presentationEnd: clock.end === -Infinity ? 0 : clock.end,
+            ...(clock.hasLeadingTrim ? { hasLeadingTrim: true } : {}),
           },
         ]),
       )

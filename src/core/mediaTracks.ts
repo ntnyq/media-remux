@@ -3,6 +3,7 @@
 import { checkAbort } from '../abort'
 import {
   FRAGMENT_SAMPLE_TYPE,
+  MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
@@ -14,13 +15,14 @@ import { simplifyRational } from '../vendor/mediabunny/src/misc'
 import type { Rational } from '../vendor/mediabunny/src/misc'
 import type { DecodeTimeline } from './decodeTimeline'
 import type { MediaInput, PacketTrack } from './input/mediaInput'
+import { isIndependentMp3Frame } from './input/mp3Frame'
 
 /**
  * Validated presentation timeline shared by all selected tracks in a segment.
  */
 export interface SegmentInfo {
   /**
-   * Earliest selected packet presentation timestamp in seconds, possibly negative.
+   * Earliest playable timestamp in seconds, possibly negative.
    */
   start: number
 
@@ -28,6 +30,12 @@ export interface SegmentInfo {
    * Positive span in seconds from start through the latest selected packet end.
    */
   duration: number
+
+  /** Number of packets discarded from the beginning of each selected track. */
+  skippedPackets?: readonly number[]
+
+  /** Retained audio presentation bounds before the common segment shift. */
+  audioRange?: { start: number; end: number }
 }
 
 /**
@@ -43,12 +51,15 @@ export function selectTracks(
   input: MediaInput,
   selection: RemuxOptions['tracks'],
 ): PacketTrack[] {
+  const requiresVideo =
+    selection === REMUX_TRACK_SELECTION.videoWithOptionalAudio ||
+    selection === REMUX_TRACK_SELECTION.firstVideoWithOptionalAudio
   const tracks = input.tracks
     .filter(
       track =>
         !selection ||
         selection === REMUX_TRACK_SELECTION.all ||
-        selection === REMUX_TRACK_SELECTION.videoWithOptionalAudio ||
+        requiresVideo ||
         track.kind === selection,
     )
     .toSorted((left, right) => {
@@ -59,10 +70,7 @@ export function selectTracks(
       return left.kind === MEDIA_TRACK_KIND.video ? -1 : 1
     })
 
-  if (
-    selection === REMUX_TRACK_SELECTION.videoWithOptionalAudio &&
-    tracks[0]?.kind !== MEDIA_TRACK_KIND.video
-  ) {
+  if (requiresVideo && tracks[0]?.kind !== MEDIA_TRACK_KIND.video) {
     throw createRemuxError(
       REMUX_ERROR_CODE.missingRequiredTrack,
       'Input has no required video track.',
@@ -152,16 +160,19 @@ export function trackSignature(track: PacketTrack): string {
 
 /**
  * Scans packet metadata to validate tracks and determine their shared timeline.
- * Every track must contain packets, and each video track must start with a
- * keyframe. Encoded payloads are not requested during this inspection.
+ * Video must start with a keyframe. H.264 MP4 with leading delta packets can
+ * advance to a verified IDR, skipping earlier audio on the same timeline.
+ * Inspection reads payloads only to verify a video or MP3 cut point.
  *
- * @param tracks - Selected tracks whose metadata iterators can be consumed.
+ * @param tracks - Selected tracks in video-before-audio order.
  * @param signal - Optional cancellation signal checked for each packet.
  * @param decodeTimeline - Optional output decode-clock planner shared across segments.
+ * @param normalizeAudio - Collect the retained audio span for WebCodecs processing.
+ * @param isFirstSegment - Whether a track-level edit can hide leading audio.
  * @returns A promise resolving to the earliest presentation timestamp and the
  * duration through the latest packet end, both measured in seconds.
- * @throws {Error} If timing or packet size is invalid, a track is empty, a video
- * starts without a keyframe, or the combined timeline has no positive duration.
+ * @throws {Error} If timing or packet size is invalid, a source track is empty,
+ * video has no usable start, or the combined timeline has no positive duration.
  * Also propagates errors from packet iterators.
  * @throws The signal's abort reason if cancellation is detected.
  */
@@ -169,12 +180,22 @@ export async function inspectTracks(
   tracks: PacketTrack[],
   signal?: AbortSignal,
   decodeTimeline?: DecodeTimeline,
+  normalizeAudio = false,
+  isFirstSegment = true,
 ): Promise<SegmentInfo> {
   let start = Infinity
   let end = -Infinity
+  let trimBefore: number | undefined
+  let audioRange: SegmentInfo['audioRange']
+  const skippedPackets: number[] = []
 
   for (const [index, track] of tracks.entries()) {
+    const processesAudio =
+      normalizeAudio && track.kind === MEDIA_TRACK_KIND.audio
+    const { audioEditStart } = track
     let count = 0
+    let skipped = 0
+    let firstVideoSequence: number | undefined
     let maxTimestamp = -Infinity
     let maxTimestampBeforeLastKeyPacket = -Infinity
 
@@ -195,13 +216,85 @@ export async function inspectTracks(
 
       if (
         count === 0 &&
+        skipped === 0 &&
         track.kind === MEDIA_TRACK_KIND.video &&
         packet.type !== FRAGMENT_SAMPLE_TYPE.key
       ) {
-        throw createRemuxError(
-          REMUX_ERROR_CODE.unsupportedMediaFeature,
-          'Each video segment must begin with a keyframe.',
-        )
+        if (!track.findNextRandomAccessPacket) {
+          throw createRemuxError(
+            REMUX_ERROR_CODE.unsupportedMediaFeature,
+            'Each video segment must begin with a keyframe.',
+          )
+        }
+
+        const key = await track.findNextRandomAccessPacket(packet)
+
+        checkAbort(signal)
+
+        if (!key) {
+          throw createRemuxError(
+            REMUX_ERROR_CODE.unsupportedMediaFeature,
+            'H.264 MP4 has no decodable keyframe after its leading dependent frames.',
+          )
+        }
+
+        firstVideoSequence = key.sequenceNumber
+        trimBefore = key.timestamp
+      }
+
+      if (
+        (firstVideoSequence !== undefined &&
+          packet.sequenceNumber !== firstVideoSequence) ||
+        (track.kind === MEDIA_TRACK_KIND.audio &&
+          count === 0 &&
+          trimBefore !== undefined &&
+          packet.timestamp < trimBefore)
+      ) {
+        skipped++
+        continue
+      }
+
+      firstVideoSequence = undefined
+      let presentationStart = packet.timestamp
+
+      if (count === 0 && track.kind === MEDIA_TRACK_KIND.audio) {
+        if (audioEditStart !== undefined && packet.timestamp < audioEditStart) {
+          const duration = Math.min(
+            packet.duration,
+            packet.sideData.decodeDuration ?? packet.duration,
+          )
+
+          if (packet.timestamp + duration <= audioEditStart + 1e-9) {
+            skipped++
+            continue
+          }
+
+          if (!processesAudio && !isFirstSegment) {
+            throw createRemuxError(
+              REMUX_ERROR_CODE.unsupportedMediaFeature,
+              'An MP4 audio edit that starts inside a packet in a later segment requires normalizeAudio.',
+            )
+          }
+
+          presentationStart = audioEditStart
+        }
+
+        if (!processesAudio && skipped > 0 && track.codec === MEDIA_CODEC.mp3) {
+          const retained = track.packets(false, skipped)
+
+          try {
+            const first = await retained.next()
+
+            if (first.done || !isIndependentMp3Frame(first.value.data)) {
+              throw createRemuxError(
+                REMUX_ERROR_CODE.unsupportedMediaFeature,
+                'The first retained MP3 frame requires preceding audio data. Use normalizeAudio to trim this track.',
+              )
+            }
+          } finally {
+            await retained.return()
+          }
+        }
       }
 
       // Match the muxer's GOP timing constraint before acquiring the output.
@@ -218,21 +311,32 @@ export async function inspectTracks(
       }
 
       maxTimestamp = Math.max(maxTimestamp, packet.timestamp)
-      decodeTimeline?.addPacket(index, packet)
+
+      if (processesAudio) {
+        audioRange ??= { start: presentationStart, end: -Infinity }
+        audioRange.end = Math.max(
+          audioRange.end,
+          packet.timestamp + packet.duration,
+        )
+      } else {
+        decodeTimeline?.addPacket(index, packet, presentationStart)
+      }
 
       // B-frame presentation timestamps can arrive out of order. Inspect every
       // packet rather than treating the first decoded packet as the start.
-      start = Math.min(start, packet.timestamp)
+      start = Math.min(start, presentationStart)
       end = Math.max(end, packet.timestamp + packet.duration)
       count++
     }
 
-    if (count === 0) {
+    if (count + skipped === 0 || firstVideoSequence !== undefined) {
       throw createRemuxError(
         REMUX_ERROR_CODE.invalidInput,
         `The ${track.kind} track has no packets.`,
       )
     }
+
+    skippedPackets.push(skipped)
   }
 
   if (!(end > start)) {
@@ -242,7 +346,12 @@ export async function inspectTracks(
     )
   }
 
-  const info = { start, duration: end - start }
+  const info = {
+    start,
+    duration: end - start,
+    ...(skippedPackets.some(count => count > 0) ? { skippedPackets } : {}),
+    ...(audioRange === undefined ? {} : { audioRange }),
+  }
 
   decodeTimeline?.finishSegment(info)
 

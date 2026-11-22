@@ -141,6 +141,137 @@ function tags(bytes: Uint8Array) {
   return entries
 }
 
+test('copies MP3 frames and H.264 B frames with their shared FLV timing', async () => {
+  const flv = await fixture('progressive-mp3.flv')
+  const bytes = Buffer.from(await flv.arrayBuffer())
+  const audioTags = tags(bytes).filter(tag => tag.type === 8)
+  const video = await packets(flv, 'video')
+  const start = Math.min(...video.map(packet => packet.timestamp))
+  const target = memoryTarget()
+
+  await remuxMedia(flv, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+
+  const output = target.blob()
+  const input = await openMediaInput(output)
+
+  try {
+    const track = input.tracks.find(candidate => candidate.kind === 'audio')!
+
+    expect(track).toMatchObject({
+      codec: 'mp3',
+      config: { sampleRate: 44_100, numberOfChannels: 1 },
+    })
+
+    for await (const packet of track.packets(true)) {
+      expect(packet.sideData.decodeDuration).toBeCloseTo(1152 / 44_100, 4)
+    }
+  } finally {
+    input.dispose()
+  }
+
+  const audio = await packets(output, 'audio')
+
+  expect(audio.length).toBeGreaterThan(1)
+  expect(audio).toHaveLength(audioTags.length)
+  expect(audio[0]!.timestamp).toBeCloseTo(0.125, 4)
+
+  for (const [index, packet] of audio.entries()) {
+    const { offset, size } = audioTags[index]!
+    const timestamp = bytes.readUIntBE(offset + 4, 3) / 1000
+
+    expect(packet.data).toStrictEqual(
+      Uint8Array.from(bytes.subarray(offset + 12, offset + 11 + size)),
+    )
+    expect(packet.timestamp).toBeCloseTo(timestamp - start, 4)
+  }
+
+  const copiedVideo = await packets(output, 'video')
+
+  expect(copiedVideo.map(packet => packet.data)).toStrictEqual(
+    video.map(packet => packet.data),
+  )
+
+  for (const [index, packet] of copiedVideo.entries()) {
+    expect(packet.timestamp).toBeCloseTo(video[index]!.timestamp - start, 4)
+  }
+})
+
+test('splits FLV tags carrying multiple low-rate MP3 frames', async () => {
+  const flv = await fixture('mp3-11025hz.flv')
+  const bytes = Buffer.from(await flv.arrayBuffer())
+  const [first, second] = tags(bytes).filter(tag => tag.type === 8)
+  const headers = bytes.subarray(first!.offset, first!.offset + 12)
+  const firstFrame = bytes.subarray(
+    first!.offset + 12,
+    first!.offset + 11 + first!.size,
+  )
+  const secondFrame = bytes.subarray(
+    second!.offset + 12,
+    second!.offset + 11 + second!.size,
+  )
+  const size = 1 + firstFrame.length + secondFrame.length
+  const tail = Buffer.alloc(4)
+
+  headers.writeUIntBE(size, 1, 3)
+  tail.writeUInt32BE(11 + size)
+
+  const combined = new Blob([
+    bytes.subarray(0, first!.offset),
+    headers,
+    firstFrame,
+    secondFrame,
+    tail,
+    bytes.subarray(second!.offset + 11 + second!.size + 4),
+  ])
+  const target = memoryTarget()
+  const result = await remuxMedia(combined, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const expected = await packets(flv, 'audio')
+  const actual = await packets(target.blob(), 'audio')
+
+  expect(result.mimeType).toBe('audio/mp4')
+  expect(actual.map(packet => packet.data)).toStrictEqual(
+    expected.map(packet => packet.data),
+  )
+  expect(actual[1]!.timestamp).toBeCloseTo(576 / 11_025, 4)
+  expect(actual[2]!.timestamp).toBeCloseTo(0.104, 4)
+})
+
+test.each([
+  { name: 'invalid frame length', byte: 2, mask: 0x10, code: 'INVALID_INPUT' },
+  {
+    name: 'changing channel count',
+    byte: 3,
+    mask: 0xc0,
+    code: 'UNSUPPORTED_MEDIA_FEATURE',
+  },
+])(
+  'rejects MP3 $name before writing FLV output',
+  async ({ byte, mask, code }) => {
+    const bytes = Buffer.from(
+      await (await fixture('progressive-mp3.flv')).arrayBuffer(),
+    )
+    const second = tags(bytes).filter(tag => tag.type === 8)[1]!
+    const index = second.offset + 12 + byte
+
+    bytes[index] = bytes[index]! ^ mask
+    const target = memoryTarget()
+
+    await expect(
+      remuxMedia(new Blob([bytes]), {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toMatchObject({ code })
+    expect(target.state.writes).toStrictEqual([])
+  },
+)
+
 /**
  * Replaces the AAC sequence header without changing any encoded media payload.
  *
@@ -403,7 +534,7 @@ test('rejects unsupported FLV codecs before writing output', async () => {
     }),
   ).rejects.toMatchObject({
     code: 'UNSUPPORTED_CODEC',
-    message: 'FLV supports only H.264 video and AAC audio.',
+    message: 'FLV supports only H.264 video and AAC or MP3 audio.',
   })
   expect(target.state.writes).toStrictEqual([])
 })

@@ -103,7 +103,9 @@ function av1FragmentStarts(data: Buffer) {
  * @returns Payload/flag pairs in decode order.
  */
 async function encodedPackets(input: Blob, kind: 'video' | 'audio') {
-  return (await packets(input, kind)).map(({ data, type }) => ({ data, type }))
+  return (await packets(input, kind, { applyAudioEdit: true })).map(
+    ({ data, type }) => ({ data, type }),
+  )
 }
 
 // These SPS NAL units share the same 4:3, full-range BT.709 VUI after the
@@ -161,7 +163,7 @@ test.each([
   },
 )
 
-test('preserves AV1 configuration and the AAC preroll offset without composition offsets', async () => {
+test('preserves AV1 configuration and drops excluded AAC preroll without delaying video', async () => {
   const input = await fixture('av1-main10.mp4')
   const sourceBytes = Buffer.from(await input.arrayBuffer())
   const sourceConfig = boxPayload(videoEntry(sourceBytes).children, 'av1C')
@@ -173,9 +175,8 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
   const audio = await fixture('audio.m4a')
   const sourceVideo = await packets(video, 'video')
   const sourceAudio = await packets(audio, 'audio')
-  const start = sourceAudio[0]!.timestamp
 
-  expect(start).toBeLessThan(sourceVideo[0]!.timestamp)
+  expect(sourceAudio[0]!.timestamp).toBeLessThan(sourceVideo[0]!.timestamp)
 
   const target = memoryTarget()
 
@@ -195,7 +196,7 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
 
   expect(compatibleBrands).toContain('av01')
   expect(av1FragmentStarts(data)[0]).toBe(
-    BigInt(Math.round((sourceVideo[0]!.timestamp - start) * videoTimescale)),
+    BigInt(Math.round(sourceVideo[0]!.timestamp * videoTimescale)),
   )
 
   const outputVideo = await packets(output, 'video')
@@ -207,9 +208,9 @@ test('preserves AV1 configuration and the AAC preroll offset without composition
 
     expect(actual.data).toStrictEqual(original.data)
     expect(actual.type).toBe(original.type)
-    expect(
-      Math.abs(actual.timestamp - (original.timestamp - start)),
-    ).toBeLessThanOrEqual(1 / videoTimescale)
+    expect(Math.abs(actual.timestamp - original.timestamp)).toBeLessThanOrEqual(
+      1 / videoTimescale,
+    )
     expect(Math.abs(actual.duration - original.duration)).toBeLessThanOrEqual(
       1 / videoTimescale,
     )
@@ -390,27 +391,76 @@ test.each([
   },
 )
 
-test('rejects a cross-segment AV1 video gap before acquiring the output', async () => {
+test('preserves an AV1 video gap across a segment boundary and repeated remux', async () => {
   const video = await fixture('av1-main10.mp4')
   const audio = await fixture('audio.m4a')
   const combined = memoryTarget()
 
   // The audio extends beyond the video in each segment.
-  await combineTracks(video, audio, {
+  const reference = await combineTracks(video, audio, {
     storage: await diskStorage(),
     writable: combined.writable,
   })
   const clip = combined.blob()
   const target = memoryTarget()
 
-  await expect(
-    concatMedia([clip, clip], {
-      storage: await diskStorage(),
-      writable: target.writable,
-    }),
-  ).rejects.toThrow(
-    /AV1 timeline requires composition offsets or a decode discontinuity/u,
-  )
-  expect(target.state.writes).toStrictEqual([])
-  expect(target.writable.locked).toBe(false)
+  const result = await concatMedia([clip, clip], {
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+  const output = target.blob()
+  const repeated = memoryTarget()
+
+  await remuxMedia(output, {
+    storage: await diskStorage(),
+    writable: repeated.writable,
+  })
+
+  const sourceVideo = await packets(clip, 'video')
+  const sourceAudio = await packets(clip, 'audio')
+  const tick = 1 / videoTimescale
+  const lastVideo = sourceVideo.at(-1)!
+  const secondVideoStart = reference.duration + sourceVideo[0]!.timestamp
+  const gap = secondVideoStart - lastVideo.timestamp - lastVideo.duration
+
+  expect(gap).toBeGreaterThan(0.7)
+  expect(result.duration).toBeCloseTo(2 * reference.duration, 4)
+
+  for (const file of [output, repeated.blob()]) {
+    const starts = av1FragmentStarts(Buffer.from(await file.arrayBuffer()))
+
+    expect(starts).toContain(
+      BigInt(Math.round(secondVideoStart * videoTimescale)),
+    )
+
+    for (const [kind, source] of [
+      ['video', sourceVideo],
+      ['audio', sourceAudio],
+    ] as const) {
+      const actual = await packets(file, kind)
+      const expected = [...source, ...source]
+
+      expect(
+        actual.map(packet => ({ data: packet.data, type: packet.type })),
+      ).toStrictEqual(
+        expected.map(packet => ({
+          data: packet.data,
+          type: packet.type,
+        })),
+      )
+
+      for (const [index, packet] of actual.entries()) {
+        const original = expected[index]!
+        const shift = index < source.length ? 0 : reference.duration
+
+        expect(packet.timestamp).toBeCloseTo(original.timestamp + shift, 4)
+
+        const durationTolerance = kind === 'video' ? tick : 1 / 48_000
+
+        expect(
+          Math.abs(packet.duration - original.duration),
+        ).toBeLessThanOrEqual(durationTolerance + Number.EPSILON)
+      }
+    }
+  }
 })

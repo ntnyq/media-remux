@@ -12,6 +12,11 @@ import { createRemuxError, withRemuxErrorCode } from '../../errors'
 import type { RemuxTrackSelection } from '../../types'
 import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
 import {
+  AvcNalUnitType,
+  extractNalUnitTypeForAvc,
+  iterateAvcNalUnits,
+} from '../../vendor/mediabunny/src/codec-data'
+import {
   Input,
   UnsupportedInputFormatError,
 } from '../../vendor/mediabunny/src/input'
@@ -26,6 +31,8 @@ import type { TransformationMatrix } from '../../vendor/mediabunny/src/misc'
 import type { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
 import { openFlvInput } from './flvInput'
+import { MKV_ID } from './mkvElements'
+import { openMkvInput } from './mkvInput'
 
 /**
  * Supported encoded track with its decoder configuration and repeatable packet reader.
@@ -57,21 +64,31 @@ export interface PacketTrack {
    */
   containerColorInformation?: IsobmffColorInformation
 
+  /** First playable position in an MP4 audio edit, on the packet timeline. */
+  audioEditStart?: number
+
   /**
-   * Creates a fresh packet iterator in decode order, starting at the first packet.
+   * Creates a fresh packet iterator in decode order.
    *
    * @param metadataOnly - Whether to omit encoded payload bytes while retaining
    * packet timing, kind, and byte lengths; defaults to false.
+   * @param skipPackets - Number of leading packets to skip in decode order.
    * @returns An asynchronous generator yielding encoded packets until track end.
    * @throws If packet parsing fails or the input's cancellation signal is aborted.
    */
   packets: (
     metadataOnly?: boolean,
+    skipPackets?: number,
   ) => AsyncGenerator<EncodedPacket, void, unknown>
+
+  /** Finds an independently decodable sync sample after an initial delta packet. */
+  findNextRandomAccessPacket?: (
+    packet: EncodedPacket,
+  ) => Promise<EncodedPacket | null>
 }
 
 /**
- * Open MP4 or FLV input with selected primary tracks and owned parser resources.
+ * Open MP4, FLV, or MKV input with selected tracks and owned parser resources.
  */
 export interface MediaInput {
   /**
@@ -110,23 +127,38 @@ function classifyMp4Error(error: unknown): unknown {
   return error
 }
 
-/**
- * Track selection applied when opening an individual input.
- */
-export type InputTrackSelection = Exclude<
-  RemuxTrackSelection,
-  typeof REMUX_TRACK_SELECTION.videoWithOptionalAudio
->
+/** An IDR resets H.264 reference pictures and can start Chrome playback. */
+function isAvcIdrPacket(packet: EncodedPacket, config: VideoDecoderConfig) {
+  for (const { offset, length } of iterateAvcNalUnits(packet.data, config)) {
+    const header = packet.data[offset]
+
+    if (
+      header === undefined ||
+      length < 1 ||
+      offset + length > packet.byteLength
+    ) {
+      return false
+    }
+
+    const type = extractNalUnitTypeForAvc(header)
+
+    if (type >= AvcNalUnitType.NON_IDR_SLICE && type <= AvcNalUnitType.IDR) {
+      return type === AvcNalUnitType.IDR
+    }
+  }
+
+  return false
+}
 
 /**
- * Opens the selected primary encoded tracks from an MP4 or FLV Blob.
- * Detects FLV by its leading signature and otherwise attempts MP4 parsing.
+ * Opens the selected encoded tracks from an MP4, FLV, or MKV Blob.
+ * Detects FLV and EBML by signature and otherwise attempts MP4 parsing.
  * Packet iterators read in decode order and can omit encoded payloads during
  * metadata inspection. The caller must dispose the returned input after use.
  *
  * @param blob - Nonempty source media Blob.
  * @param signal - Optional cancellation signal used during opening and iteration.
- * @param selection - Track kinds to open; defaults to all supported primary tracks.
+ * @param selection - Track kinds and ordering to use; defaults to both primary tracks.
  * @returns A promise resolving to track configurations, packet iterators, and
  * a disposer. The track list may be empty if the selected kind is absent.
  * @throws {TypeError} If the input is not a nonempty Blob.
@@ -137,7 +169,7 @@ export type InputTrackSelection = Exclude<
 export async function openMediaInput(
   blob: Blob,
   signal?: AbortSignal,
-  selection: InputTrackSelection = REMUX_TRACK_SELECTION.all,
+  selection: RemuxTrackSelection = REMUX_TRACK_SELECTION.all,
 ): Promise<MediaInput> {
   checkAbort(signal)
 
@@ -152,12 +184,19 @@ export async function openMediaInput(
     )
   }
 
-  const magic = new Uint8Array(await blob.slice(0, 3).arrayBuffer())
+  const magic = new Uint8Array(await blob.slice(0, 4).arrayBuffer())
 
   checkAbort(signal)
 
   if (magic[0] === 0x46 && magic[1] === 0x4c && magic[2] === 0x56) {
     return openFlvInput(blob, signal, selection)
+  }
+
+  if (
+    magic.length === 4 &&
+    new DataView(magic.buffer).getUint32(0) === MKV_ID.header
+  ) {
+    return openMkvInput(blob, signal, selection)
   }
 
   const input = new Input({
@@ -176,15 +215,21 @@ export async function openMediaInput(
 
   try {
     const tracks: PacketTrack[] = []
+    const inFileOrder =
+      selection === REMUX_TRACK_SELECTION.firstVideoWithOptionalAudio
 
-    for (const track of [
-      selection === REMUX_TRACK_SELECTION.audio
-        ? null
-        : await input.getPrimaryVideoTrack(),
-      selection === REMUX_TRACK_SELECTION.video
-        ? null
-        : await input.getPrimaryAudioTrack(),
-    ]) {
+    const selected = inFileOrder
+      ? [(await input.getVideoTracks())[0], (await input.getAudioTracks())[0]]
+      : [
+          selection === REMUX_TRACK_SELECTION.audio
+            ? null
+            : await input.getPrimaryVideoTrack(),
+          selection === REMUX_TRACK_SELECTION.video
+            ? null
+            : await input.getPrimaryAudioTrack(),
+        ]
+
+    for (const track of selected) {
       checkAbort(signal)
 
       if (track) {
@@ -209,11 +254,13 @@ export async function openMediaInput(
           codec !== MEDIA_CODEC.avc &&
           codec !== MEDIA_CODEC.hevc &&
           codec !== MEDIA_CODEC.av1 &&
-          codec !== MEDIA_CODEC.aac
+          codec !== MEDIA_CODEC.aac &&
+          codec !== MEDIA_CODEC.mp3 &&
+          codec !== MEDIA_CODEC.ac3
         ) {
           throw createRemuxError(
             REMUX_ERROR_CODE.unsupportedCodec,
-            `Unsupported codec: ${codec}. Expected H.264, HEVC, AV1, or AAC.`,
+            `Unsupported codec: ${codec}. Expected H.264, HEVC, AV1, AAC, MP3, or AC-3.`,
           )
         }
 
@@ -236,9 +283,19 @@ export async function openMediaInput(
           )
         }
 
+        if (codec === MEDIA_CODEC.ac3 && config.description?.byteLength !== 3) {
+          throw createRemuxError(
+            REMUX_ERROR_CODE.invalidInput,
+            'Missing or invalid dac3 configuration in MP4 audio track.',
+          )
+        }
+
         const sink = new EncodedPacketSink(track)
         const containerColorInformation = track.isVideoTrack()
           ? track.getContainerColorInformation()
+          : undefined
+        const audioEditStart = track.isAudioTrack()
+          ? track.getMediaEditStart()
           : undefined
 
         tracks.push({
@@ -251,25 +308,64 @@ export async function openMediaInput(
             ? { matrix: await track.getTransformationMatrix() }
             : {}),
           ...(containerColorInformation && { containerColorInformation }),
+          ...(audioEditStart === undefined ? {} : { audioEditStart }),
+          ...(codec === MEDIA_CODEC.avc && !('sampleRate' in config)
+            ? {
+                async findNextRandomAccessPacket(packet: EncodedPacket) {
+                  try {
+                    let candidate = await sink.getNextKeyPacket(packet)
+
+                    while (candidate) {
+                      checkAbort(signal)
+
+                      if (isAvcIdrPacket(candidate, config)) {
+                        return candidate
+                      }
+
+                      candidate = await sink.getNextKeyPacket(candidate)
+                    }
+
+                    checkAbort(signal)
+
+                    return null
+                  } catch (error) {
+                    checkAbort(signal)
+
+                    throw classifyMp4Error(error)
+                  }
+                },
+              }
+            : {}),
 
           /**
            * Walks this MP4 track in decode order with bounded packet reads.
            *
            * @param metadataOnly - Whether to omit encoded payloads; defaults to false.
+           * @param skipPackets - Number of leading packets to skip without reading payloads.
            * @returns An asynchronous generator that completes without a return value.
            * @yields {EncodedPacket} Packets retaining source timing and sequence numbers.
            * @throws If packet reading fails or the cancellation signal is aborted.
            */
-          async *packets(metadataOnly = false) {
+          async *packets(metadataOnly = false, skipPackets = 0) {
             try {
               checkAbort(signal)
-              let packet = await sink.getFirstPacket({ metadataOnly })
+              let packet = await sink.getFirstPacket({
+                metadataOnly: metadataOnly || skipPackets > 0,
+              })
 
               while (packet) {
                 checkAbort(signal)
-                yield packet
-                checkAbort(signal)
-                packet = await sink.getNextPacket(packet, { metadataOnly })
+
+                if (skipPackets > 0) {
+                  skipPackets--
+                } else {
+                  yield packet
+                  checkAbort(signal)
+                }
+
+                packet = await sink.getNextPacket(packet, {
+                  metadataOnly: metadataOnly || skipPackets > 0,
+                })
               }
 
               checkAbort(signal)

@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, isRemuxError, remuxMedia } from '../src'
 import type { RemuxOptions, RemuxProgress, RemuxResult } from '../src'
+import { openMediaInput } from '../src/core/input/mediaInput'
 import { fixture, diskStorage, memoryTarget, packets } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
@@ -47,7 +48,7 @@ test('checks multiple MP4 sample descriptions only on selected tracks', async ()
     writable: target.writable,
   })
 
-  const source = await packets(input, 'audio')
+  const source = await packets(input, 'audio', { applyAudioEdit: true })
   const actual = await packets(target.blob(), 'audio')
 
   expect(actual.map(packet => packet.data)).toStrictEqual(
@@ -106,10 +107,9 @@ test('keeps track selection fixed when the caller updates its options during pro
   await concatMedia([input, input], options)
 
   for (const kind of ['video', 'audio'] as const) {
-    const source = await packets(input, kind)
+    const source = await packets(input, kind, { applyAudioEdit: true })
     const output = await packets(target.blob(), kind)
 
-    expect(output).toHaveLength(source.length * 2)
     expect(output.map(packet => packet.data)).toStrictEqual(
       [...source, ...source].map(packet => packet.data),
     )
@@ -300,10 +300,15 @@ test('rejects backwards fragment timestamps before touching any core output', as
   }
 })
 
-test.each(['flv-first', 'mp4-first'] as const)(
-  'concatenates an FLV and its byte-preserving MP4 remux in %s order',
-  async order => {
-    const flv = await fixture('progressive.flv')
+test.each([
+  ['progressive.flv', 'flv-first'],
+  ['progressive.flv', 'mp4-first'],
+  ['progressive-mp3.flv', 'flv-first'],
+  ['progressive-mp3.flv', 'mp4-first'],
+])(
+  'concatenates %s and its byte-preserving MP4 remux in %s order',
+  async (name, order) => {
+    const flv = await fixture(name)
     const remuxed = memoryTarget()
     const summary = await remuxMedia(flv, {
       writable: remuxed.writable,
@@ -357,6 +362,104 @@ test.each(['flv-first', 'mp4-first'] as const)(
     expect(target.state.isClosed).toBe(true)
     expect(target.state.isAborted).toBe(false)
     expect(target.writable.locked).toBe(false)
+  },
+)
+
+test('copies AC-3 and H.264 packets with their configuration and shared timing', async () => {
+  const source = await fixture('progressive-ac3.mp4')
+  const target = memoryTarget()
+
+  await remuxMedia(source, {
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+
+  const output = target.blob()
+  const bytes = Buffer.from(await output.arrayBuffer())
+
+  for (const offset of [bytes.indexOf('mdhd'), bytes.lastIndexOf('mdhd')]) {
+    expect(offset).toBeGreaterThan(0)
+    const duration =
+      bytes[offset + 4] === 1
+        ? bytes.readBigUInt64BE(offset + 28)
+        : BigInt(bytes.readUInt32BE(offset + 20))
+
+    expect(duration).toBe(0n)
+  }
+
+  const input = await openMediaInput(output)
+
+  try {
+    expect(input.tracks.find(track => track.kind === 'audio')).toMatchObject({
+      codec: 'ac3',
+      config: {
+        codec: 'ac-3',
+        sampleRate: 48_000,
+        numberOfChannels: 6,
+        description: Uint8Array.of(0x10, 0x3d, 0xc0),
+      },
+    })
+  } finally {
+    input.dispose()
+  }
+
+  for (const kind of ['video', 'audio'] as const) {
+    const expected = await packets(source, kind)
+    const actual = await packets(output, kind)
+
+    expect(actual.map(packet => packet.data)).toStrictEqual(
+      expected.map(packet => packet.data),
+    )
+    expect(actual[0]!.timestamp).toBeCloseTo(
+      kind === 'audio' ? 9344 / 48_000 : 0,
+      5,
+    )
+
+    for (const [index, packet] of actual.entries()) {
+      expect(packet.timestamp).toBeCloseTo(expected[index]!.timestamp, 5)
+      expect(packet.duration).toBeCloseTo(expected[index]!.duration, 5)
+    }
+  }
+})
+
+test.each(['missing', 'invalid'] as const)(
+  'rejects a selected AC-3 track with %s dac3 before writing',
+  async mutation => {
+    const blob = await fixture('progressive-ac3.mp4')
+    const bytes = Buffer.from(await blob.arrayBuffer())
+    const dac3 = bytes.indexOf('dac3')
+
+    expect(dac3).toBeGreaterThan(0)
+
+    if (mutation === 'missing') {
+      bytes.write('free', dac3, 'ascii')
+    } else {
+      // fscod = 3 is reserved.
+      bytes[dac3 + 4] = bytes[dac3 + 4]! | 0xc0
+    }
+
+    const input = new Blob([bytes])
+    const target = memoryTarget()
+
+    await expect(
+      remuxMedia(input, {
+        storage: await diskStorage(),
+        writable: target.writable,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('dac3'),
+    })
+    expect(target.state.writes).toStrictEqual([])
+
+    const videoOnly = memoryTarget()
+
+    await remuxMedia(input, {
+      tracks: 'video',
+      storage: await diskStorage(),
+      writable: videoOnly.writable,
+    })
+    expect(videoOnly.state.isClosed).toBe(true)
   },
 )
 
@@ -482,16 +585,104 @@ test.each(['regular', 'fragmented'] as const)(
   },
 )
 
-test('rejects video beginning with a dependent frame before touching output', async () => {
+test('starts H.264 MP4 at the first keyframe after leading dependent frames', async () => {
   const input = await fixture('leading-delta.mp4')
+  const target = memoryTarget()
+  const before = await packets(input, 'video')
+  const firstKeyframe = before.findIndex(packet => packet.type === 'key')
+
+  expect(firstKeyframe).toBeGreaterThan(0)
+  await remuxMedia(input, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+
+  const after = await packets(target.blob(), 'video')
+
+  expect(after[0]?.type).toBe('key')
+  expect(after[0]?.timestamp).toBe(0)
+  expect(after.map(packet => packet.data)).toStrictEqual(
+    before.slice(firstKeyframe).map(packet => packet.data),
+  )
+})
+
+test('trims H.264 and AAC on the same presentation timeline', async () => {
+  const input = await fixture('leading-delta-av.mp4')
+  const target = memoryTarget()
+  const video = await packets(input, 'video')
+  const audio = await packets(input, 'audio')
+  const firstKeyframe = video.findIndex(packet => packet.type === 'key')
+  const cutoff = video[firstKeyframe]?.timestamp ?? Infinity
+  const retainedVideo = video.slice(firstKeyframe)
+  const retainedAudio = audio.filter(packet => packet.timestamp >= cutoff)
+
+  expect(firstKeyframe).toBeGreaterThan(0)
+  expect(retainedAudio.length).toBeGreaterThan(0)
+  expect(retainedAudio.length).toBeLessThan(audio.length)
+
+  const result = await remuxMedia(input, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+
+  let expectedBytes = 0
+  let end = 0
+
+  for (const [kind, retained] of [
+    ['video', retainedVideo],
+    ['audio', retainedAudio],
+  ] as const) {
+    const actual = await packets(target.blob(), kind)
+
+    expect(actual.map(packet => packet.data)).toStrictEqual(
+      retained.map(packet => packet.data),
+    )
+
+    for (const [index, packet] of retained.entries()) {
+      expect(actual[index]?.timestamp).toBeCloseTo(packet.timestamp - cutoff, 4)
+      expect(actual[index]?.duration).toBeCloseTo(packet.duration, 4)
+      expectedBytes += packet.data.byteLength
+      end = Math.max(end, packet.timestamp + packet.duration)
+    }
+  }
+
+  expect(result.bytesProcessed).toBe(expectedBytes)
+  expect(result.duration).toBeCloseTo(end - cutoff, 5)
+})
+
+test('rejects a cut MP3 whose first retained frame depends on discarded packets', async () => {
   const target = memoryTarget()
 
   await expect(
-    remuxMedia(input, {
+    remuxMedia(await fixture('leading-delta-mp3.mp4'), {
       writable: target.writable,
       storage: await diskStorage(),
     }),
-  ).rejects.toThrow('begin with a keyframe')
+  ).rejects.toMatchObject({
+    code: 'UNSUPPORTED_MEDIA_FEATURE',
+    message: expect.stringContaining('normalizeAudio'),
+  })
+  expect(target.state.writes).toStrictEqual([])
+  expect(target.writable.locked).toBe(false)
+})
+
+test('rejects a leading-delta MP4 with no decodable sync sample before writing', async () => {
+  const input = await fixture('leading-delta.mp4')
+  const bytes = Buffer.from(await input.arrayBuffer())
+  const stss = bytes.indexOf('stss')
+
+  expect(stss).toBeGreaterThan(0)
+  expect(bytes.readUInt32BE(stss + 8)).toBe(1)
+  // Point the only sync sample entry at a dependent frame.
+  bytes.writeUInt32BE(2, stss + 12)
+  const target = memoryTarget()
+
+  await expect(
+    remuxMedia(new Blob([bytes]), {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toThrow('decodable keyframe')
   expect(target.state.writes).toStrictEqual([])
   expect(target.writable.locked).toBe(false)
 })
@@ -532,7 +723,7 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
     onProgress: event => progress.push(event),
   })
   const beforeVideo = await packets(video, 'video')
-  const beforeAudio = await packets(audio, 'audio')
+  const beforeAudio = await packets(audio, 'audio', { applyAudioEdit: true })
 
   expect(
     beforeVideo.some(
@@ -541,10 +732,6 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
         packet.timestamp < (beforeVideo[index - 1]?.timestamp ?? 0),
     ),
   ).toBe(true)
-  const start = Math.min(
-    ...beforeVideo.map(packet => packet.timestamp),
-    ...beforeAudio.map(packet => packet.timestamp),
-  )
 
   for (const [kind, before] of [
     ['video', beforeVideo],
@@ -560,10 +747,7 @@ test('combines real H.264/AAC without changing encoded bytes or B-frame decode o
     )
 
     for (const [index, packet] of after.entries()) {
-      expect(packet.timestamp).toBeCloseTo(
-        (before[index]?.timestamp ?? 0) - start,
-        4,
-      )
+      expect(packet.timestamp).toBeCloseTo(before[index]!.timestamp, 4)
       expect(packet.duration).toBeCloseTo(before[index]?.duration ?? 0, 4)
     }
   }
@@ -584,7 +768,7 @@ test('extracts an AAC track from progressive MP4 to audio-only fragmented M4A', 
     writable: target.writable,
     storage: await diskStorage(),
   })
-  const before = await packets(blob, 'audio')
+  const before = await packets(blob, 'audio', { applyAudioEdit: true })
   const after = await packets(target.blob(), 'audio')
 
   expect(after.map(packet => packet.data)).toStrictEqual(
@@ -592,10 +776,7 @@ test('extracts an AAC track from progressive MP4 to audio-only fragmented M4A', 
   )
 
   for (const [index, packet] of after.entries()) {
-    expect(packet.timestamp).toBeCloseTo(
-      (before[index]?.timestamp ?? 0) - (before[0]?.timestamp ?? 0),
-      4,
-    )
+    expect(packet.timestamp).toBeCloseTo(before[index]!.timestamp, 4)
   }
 
   await expect(packets(target.blob(), 'video')).resolves.toStrictEqual([])
@@ -671,7 +852,7 @@ test.each(['progressive.mp4', 'progressive.flv', 'video.mp4'] as const)(
     expect(result.mimeType).toBe('video/mp4')
 
     for (const kind of ['video', 'audio'] as const) {
-      const source = await packets(input, kind)
+      const source = await packets(input, kind, { applyAudioEdit: true })
       const output = await packets(target.blob(), kind)
 
       expect(output.map(packet => packet.data)).toStrictEqual(
@@ -681,28 +862,79 @@ test.each(['progressive.mp4', 'progressive.flv', 'video.mp4'] as const)(
   },
 )
 
-test('requires video in every segment before writing', async () => {
-  const audio = await fixture('audio.m4a')
-  const video = await fixture('video.mp4')
-  const target = memoryTarget()
-  const options: RemuxOptions = {
-    tracks: 'video-with-optional-audio',
-    writable: target.writable,
-    storage: await diskStorage(),
-  }
+test.each([
+  ['video-with-optional-audio', 44_100],
+  ['first-video-with-optional-audio', 48_000],
+] as const)(
+  'uses %s to select the requested audio track',
+  async (tracks, sampleRate) => {
+    const input = await fixture('progressive-two-audio.mp4')
+    const target = memoryTarget()
 
-  await expect(remuxMedia(audio, options)).rejects.toSatisfy(
-    (error: unknown) =>
-      isRemuxError(error) && error.code === 'MISSING_REQUIRED_TRACK',
-  )
-  await expect(concatMedia([video, audio], options)).rejects.toMatchObject({
-    code: 'MISSING_REQUIRED_TRACK',
-  })
+    await concatMedia([input, input], {
+      tracks,
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+
+    const output = await openMediaInput(target.blob())
+
+    try {
+      expect(
+        output.tracks.find(track => track.kind === 'audio')?.config,
+      ).toMatchObject({ sampleRate })
+    } finally {
+      output.dispose()
+    }
+  },
+)
+
+test.each([
+  'video-with-optional-audio',
+  'first-video-with-optional-audio',
+] as const)(
+  'requires video in every segment before writing with %s',
+  async tracks => {
+    const audio = await fixture('audio.m4a')
+    const video = await fixture('video.mp4')
+    const target = memoryTarget()
+    const options: RemuxOptions = {
+      tracks,
+      writable: target.writable,
+      storage: await diskStorage(),
+    }
+
+    await expect(remuxMedia(audio, options)).rejects.toSatisfy(
+      (error: unknown) =>
+        isRemuxError(error) && error.code === 'MISSING_REQUIRED_TRACK',
+    )
+    await expect(concatMedia([video, audio], options)).rejects.toMatchObject({
+      code: 'MISSING_REQUIRED_TRACK',
+    })
+    await expect(
+      concatMedia([video, await fixture('progressive.mp4')], options),
+    ).rejects.toMatchObject({
+      code: 'INCOMPATIBLE_SEGMENTS',
+    })
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
+  },
+)
+
+test('rejects an AAC sample-rate change in copy mode before writing', async () => {
+  const inputs = await Promise.all([
+    fixture('progressive.mp4'),
+    fixture('progressive-two-audio.mp4'),
+  ])
+  const target = memoryTarget()
+
   await expect(
-    concatMedia([video, await fixture('progressive.mp4')], options),
-  ).rejects.toMatchObject({
-    code: 'INCOMPATIBLE_SEGMENTS',
-  })
+    concatMedia(inputs, {
+      tracks: 'video-with-optional-audio',
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({ code: 'INCOMPATIBLE_SEGMENTS' })
   expect(target.state.writes).toStrictEqual([])
   expect(target.writable.locked).toBe(false)
 })
@@ -801,6 +1033,9 @@ test('produces files independently accepted and decoded by FFmpeg when available
     for (const name of [
       'progressive.mp4',
       'progressive.flv',
+      'progressive-mp3.flv',
+      'progressive-ac3.mp4',
+      'progressive.mkv',
       'vfr-bframes.mp4',
       'subtitle-first.mp4',
       'hevc-hvc1.mp4',

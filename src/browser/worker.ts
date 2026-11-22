@@ -1,4 +1,5 @@
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
+/* oxlint-disable no-await-in-loop -- OPFS path components resolve from parent to child. */
 import {
   MEDIA_JOB_OPERATION,
   REMUX_PROGRESS_PHASE,
@@ -55,6 +56,24 @@ export interface MediaWorkerScope {
 }
 
 /**
+ * Opens the parent's existing OPFS job files using the Worker's own root.
+ */
+async function openJobFiles(path: readonly string[]) {
+  let temporary = await globalThis.navigator.storage.getDirectory()
+
+  for (const component of path) {
+    temporary = await temporary.getDirectoryHandle(component)
+  }
+
+  const [handle, directory] = await Promise.all([
+    temporary.getFileHandle('output.mp4'),
+    temporary.getDirectoryHandle('spools'),
+  ])
+
+  return { handle, directory }
+}
+
+/**
  * Installs the job protocol in a dedicated Worker entry. One job is accepted per
  * Worker. The parent owns termination, including interruption of synchronous I/O.
  * Progress, completion, and serialized errors are posted to the parent. Invalid
@@ -104,10 +123,13 @@ export function installMediaWorker(
         throw new TypeError('Invalid media Worker request.')
       }
 
-      writer = await request.handle.createWritable()
+      const { handle, directory } =
+        request.path === undefined ? request : await openJobFiles(request.path)
+
+      writer = await handle.createWritable()
       const activeWriter = writer
 
-      storage = createOpfsStorage(request.directory)
+      storage = createOpfsStorage(directory)
       const writable = new WritableStream<MediaOutputChunk>({
         /**
          * Forwards a positioned container write to the job's output file.
@@ -160,6 +182,7 @@ export function installMediaWorker(
         writable,
         storage,
         onProgress,
+        ...(request.job.normalizeAudio ? { normalizeAudio: true } : {}),
         ...('tracks' in request.job && request.job.tracks
           ? { tracks: request.job.tracks }
           : {}),

@@ -516,8 +516,11 @@ export class IsobmffMuxer extends Muxer {
             requiresAdtsStripping = true;
         }
         if (!packet) {
-            if (track.source._codec === 'ac3' || track.source._codec === 'eac3') {
-                throw new Error('AC-3/E-AC-3 require a priming packet.');
+            if (track.source._codec === 'ac3' && !decoderConfig.description) {
+                throw new Error('AC-3 requires a dac3 description or a priming packet.');
+            }
+            if (track.source._codec === 'eac3') {
+                throw new Error('E-AC-3 requires a priming packet.');
             }
             if (track.source._codec === 'dts') {
                 throw new Error('DTS requires a priming packet.');
@@ -780,9 +783,21 @@ export class IsobmffMuxer extends Muxer {
             trackData.lastCueEndTimestamp = sampleEnd;
         }
     }
+    private usesPlannedAv1Clock(trackData: IsobmffTrackData) {
+        return this.formatOptions._fragmentSampleStore !== undefined
+            && this.formatOptions._fragmentTrackTimings?.has(trackData.track.id) === true
+            && trackData.track.source._codec === 'av1';
+    }
     private createSampleForTrack(trackData: IsobmffTrackData, data: Uint8Array, timestamp: number, duration: number, type: PacketType, decodeDuration?: number) {
         let decodeUnits = intoTimescale(duration, trackData.timescale);
-        if (decodeDuration !== undefined) {
+        if (this.usesPlannedAv1Clock(trackData)) {
+            // AV1 uses the same decode and presentation timestamps. Round the
+            // two endpoints together so starts and durations share one clock.
+            const start = intoTimescale(timestamp, trackData.timescale);
+            decodeUnits = intoTimescale(timestamp + (decodeDuration ?? duration), trackData.timescale) - start;
+            timestamp = start / trackData.timescale;
+        }
+        else if (decodeDuration !== undefined) {
             // Carry sub-tick precision across samples instead of rounding every
             // source delta independently (e.g. 30000/1001 fps into 57600 Hz).
             const preciseUnits = intoTimescale(decodeDuration, trackData.timescale, false)
@@ -807,7 +822,6 @@ export class IsobmffMuxer extends Muxer {
             return;
         const store = this.formatOptions._fragmentSampleStore!;
         const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.track.id)?.decodeStart;
-        const usesAv1Clock = decodeStart !== undefined && track.track.source._codec === 'av1';
         if (!track.storedGopHasDecodeDurations || (decodeStart === undefined && !track.lastSample)) {
             await store.sort(track.track.id, track.storedGopStart, track.storedGopCount);
         }
@@ -824,14 +838,6 @@ export class IsobmffMuxer extends Muxer {
                     ? Math.round(track.lastTimescaleUnits!) + track.lastSample.timescaleUnitsToNextSample
                     : intoTimescale(decodeStart ?? await store.sorted(track.track.id, 0), track.timescale);
                 sample.decodeTimestamp = units / track.timescale;
-                if (usesAv1Clock) {
-                    // AV1 forbids composition offsets. Preflight allows only
-                    // the one-tick rounding difference between PTS and DTS.
-                    if (Math.abs(intoTimescale(sample.timestamp, track.timescale) - units) > 1) {
-                        throw new Error('AV1 timeline requires composition offsets or a decode discontinuity.');
-                    }
-                    sample.timestamp = sample.decodeTimestamp;
-                }
                 track.lastTimescaleUnits = units;
                 await store.set(track.track.id, id, { ...sample, mediaOffset: sample.mediaOffset! });
                 track.lastSample = sample;
@@ -1206,16 +1212,37 @@ export class IsobmffMuxer extends Muxer {
         }
     }
     private async registerSample(trackData: IsobmffTrackData, sample: Sample) {
-        if (sample.type === 'key') {
+        const store = this.formatOptions._fragmentSampleStore;
+        const plannedAv1 = this.usesPlannedAv1Clock(trackData);
+        if (store && plannedAv1) {
+            const previous = trackData.lastSample;
+            if (previous) {
+                const delta = intoTimescale(sample.timestamp - previous.timestamp, trackData.timescale);
+                const gap = delta - previous.timescaleUnitsToNextSample;
+                if (delta < 0 || gap < -1 || (gap > 1 && sample.type !== 'key')) {
+                    throw new Error('AV1 decode time must match presentation time with gaps only at keyframes.');
+                }
+                // Resolve single-tick quantization at adjacent samples. A
+                // larger forward gap is represented by the next fragment.
+                if (gap !== 0 && Math.abs(gap) <= 1) {
+                    assert(previous.storeId !== undefined);
+                    const row = await store.get(trackData.track.id, previous.storeId);
+                    await store.set(trackData.track.id, previous.storeId, { ...row, timescaleUnitsToNextSample: delta });
+                }
+            }
+        }
+        else if (sample.type === 'key') {
             await this.processTimestamps(trackData, sample);
         }
-        const store = this.formatOptions._fragmentSampleStore;
         if (store) {
             assert(sample.data);
             sample.storeId = await store.append(trackData.track.id, sample, sample.data);
             sample.data = null;
             trackData.storedQueueEnd = sample.storeId + 1;
-            if (trackData.storedGopCount++ === 0) {
+            if (plannedAv1) {
+                trackData.lastSample = sample;
+            }
+            else if (trackData.storedGopCount++ === 0) {
                 trackData.storedGopStart = sample.storeId;
                 trackData.storedGopHasDecodeDurations = sample.hasDecodeDuration === true;
             }
@@ -1228,6 +1255,14 @@ export class IsobmffMuxer extends Muxer {
         trackData.timestampProcessingQueue.push(sample);
         trackData.sampleQueue.push(sample);
         await this.interleaveSamples();
+    }
+    private async startsAv1Gap(trackData: IsobmffTrackData, sample: Sample) {
+        // This is only called when the preceding sample is in the active
+        // chunk. Its finalized duration is still available in the store.
+        assert(sample.storeId !== undefined);
+        const previous = await this.formatOptions._fragmentSampleStore!.get(trackData.track.id, sample.storeId - 1);
+        const delta = intoTimescale(sample.decodeTimestamp - previous.decodeTimestamp, trackData.timescale);
+        return delta > previous.timescaleUnitsToNextSample;
     }
     private async addSampleToTrack(trackData: IsobmffTrackData, sample: Sample) {
         if (!this.isFragmented) {
@@ -1261,9 +1296,10 @@ export class IsobmffMuxer extends Muxer {
                         break;
                     }
                 }
-                if (currentChunkDuration >= this.minimumFragmentDuration
-                    && keyFrameQueuedEverywhere
-                    && sample.timestamp > this.maxWrittenTimestamp) {
+                const av1Gap = sample.type === 'key' && this.usesPlannedAv1Clock(trackData)
+                    && await this.startsAv1Gap(trackData, sample);
+                if (av1Gap || (currentChunkDuration >= this.minimumFragmentDuration
+                    && keyFrameQueuedEverywhere && sample.timestamp > this.maxWrittenTimestamp)) {
                     beginNewChunk = true;
                     await this.finalizeFragment();
                 }

@@ -2,18 +2,21 @@ import type { MEDIA_JOB_OPERATION } from '../constants'
 import type { RemuxProgress, RemuxResult, RemuxTrackSelection } from '../types'
 
 /**
- * One isolated Worker operation, discriminated by operation. Inputs are MP4 or
- * FLV Blobs containing supported encoded video and/or AAC audio.
+ * One isolated Worker operation, discriminated by operation. Inputs are MP4,
+ * FLV, or MKV Blobs containing supported encoded video and/or audio.
  */
-export type MediaJob =
+export type MediaJob = {
+  /** Normalizes selected audio to continuous AAC-LC using WebCodecs. */
+  normalizeAudio?: boolean
+} & (
   | {
       /**
-       * Copies selected primary tracks from a single media input.
+       * Copies selected tracks from a single media input.
        */
       operation: typeof MEDIA_JOB_OPERATION.remux
 
       /**
-       * Nonempty source MP4 or FLV Blob.
+       * Nonempty source MP4, FLV, or MKV Blob.
        */
       input: Blob
 
@@ -29,12 +32,12 @@ export type MediaJob =
       operation: typeof MEDIA_JOB_OPERATION.combine
 
       /**
-       * Nonempty MP4 or FLV Blob supplying the primary video track.
+       * Nonempty MP4, FLV, or MKV Blob supplying the primary video track.
        */
       video: Blob
 
       /**
-       * Nonempty MP4 or FLV Blob supplying the primary AAC audio track.
+       * Nonempty MP4, FLV, or MKV Blob supplying the primary audio track.
        */
       audio: Blob
     }
@@ -46,7 +49,7 @@ export type MediaJob =
 
       /**
        * Nonempty segment list with matching selected track layouts and decoder
-       * configurations. Each Blob must contain nonempty MP4 or FLV media.
+       * configurations. Each Blob must contain nonempty MP4, FLV, or MKV media.
        */
       inputs: readonly Blob[]
 
@@ -55,6 +58,7 @@ export type MediaJob =
        */
       tracks?: RemuxTrackSelection
     }
+)
 
 /**
  * Worker ownership, temporary directory, cancellation, and progress for a browser job.
@@ -79,7 +83,7 @@ export interface MediaJobOptions {
    * Receives Worker progress messages on the parent thread. Remux notifications
    * are throttled in the Worker; phase changes are always reported.
    *
-   * @param progress - Current phase, copied payload bytes, and segment position.
+   * @param progress - Current phase, encoded payload bytes, and segment position.
    * @returns Nothing; asynchronous callback results are not awaited.
    */
   onProgress?: (progress: RemuxProgress) => void

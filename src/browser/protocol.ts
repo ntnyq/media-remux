@@ -12,9 +12,9 @@ import type { RemuxProgress, RemuxResult } from '../types'
 import type { MediaJob } from './types'
 
 /**
- * Parent-to-Worker message requesting one job with explicit output and spool handles.
+ * Parent-to-Worker message requesting one job in an assigned temporary directory.
  */
-export interface WorkerRequest {
+export type WorkerRequest = {
   /**
    * Identifies a request to execute a media job.
    */
@@ -24,18 +24,14 @@ export interface WorkerRequest {
    * Operation and source Blobs to process in the dedicated Worker.
    */
   job: MediaJob
-
-  /**
-   * Output file handle opened by the Worker as a writable stream.
-   */
-  handle: FileSystemFileHandle
-
-  /**
-   * Exclusive temporary spool directory for index, sample, payload, and sort files.
-   * The parent owns directory removal after Worker termination.
-   */
-  directory: FileSystemDirectoryHandle
-}
+} & (
+  | { path: readonly string[] }
+  | {
+      path?: undefined
+      handle: FileSystemFileHandle
+      directory: FileSystemDirectoryHandle
+    }
+)
 
 /**
  * Worker-to-parent progress, completion, or serialized failure message,
@@ -49,7 +45,7 @@ export type WorkerResponse =
       type: typeof WORKER_MESSAGE_TYPE.progress
 
       /**
-       * Current phase, copied payload bytes, and segment position.
+       * Current phase, encoded payload bytes written, and segment position.
        */
       progress: RemuxProgress
     }
@@ -60,7 +56,7 @@ export type WorkerResponse =
       type: typeof WORKER_MESSAGE_TYPE.complete
 
       /**
-       * Completed job's duration, MIME type, and copied encoded payload byte count.
+       * Completed job's duration, MIME type, and written encoded payload byte count.
        */
       result: RemuxResult
     }
@@ -165,23 +161,35 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
     return false
   }
 
-  const { job, handle, directory } = value
+  const { job, handle, directory, path } = value
 
   if (
     !isRecord(job) ||
-    !isRecord(handle) ||
-    !isRecord(directory) ||
-    !isFunction(handle['createWritable']) ||
-    !isFunction(directory['getFileHandle'])
+    (path === undefined
+      ? !isRecord(handle) ||
+        !isRecord(directory) ||
+        !isFunction(handle['createWritable']) ||
+        !isFunction(directory['getFileHandle'])
+      : !Array.isArray(path) ||
+        path.length === 0 ||
+        [...path].some(
+          component =>
+            !isString(component) ||
+            !component ||
+            /[/\\]/u.test(component) ||
+            component === '.' ||
+            component === '..',
+        ))
   ) {
     return false
   }
 
-  const { tracks } = job
+  const { tracks, normalizeAudio } = job
 
   if (
-    tracks !== undefined &&
-    !Object.values<unknown>(REMUX_TRACK_SELECTION).includes(tracks)
+    (tracks !== undefined &&
+      !Object.values<unknown>(REMUX_TRACK_SELECTION).includes(tracks)) ||
+    (normalizeAudio !== undefined && typeof normalizeAudio !== 'boolean')
   ) {
     return false
   }

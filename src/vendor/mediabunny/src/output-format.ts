@@ -125,6 +125,8 @@ export type IsobmffTrackTiming = {
     decodeStart: number;
     presentationStart: number;
     presentationEnd: number;
+    /** Leading decoded audio must be hidden before presentationStart. */
+    hasLeadingTrim?: true;
 };
 /**
  * ISOBMFF-specific output options.
@@ -183,6 +185,8 @@ export type IsobmffOutputFormatOptions = {
     _fragmentSampleStore?: IsobmffSampleStore | undefined;
     /** @internal Complete preflight timing in seconds, keyed by output track ID. */
     _fragmentTrackTimings?: ReadonlyMap<number, IsobmffTrackTiming> | undefined;
+    /** @internal Use zero media header durations when the initialization movie contains no samples. */
+    _fragmentedEmptyMediaHeaders?: boolean | undefined;
     /**
      * When using `fastStart: 'fragmented'`, this field controls the minimum duration of each fragment, in seconds.
      * New fragments will only be created when the current fragment is longer than this value. Defaults to 1 second.

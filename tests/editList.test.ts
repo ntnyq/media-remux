@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, remuxMedia } from '../src'
 import type { RemuxResult } from '../src'
+import { openMediaInput } from '../src/core/input/mediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 
 test.each(['remux', 'combine'] as const)(
@@ -14,7 +15,9 @@ test.each(['remux', 'combine'] as const)(
       ? remuxMedia(input, { ...options, tracks: 'audio' })
       : combineTracks(await fixture('video.mp4'), input, options))
 
-    const source = await packets(await fixture('progressive.mp4'), 'audio')
+    const source = await packets(await fixture('progressive.mp4'), 'audio', {
+      applyAudioEdit: true,
+    })
     const actual = await packets(target.blob(), 'audio')
 
     expect(actual.map(packet => packet.data)).toStrictEqual(
@@ -68,7 +71,9 @@ async function editedMedia(
   for (const [index, edit] of edits.entries()) {
     const offset = 16 + index * entrySize
     const segmentDuration =
-      edit.duration === undefined ? duration : edit.duration * timescale
+      edit.duration === undefined
+        ? duration
+        : Math.round(edit.duration * timescale)
     const start = edit.mediaTime ?? mediaTime
 
     if (version === 1) {
@@ -107,7 +112,9 @@ async function editedMedia(
   const totalDuration = edits.reduce(
     (total, edit) =>
       total +
-      (edit.duration === undefined ? duration : edit.duration * timescale),
+      (edit.duration === undefined
+        ? duration
+        : Math.round(edit.duration * timescale)),
     0,
   )
 
@@ -119,36 +126,43 @@ async function editedMedia(
 }
 
 /**
- * Adds a media edit to a real fragmented video, preserving relative payload offsets.
+ * Adds a media edit to a real fragmented track, preserving relative payload offsets.
  *
  * @param duration - Media edit duration in seconds; zero is open-ended.
  * @param version - Edit list field width: 32-bit for v0 or 64-bit for v1.
  * @param startShift - Extra media ticks to add to the original edit start.
- * @returns Edited input and the unedited fragmented video for packet comparisons.
+ * @param sourceName - Fixture used to generate the fragmented track.
+ * @returns Edited input and the unedited fragmented output for packet comparisons.
  */
 async function fragmentedEditedMedia(
   duration: number,
   version: 0 | 1,
   startShift = 0,
+  sourceName = 'video.mp4',
 ) {
   const target = memoryTarget()
 
-  await remuxMedia(await fixture('video.mp4'), {
+  await remuxMedia(await fixture(sourceName), {
     writable: target.writable,
     storage: await diskStorage(),
   })
   const original = Buffer.from(await target.blob().arrayBuffer())
   const moovStart = original.indexOf('moov') - 4
   const trakStart = original.indexOf('trak') - 4
-  const edtsStartOriginal = original.indexOf('edts') - 4
+  const originalElst = original.indexOf('elst')
+  const hasEdit = originalElst >= 0
+  const edtsStartOriginal = original.indexOf(hasEdit ? 'edts' : 'mdia') - 4
 
   expect(edtsStartOriginal).toBeGreaterThan(trakStart)
-  const originalEditSize = original.readUInt32BE(edtsStartOriginal)
-  const originalElst = original.indexOf('elst')
+  const originalEditSize = hasEdit
+    ? original.readUInt32BE(edtsStartOriginal)
+    : 0
 
-  expect(original[originalElst + 4]).toBe(1)
+  expect(hasEdit ? original[originalElst + 4] : 1).toBe(1)
+
   const mediaTime =
-    Number(original.readBigInt64BE(originalElst + 20)) + startShift
+    (hasEdit ? Number(original.readBigInt64BE(originalElst + 20)) : 0) +
+    startShift
   const mvhd = original.indexOf('mvhd')
   const movieTimescale = original.readUInt32BE(
     mvhd + (original[mvhd + 4] === 1 ? 24 : 16),
@@ -165,10 +179,12 @@ async function fragmentedEditedMedia(
   )
   const elst = edts.indexOf('elst')
 
+  const editDuration = Math.round(duration * movieTimescale)
+
   if (version === 1) {
-    edts.writeBigUInt64BE(BigInt(duration * movieTimescale), elst + 12)
+    edts.writeBigUInt64BE(BigInt(editDuration), elst + 12)
   } else {
-    edts.writeUInt32BE(duration * movieTimescale, elst + 12)
+    edts.writeUInt32BE(editDuration, elst + 12)
   }
 
   // Fragment payloads use moof-relative offsets and move with their moofs.
@@ -195,6 +211,87 @@ async function fragmentedEditedMedia(
 }
 
 test.each([0, 1] as const)(
+  'preserves a v%s partial video tail edit and A/V offset across concatenation',
+  async version => {
+    const videoDelay = 0.067
+    const videoDuration = 1.999
+    const original = await fixture('progressive.mp4')
+    const audio = await packets(original, 'audio', { applyAudioEdit: true })
+    const segmentDuration = videoDelay + videoDuration
+    const input = await editedMedia(
+      [{ mediaTime: -1, duration: videoDelay }, { duration: videoDuration }],
+      version,
+      'progressive.mp4',
+    )
+    const target = memoryTarget()
+    const result = await concatMedia([input, input], {
+      tracks: 'video-with-optional-audio',
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+
+    expect(result.duration).toBeCloseTo(2 * segmentDuration, 4)
+
+    const video = await packets(original, 'video')
+    const videoOutput = await packets(target.blob(), 'video')
+    const audioOutput = await packets(target.blob(), 'audio')
+
+    for (const [source, output, delay] of [
+      [video, videoOutput, videoDelay],
+      [audio, audioOutput, 0],
+    ] as const) {
+      const expected = [...source, ...source]
+
+      expect(output.map(packet => packet.data)).toStrictEqual(
+        expected.map(packet => packet.data),
+      )
+
+      for (const [index, packet] of output.entries()) {
+        expect(packet.timestamp).toBeCloseTo(
+          expected[index]!.timestamp +
+            delay +
+            (index < source.length ? 0 : segmentDuration),
+          4,
+        )
+      }
+    }
+
+    const lastFrame = videoOutput[video.length - 1]!
+
+    expect(lastFrame.timestamp + lastFrame.duration).toBeCloseTo(
+      segmentDuration,
+      4,
+    )
+  },
+)
+
+test.each([0, 1] as const)(
+  'preserves AAC packets when a v%s edit trims the final audio sample',
+  async version => {
+    const input = await editedMedia([{ duration: 1.796 }], version, 'audio.m4a')
+    const original = await packets(await fixture('audio.m4a'), 'audio', {
+      applyAudioEdit: true,
+    })
+    const target = memoryTarget()
+    const result = await concatMedia([input, input], {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+    const output = await packets(target.blob(), 'audio')
+
+    expect(output.map(packet => packet.data)).toStrictEqual(
+      [...original, ...original].map(packet => packet.data),
+    )
+    const segmentDuration = 1.796
+
+    expect(output[original.length - 1]?.duration).toBeCloseTo(0.004, 5)
+    expect(output[original.length]?.timestamp).toBeCloseTo(segmentDuration, 5)
+    expect(output.at(-1)?.duration).toBeCloseTo(0.004, 5)
+    expect(result.duration).toBeCloseTo(2 * segmentDuration, 5)
+  },
+)
+
+test.each([0, 1] as const)(
   'rejects unsupported v%s edit lists before touching any core output',
   async version => {
     const original = await fixture('video.mp4')
@@ -212,7 +309,7 @@ test.each([0, 1] as const)(
         error: /media rate must be 1/u,
       },
       { edits: [{ duration: 0.5 }], error: /media edit trims/u },
-      { edits: [{ duration: 1.99 }], error: /media edit trims/u },
+      { edits: [{ duration: 1.95 }], error: /media edit trims/u },
       {
         edits: [{ mediaTime: -1, duration: 0.75 }, { duration: 0.5 }],
         error: /media edit trims/u,
@@ -271,11 +368,7 @@ test.each([0, 1] as const)(
     )
     const audio = await fixture('audio.m4a')
     const videoPackets = await packets(await fixture('video.mp4'), 'video')
-    const audioPackets = await packets(audio, 'audio')
-    const start = Math.min(
-      ...videoPackets.map(packet => packet.timestamp + delay),
-      ...audioPackets.map(packet => packet.timestamp),
-    )
+    const audioPackets = await packets(audio, 'audio', { applyAudioEdit: true })
     const end = Math.max(
       ...videoPackets.map(packet => packet.timestamp + delay + packet.duration),
       ...audioPackets.map(packet => packet.timestamp + packet.duration),
@@ -298,32 +391,41 @@ test.each([0, 1] as const)(
 
       for (const [index, packet] of output.entries()) {
         expect(packet.timestamp).toBeCloseTo(
-          source[index]!.timestamp + shift - start,
+          source[index]!.timestamp + shift,
           4,
         )
       }
     }
 
-    expect(result.duration).toBeCloseTo(end - start, 4)
+    expect(result.duration).toBeCloseTo(end, 4)
     expect(target.state.isClosed).toBe(true)
     expect(target.writable.locked).toBe(false)
   },
 )
 
 test.each([0, 1] as const)(
-  'rejects v%s AAC tail trimming during preflight',
+  'preserves only the selected prefix of AAC packets for a v%s tail trim',
   async version => {
     const input = await editedMedia([{ duration: 0.5 }], version, 'audio.m4a')
+    const original = await packets(await fixture('audio.m4a'), 'audio', {
+      applyAudioEdit: true,
+    })
     const target = memoryTarget()
+    const result = await remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+    const output = await packets(target.blob(), 'audio')
+    const retained = original.filter(packet => packet.timestamp < 0.5)
 
-    await expect(
-      remuxMedia(input, {
-        writable: target.writable,
-        storage: await diskStorage(),
-      }),
-    ).rejects.toThrow(/media edit trims/u)
-    expect(target.state.writes).toStrictEqual([])
-    expect(target.writable.locked).toBe(false)
+    expect(output.map(packet => packet.data)).toStrictEqual(
+      retained.map(packet => packet.data),
+    )
+    expect(output.at(-1)?.duration).toBeCloseTo(
+      0.5 - retained.at(-1)!.timestamp,
+      5,
+    )
+    expect(result.duration).toBeCloseTo(0.5, 5)
   },
 )
 
@@ -343,16 +445,103 @@ test.each([0, 1] as const)(
       storage: await diskStorage(),
     })
 
-    const source = await packets(await fixture('progressive.mp4'), 'audio')
+    const source = await packets(await fixture('progressive.mp4'), 'audio', {
+      applyAudioEdit: true,
+    })
     const output = await packets(target.blob(), 'audio')
 
     expect(output.map(packet => packet.data)).toStrictEqual(
       source.map(packet => packet.data),
     )
-    expect(output[0]!.timestamp).toBe(0)
+    expect(output[0]!.timestamp).toBeCloseTo(source[0]!.timestamp, 5)
     expect(target.state.isClosed).toBe(true)
   },
 )
+
+test('hides a multi-packet AAC head edit and preserves it across repeated remux', async () => {
+  const input = await fixture('audio-edited-head.m4a')
+  const source = await packets(input, 'audio')
+  const crossing = source.findIndex(
+    packet => packet.timestamp + packet.duration > 0,
+  )
+
+  expect(crossing).toBeGreaterThan(2)
+  expect(source[crossing]!.timestamp).toBeLessThan(0)
+  let media = input
+
+  for (let pass = 0; pass < 2; pass++) {
+    const target = memoryTarget()
+    const result = await remuxMedia(media, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+
+    expect(result.duration).toBeCloseTo(1, 5)
+    media = target.blob()
+    const output = await packets(media, 'audio')
+
+    expect(output.map(packet => packet.data)).toStrictEqual(
+      source.slice(crossing).map(packet => packet.data),
+    )
+    expect(output[0]!.timestamp).toBeCloseTo(source[crossing]!.timestamp, 5)
+  }
+})
+
+test('rejects a partial AAC head edit at a later copy splice before writing', async () => {
+  const input = await fixture('audio-edited-head.m4a')
+  const target = memoryTarget()
+
+  await expect(
+    concatMedia([input, input], {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({
+    code: 'UNSUPPORTED_MEDIA_FEATURE',
+    message: expect.stringContaining('normalizeAudio'),
+  })
+  expect(target.state.writes).toStrictEqual([])
+  expect(target.writable.locked).toBe(false)
+})
+
+test('preserves a delayed partial AAC head edit when combining with video', async () => {
+  const delay = 0.25
+  const audio = await editedMedia(
+    [
+      { mediaTime: -1, duration: delay },
+      { mediaTime: 25_024, duration: 1 },
+    ],
+    1,
+    'audio.m4a',
+  )
+  const video = await fixture('video.mp4')
+  const retained = await packets(audio, 'audio', { applyAudioEdit: true })
+  const target = memoryTarget()
+
+  expect(retained[0]!.timestamp).toBeLessThan(delay)
+  await combineTracks(video, audio, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+
+  const output = target.blob()
+  const media = await openMediaInput(output)
+
+  try {
+    expect(
+      media.tracks.find(track => track.kind === 'audio')?.audioEditStart,
+    ).toBeCloseTo(delay, 5)
+  } finally {
+    media.dispose()
+  }
+
+  const actual = await packets(output, 'audio')
+
+  expect(actual.map(packet => packet.data)).toStrictEqual(
+    retained.map(packet => packet.data),
+  )
+  expect(actual[0]!.timestamp).toBeCloseTo(retained[0]!.timestamp, 5)
+})
 
 test.each([0, 1] as const)(
   'preserves a v%s zero-duration media edit as an open-ended offset',
@@ -376,7 +565,7 @@ test.each([0, 1] as const)(
 test.each([0, 1] as const)(
   'rejects v%s tail edits in fragmented MP4 before writing output',
   async version => {
-    for (const duration of [0.5, 1.99]) {
+    for (const duration of [0.5, 1.95]) {
       const { input } = await fragmentedEditedMedia(duration, version)
       const output = memoryTarget()
 
@@ -393,6 +582,87 @@ test.each([0, 1] as const)(
     }
   },
 )
+
+test.each([0, 1] as const)(
+  'applies a v%s tail edit to fragmented AAC without changing retained packets',
+  async version => {
+    const { input, original } = await fragmentedEditedMedia(
+      0.5,
+      version,
+      0,
+      'audio.m4a',
+    )
+    const target = memoryTarget()
+    const result = await remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+    const source = await packets(original, 'audio')
+    const retained = source.filter(packet => packet.timestamp < 0.5)
+    const output = await packets(target.blob(), 'audio')
+
+    expect(output.map(packet => packet.data)).toStrictEqual(
+      retained.map(packet => packet.data),
+    )
+    expect(output.at(-1)?.duration).toBeCloseTo(
+      0.5 - retained.at(-1)!.timestamp,
+      5,
+    )
+    expect(result.duration).toBeCloseTo(0.5, 5)
+  },
+)
+
+test.each([0, 1] as const)(
+  'preserves a v%s partial video tail edit in fragmented MP4',
+  async version => {
+    const end = 1.99
+    const { input, original } = await fragmentedEditedMedia(end, version)
+    const target = memoryTarget()
+    const result = await remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+    const source = await packets(original, 'video')
+    const output = await packets(target.blob(), 'video')
+
+    expect(
+      output.map(({ data, timestamp }) => ({ data, timestamp })),
+    ).toStrictEqual(source.map(({ data, timestamp }) => ({ data, timestamp })))
+    expect(result.duration).toBeCloseTo(end, 4)
+    expect(output.at(-1)!.timestamp + output.at(-1)!.duration).toBeCloseTo(
+      end,
+      4,
+    )
+  },
+)
+
+test('keeps decode order when the edited final video frame is decoded early', async () => {
+  const end = 4.099
+  const { input, original } = await fragmentedEditedMedia(
+    end,
+    1,
+    0,
+    'vfr-bframes.mp4',
+  )
+  const target = memoryTarget()
+  const result = await remuxMedia(input, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const source = await packets(original, 'video')
+  const output = await packets(target.blob(), 'video')
+
+  expect(
+    output.map(({ data, timestamp }) => ({ data, timestamp })),
+  ).toStrictEqual(source.map(({ data, timestamp }) => ({ data, timestamp })))
+  const lastPresented = output.toSorted(
+    (left, right) => right.timestamp - left.timestamp,
+  )[0]!
+
+  expect(lastPresented.timestamp).toBeGreaterThan(output.at(-1)!.timestamp)
+  expect(lastPresented.timestamp + lastPresented.duration).toBeCloseTo(end, 4)
+  expect(result.duration).toBeCloseTo(end, 4)
+})
 
 test.each([0, 1] as const)(
   'rejects a v%s edit starting partway through the first fragmented video frame',

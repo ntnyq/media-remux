@@ -31,6 +31,7 @@ test.each([
 test.each([
   { tracks: 'audio', isValid: true },
   { tracks: 'video-with-optional-audio', isValid: true },
+  { tracks: 'first-video-with-optional-audio', isValid: true },
   { tracks: ['audio'], isValid: false },
 ])(
   'checks the actual track selection type: $isValid',
@@ -41,6 +42,39 @@ test.each([
         job: { operation: 'remux', input: new Blob(['media']), tracks },
         handle: { createWritable() {} },
         directory: { getFileHandle() {} },
+      }),
+    ).toBe(isValid)
+  },
+)
+
+test.each([
+  { path: ['parent', 'job'], isValid: true },
+  { path: [], isValid: false },
+  { path: ['parent/job'], isValid: false },
+  { path: ['..', 'job'], isValid: false },
+  { path: ['parent', 1], isValid: false },
+])('validates OPFS path components: $path', ({ path, isValid }) => {
+  expect(
+    isWorkerRequest({
+      type: 'run',
+      job: { operation: 'remux', input: new Blob(['media']) },
+      path,
+    }),
+  ).toBe(isValid)
+})
+
+test.each([
+  { normalizeAudio: true, isValid: true },
+  { normalizeAudio: false, isValid: true },
+  { normalizeAudio: 'true', isValid: false },
+])(
+  'validates the audio normalization flag: $normalizeAudio',
+  ({ normalizeAudio, isValid }) => {
+    expect(
+      isWorkerRequest({
+        type: 'run',
+        job: { operation: 'remux', input: new Blob(['media']), normalizeAudio },
+        path: ['job'],
       }),
     ).toBe(isValid)
   },

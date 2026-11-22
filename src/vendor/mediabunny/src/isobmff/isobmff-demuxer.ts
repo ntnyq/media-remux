@@ -1691,15 +1691,25 @@ export class IsobmffDemuxer extends Demuxer {
                     if (!track || track.info?.type !== 'audio') {
                         break;
                     }
+                    if (boxInfo.contentSize !== 3) {
+                        track.trackValidationError ??= new InvalidIsobmffInputError('Invalid dac3 configuration in MP4 audio track.');
+                        break;
+                    }
                     const bytes = readBytes(slice, 3);
+                    track.info.codecDescription = bytes;
                     const bitstream = new Bitstream(bytes);
                     const fscod = bitstream.readBits(2);
-                    bitstream.skipBits(5 + 3); // Skip bsid and bsmod
+                    const bsid = bitstream.readBits(5);
+                    bitstream.skipBits(3); // bsmod
                     const acmod = bitstream.readBits(3);
                     const lfeon = bitstream.readBits(1);
-                    if (fscod < 3) {
-                        track.info.sampleRate = AC3_SAMPLE_RATES[fscod]!;
+                    const bitRateCode = bitstream.readBits(5);
+                    const baseSampleRate = AC3_SAMPLE_RATES[fscod];
+                    if (baseSampleRate === undefined || bsid > 10 || bitRateCode > 18) {
+                        track.trackValidationError ??= new InvalidIsobmffInputError('Invalid dac3 configuration in MP4 audio track.');
+                        break;
                     }
+                    track.info.sampleRate = baseSampleRate >> Math.max(0, bsid - 8);
                     track.info.numberOfChannels = AC3_ACMOD_CHANNEL_COUNTS[acmod]! + lfeon;
                 }
                 ;
@@ -2659,29 +2669,39 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         }
     }
     /**
-     * Rejects video prefix and track tail edits lost when copying every sample.
-     * Use the original media time so leading empty edits and their rounded offsets
-     * do not affect this comparison. Movie-unit rounding permits the edit list's
-     * normal timescale quantization while still rejecting partial-sample cuts.
+     * Retains the intersecting final sample and stops at fully excluded audio.
+     * Use the original media time so leading empty edits do not affect the comparison.
+     * Movie-unit rounding permits the edit list's normal timescale quantization.
      */
-    private validateEditListRange(presentationTimestamp: number, duration: number) {
+    private applyEditListDuration(presentationTimestamp: number, duration: number) {
         const track = this.internalTrack;
         const edit = track.editListMediaEdit;
         if (!edit) {
-            return;
+            return duration;
         }
-        if (track.info?.type === 'video' && presentationTimestamp < edit.mediaTime) {
+        const isVideo = track.info?.type === 'video';
+        if (isVideo && presentationTimestamp < edit.mediaTime) {
             throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims video sample presentation.');
         }
         if (edit.segmentDuration === 0) {
-            return;
+            return duration;
+        }
+        const movieTimescale = track.demuxer.movieTimescale;
+        const mediaEnd = edit.mediaTime + Math.round(edit.segmentDuration / movieTimescale * track.timescale);
+        if (track.info?.type === 'audio' && presentationTimestamp >= mediaEnd) {
+            return null;
         }
         const endInMovieTimescale = Math.round(
-            (presentationTimestamp + duration - edit.mediaTime) / track.timescale * track.demuxer.movieTimescale,
+            (presentationTimestamp + duration - edit.mediaTime) / track.timescale * movieTimescale,
         );
-        if (endInMovieTimescale > edit.segmentDuration) {
-            throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims sample presentation.');
+        if (endInMovieTimescale <= edit.segmentDuration) {
+            return duration;
         }
+        const clippedDuration = mediaEnd - presentationTimestamp;
+        if (clippedDuration > 0) {
+            return clippedDuration;
+        }
+        throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims sample presentation.');
     }
     private assertSupportedTrack() {
         if (this.internalTrack.trackValidationError) {
@@ -2699,7 +2719,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             return null;
         }
         this.validateSampleRange(sampleInfo.sampleOffset, sampleInfo.sampleSize);
-        this.validateEditListRange(sampleInfo.presentationTimestamp, sampleInfo.duration);
+        const duration = this.applyEditListDuration(sampleInfo.presentationTimestamp, sampleInfo.duration);
+        if (duration === null) {
+            return null;
+        }
         let data: Uint8Array;
         if (options.metadataOnly) {
             data = PLACEHOLDER_DATA;
@@ -2728,9 +2751,11 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         }
         const timestamp = (sampleInfo.presentationTimestamp - this.internalTrack.editListOffset)
             / this.internalTrack.timescale;
-        const duration = sampleInfo.duration / this.internalTrack.timescale;
-        const packet = new EncodedPacket(data, sampleInfo.isKeyFrame ? 'key' : 'delta', timestamp, duration, sampleIndex, sampleInfo.sampleSize,
-            { decodeDuration: sampleInfo.decodeDuration / this.internalTrack.timescale });
+        // A trun stores one duration per sample. For a clipped sample, use its edited
+        // duration and let composition offsets retain subsequent presentation times.
+        const decodeDuration = duration === sampleInfo.duration ? sampleInfo.decodeDuration : duration;
+        const packet = new EncodedPacket(data, sampleInfo.isKeyFrame ? 'key' : 'delta', timestamp, duration / this.internalTrack.timescale, sampleIndex, sampleInfo.sampleSize,
+            { decodeDuration: decodeDuration / this.internalTrack.timescale });
         this.packetToSampleIndex.set(packet, sampleIndex);
         return packet;
     }
@@ -2743,7 +2768,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         const fragmentSample = await trackData.samples.get(sampleIndex, !options.metadataOnly);
         assert(fragmentSample);
         this.validateSampleRange(fragmentSample.byteOffset, fragmentSample.byteSize);
-        this.validateEditListRange(fragmentSample.presentationTimestamp, fragmentSample.duration);
+        const duration = this.applyEditListDuration(fragmentSample.presentationTimestamp, fragmentSample.duration);
+        if (duration === null) {
+            return null;
+        }
         let data: Uint8Array;
         if (options.metadataOnly) {
             data = PLACEHOLDER_DATA;
@@ -2766,9 +2794,9 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         }
         const timestamp = (fragmentSample.presentationTimestamp - this.internalTrack.editListOffset)
             / this.internalTrack.timescale;
-        const duration = fragmentSample.duration / this.internalTrack.timescale;
-        const packet = new EncodedPacket(data, fragmentSample.isKeyFrame ? 'key' : 'delta', timestamp, duration, fragment.moofOffset + sampleIndex, fragmentSample.byteSize,
-            { decodeDuration: fragmentSample.decodeDuration / this.internalTrack.timescale });
+        const decodeDuration = duration === fragmentSample.duration ? fragmentSample.decodeDuration : duration;
+        const packet = new EncodedPacket(data, fragmentSample.isKeyFrame ? 'key' : 'delta', timestamp, duration / this.internalTrack.timescale, fragment.moofOffset + sampleIndex, fragmentSample.byteSize,
+            { decodeDuration: decodeDuration / this.internalTrack.timescale });
         this.packetToFragmentLocation.set(packet, { fragment, sampleIndex });
         return packet;
     }
@@ -3031,6 +3059,11 @@ class IsobmffAudioTrackBacking extends IsobmffTrackBacking implements InputAudio
     }
     getType() {
         return 'audio' as const;
+    }
+    getMediaEditStart() {
+        const track = this.internalTrack;
+        const edit = track.editListMediaEdit;
+        return edit ? (edit.mediaTime - track.editListOffset) / track.timescale : undefined;
     }
     override getCodec(): AudioCodec | null {
         return this.internalTrack.info.codec;

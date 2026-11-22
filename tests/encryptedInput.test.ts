@@ -100,7 +100,9 @@ test.each(['video', 'audio'] as const)(
       'ascii',
     )
     const selectedKind = protectedKind === 'video' ? 'audio' : 'video'
-    const source = await packets(original, selectedKind)
+    const source = await packets(original, selectedKind, {
+      applyAudioEdit: true,
+    })
     const target = memoryTarget()
 
     await remuxMedia(new Blob([bytes]), {

@@ -33,7 +33,7 @@ async function listNames(directory) {
   return names.toSorted()
 }
 
-async function playbackTiming(file) {
+async function playbackTiming(file, playToEnd = false, onFrame) {
   const video = document.createElement('video')
 
   video.muted = true
@@ -43,22 +43,40 @@ async function playbackTiming(file) {
   let callback
 
   try {
-    const { promise: frame, resolve, reject } = Promise.withResolvers()
+    const { promise: frame, resolve } = Promise.withResolvers()
+    const { promise: failed, reject } = Promise.withResolvers()
+    const ended = playToEnd
+      ? new Promise(done =>
+          video.addEventListener('ended', done, { once: true }),
+        )
+      : null
 
-    timer = setTimeout(
-      () => reject(new Error('Playback frame timeout')),
-      10_000,
-    )
-    callback = video.requestVideoFrameCallback((_, metadata) =>
-      resolve(metadata.mediaTime),
-    )
+    timer = setTimeout(() => reject(new Error('Playback timed out')), 10_000)
+
+    function observeFrame(_, metadata) {
+      resolve(metadata.mediaTime)
+
+      if (onFrame) {
+        onFrame(metadata.mediaTime)
+        callback = video.requestVideoFrameCallback(observeFrame)
+      }
+    }
+
+    callback = video.requestVideoFrameCallback(observeFrame)
     video.addEventListener(
       'error',
       () => reject(new Error(video.error?.message ?? 'Playback failed')),
       { once: true },
     )
     video.src = url
-    const [firstFrame] = await Promise.all([frame, video.play()])
+    const [firstFrame] = await Promise.race([
+      Promise.all([frame, video.play(), ended]),
+      failed,
+    ])
+
+    if (playToEnd && 'webkitAudioDecodedByteCount' in video) {
+      assert(video.webkitAudioDecodedByteCount > 0, 'No audio was decoded')
+    }
 
     return { firstFrame, duration: video.duration }
   } finally {
@@ -72,7 +90,292 @@ async function playbackTiming(file) {
   }
 }
 
-async function run() {
+async function verifyAv1Splice(video, audio, options) {
+  const clip = await runMediaJob(
+    { operation: MEDIA_JOB_OPERATION.combine, video, audio },
+    options,
+  )
+
+  try {
+    const joined = await runMediaJob(
+      { operation: MEDIA_JOB_OPERATION.concat, inputs: [clip.file, clip.file] },
+      options,
+    )
+
+    try {
+      let previousFrame = 0
+      let longestFrameInterval = 0
+      let resumedAt = 0
+      const actual = await playbackTiming(joined.file, true, timestamp => {
+        const interval = timestamp - previousFrame
+
+        if (interval > longestFrameInterval) {
+          longestFrameInterval = interval
+          resumedAt = timestamp
+        }
+
+        previousFrame = timestamp
+      })
+      const expectedResume = clip.duration
+
+      assert(
+        longestFrameInterval > 0.8 &&
+          Math.abs(resumedAt - expectedResume) < 0.04,
+        'AV1 playback did not retain the gap and resume at the splice',
+      )
+      assert(
+        Math.abs(actual.duration - joined.duration) < 0.001,
+        'AV1 browser duration lost the presentation tail',
+      )
+      checks.push({ playback: 'av1-splice-gap', resumedAt, ...actual })
+    } finally {
+      await joined.dispose()
+    }
+  } finally {
+    await clip.dispose()
+  }
+}
+
+async function verifyEditedAudio(context, options, normalizeAudio) {
+  const input = await fixture('audio-edited-head.m4a')
+  const job = normalizeAudio
+    ? {
+        operation: MEDIA_JOB_OPERATION.concat,
+        inputs: [input, input],
+        normalizeAudio,
+      }
+    : { operation: MEDIA_JOB_OPERATION.remux, input }
+  const result = await runMediaJob(job, options)
+
+  try {
+    const decoded = await context.decodeAudioData(
+      await result.file.arrayBuffer(),
+    )
+    const expectedDuration = normalizeAudio ? 2 : 1
+
+    assert(
+      Math.abs(result.duration - expectedDuration) < 0.001 &&
+        Math.abs(decoded.duration - expectedDuration) < 0.0001,
+      `AAC head edit changed playback duration to ${decoded.duration} seconds`,
+    )
+
+    const pcm = decoded.getChannelData(0)
+
+    for (const start of normalizeAudio ? [0.01, 1.01] : [0.01]) {
+      const window = pcm.subarray(
+        Math.round(start * decoded.sampleRate),
+        Math.round((start + 0.03) * decoded.sampleRate),
+      )
+      let crossings = 0
+
+      for (let index = 1; index < window.length; index++) {
+        if (window[index - 1] <= 0 && window[index] > 0) {
+          crossings++
+        }
+      }
+
+      const frequency = (crossings * decoded.sampleRate) / window.length
+
+      assert(
+        Math.abs(frequency - 990) < 70,
+        `AAC head edit played the wrong tone at ${start}s (${frequency} Hz)`,
+      )
+    }
+
+    checks.push({
+      playback: normalizeAudio
+        ? 'edited-audio-normalized'
+        : 'edited-audio-copy',
+      duration: decoded.duration,
+    })
+  } finally {
+    await result.dispose()
+  }
+}
+
+async function verifyNormalizedAudio(context, video, options) {
+  const encoderConfig = {
+    codec: 'mp4a.40.2',
+    sampleRate: 48_000,
+    numberOfChannels: 2,
+    bitrate: 160_000,
+  }
+
+  if (
+    !context ||
+    typeof AudioEncoder === 'undefined' ||
+    !(await AudioEncoder.isConfigSupported(encoderConfig)).supported
+  ) {
+    return
+  }
+
+  await verifyEditedAudio(context, options, true)
+
+  const [aac48, aac44] = await Promise.all([
+    fixture('progressive.mp4'),
+    fixture('progressive-two-audio.mp4'),
+  ])
+  const result = await runMediaJob(
+    {
+      operation: MEDIA_JOB_OPERATION.concat,
+      inputs: [video, aac48, video, aac44, video],
+      tracks: REMUX_TRACK_SELECTION.videoWithOptionalAudio,
+      normalizeAudio: true,
+    },
+    options,
+  )
+  const element = document.createElement('video')
+  const analyser = context.createAnalyser()
+  const mute = context.createGain()
+
+  mute.gain.value = 0
+  analyser.fftSize = 2048
+  const source = context.createMediaElementSource(element)
+
+  source.connect(analyser).connect(mute).connect(context.destination)
+  document.body.append(element)
+  const url = URL.createObjectURL(result.file)
+  const samples = new Float32Array(analyser.fftSize)
+  const expected = [
+    [1, 0],
+    [3, 440],
+    [5, 0],
+    [6.3, 660],
+    [7.5, 0],
+  ]
+  const observed = []
+  let interval
+  let timeout
+
+  try {
+    const finished = new Promise((resolve, reject) => {
+      element.addEventListener('ended', resolve, { once: true })
+      element.addEventListener(
+        'error',
+        () => reject(new Error(element.error?.message ?? 'Playback failed')),
+        { once: true },
+      )
+      timeout = setTimeout(
+        () => reject(new Error('Normalized audio playback timed out')),
+        15_000,
+      )
+
+      interval = setInterval(() => {
+        const next = expected[observed.length]
+
+        if (!next || element.currentTime < next[0]) {
+          return
+        }
+
+        analyser.getFloatTimeDomainData(samples)
+        let crossings = 0
+
+        for (let index = 1; index < samples.length; index++) {
+          if (samples[index - 1] <= 0 && samples[index] > 0) {
+            crossings++
+          }
+        }
+
+        observed.push({
+          timestamp: element.currentTime,
+          rms: Math.sqrt(
+            samples.reduce((sum, sample) => sum + sample * sample, 0) /
+              samples.length,
+          ),
+          frequency: (crossings * context.sampleRate) / samples.length,
+        })
+      }, 20)
+    })
+
+    element.src = url
+    await Promise.all([element.play(), finished])
+    assert(
+      Math.abs(element.duration - result.duration) < 0.005,
+      `Normalized audio duration ${element.duration} differs from the job duration ${result.duration}`,
+    )
+    assert(observed.length === expected.length, 'Missing audio measurements')
+
+    for (const [index, [timestamp, frequency]] of expected.entries()) {
+      const sample = observed[index]
+
+      assert(
+        sample.timestamp - timestamp < 0.15,
+        'Audio measurement missed its target',
+      )
+      assert(
+        frequency === 0
+          ? sample.rms < 0.002
+          : sample.rms > 0.01 && Math.abs(sample.frequency - frequency) < 30,
+        `Unexpected audio level or pitch at ${timestamp} seconds`,
+      )
+    }
+
+    checks.push({
+      playback: 'normalized-mixed-audio',
+      duration: element.duration,
+      observed,
+    })
+  } finally {
+    clearInterval(interval)
+    clearTimeout(timeout)
+    element.pause()
+    element.removeAttribute('src')
+    element.load()
+    element.remove()
+    source.disconnect()
+    analyser.disconnect()
+    mute.disconnect()
+    URL.revokeObjectURL(url)
+    await result.dispose()
+  }
+
+  if (
+    typeof AudioDecoder === 'undefined' ||
+    !(
+      await AudioDecoder.isConfigSupported({
+        codec: 'mp3',
+        sampleRate: 44_100,
+        numberOfChannels: 1,
+      })
+    ).supported
+  ) {
+    return
+  }
+
+  const mp3 = await runMediaJob(
+    {
+      operation: MEDIA_JOB_OPERATION.remux,
+      input: await fixture('leading-delta-mp3.mp4'),
+      normalizeAudio: true,
+    },
+    options,
+  )
+
+  try {
+    const decoded = await context.decodeAudioData(await mp3.file.arrayBuffer())
+    const pcm = decoded.getChannelData(0)
+    const rms = (start, end) => {
+      const range = pcm.subarray(
+        Math.round(start * decoded.sampleRate),
+        Math.round(end * decoded.sampleRate),
+      )
+
+      return Math.sqrt(
+        range.reduce((sum, sample) => sum + sample * sample, 0) / range.length,
+      )
+    }
+    const before = rms(0.002, 0.015)
+    const firstFrame = rms(0.023, 0.042)
+
+    assert(before < 0.005, 'MP3 preroll leaked into the retained timeline')
+    assert(firstFrame > 0.04, 'First retained MP3 frame decoded as silence')
+    checks.push({ playback: 'normalized-mp3-preroll', before, firstFrame })
+  } finally {
+    await mp3.dispose()
+  }
+}
+
+async function run(audioContext) {
   const root = await navigator.storage.getDirectory()
   const directoryName = `media-remux-browser-test-${crypto.randomUUID()}`
   const directory = await root.getDirectoryHandle(directoryName, {
@@ -85,9 +388,11 @@ async function run() {
     const video = await fixture('video.mp4')
     const audio = await fixture('audio.m4a')
     const flv = await fixture('progressive.flv')
+    const ac3 = await fixture('progressive-ac3.mp4')
     const jobs = [
       { operation: MEDIA_JOB_OPERATION.combine, video, audio },
       { operation: MEDIA_JOB_OPERATION.remux, input: audio },
+      { operation: MEDIA_JOB_OPERATION.remux, input: ac3 },
       {
         operation: MEDIA_JOB_OPERATION.concat,
         inputs: [flv, flv],
@@ -141,22 +446,45 @@ async function run() {
     const vfr = await fixture('vfr-bframes.mp4')
     const vfrFlv = await fixture('vfr-bframes.flv')
     const playbackCases = [
-      [
-        'cfr-av',
-        { operation: MEDIA_JOB_OPERATION.combine, video, audio },
-        1024 / 48_000,
-      ],
+      ['cfr-av', { operation: MEDIA_JOB_OPERATION.combine, video, audio }, 0],
       [
         'vfr-av',
         { operation: MEDIA_JOB_OPERATION.combine, video: vfr, audio },
-        0.4 + 1024 / 48_000,
+        0.4,
       ],
       [
         'vfr-flv-av',
         { operation: MEDIA_JOB_OPERATION.combine, video: vfrFlv, audio },
-        0.4 + 1024 / 48_000,
+        0.4,
       ],
       ['vfr-remux', { operation: MEDIA_JOB_OPERATION.remux, input: vfr }, 0],
+      [
+        'leading-delta-av-remux',
+        {
+          operation: MEDIA_JOB_OPERATION.remux,
+          input: await fixture('leading-delta-av.mp4'),
+        },
+        0,
+        true,
+      ],
+      [
+        'mp3-flv-remux',
+        {
+          operation: MEDIA_JOB_OPERATION.remux,
+          input: await fixture('progressive-mp3.flv'),
+        },
+        0,
+        true,
+      ],
+      [
+        'mkv-remux',
+        {
+          operation: MEDIA_JOB_OPERATION.remux,
+          input: await fixture('progressive.mkv'),
+        },
+        0,
+        true,
+      ],
       [
         'vfr-mp4-flv',
         { operation: MEDIA_JOB_OPERATION.concat, inputs: [vfr, vfrFlv] },
@@ -169,27 +497,29 @@ async function run() {
       ],
     ]
 
-    if (
-      document
-        .createElement('video')
-        .canPlayType('video/mp4; codecs="av01.0.00M.10"')
-    ) {
+    const av1 = document
+      .createElement('video')
+      .canPlayType('video/mp4; codecs="av01.0.00M.10"')
+      ? await fixture('av1-main10.mp4')
+      : null
+
+    if (av1) {
       playbackCases.push([
         'av1-av',
         {
           operation: MEDIA_JOB_OPERATION.combine,
-          video: await fixture('av1-main10.mp4'),
+          video: av1,
           audio,
         },
-        1024 / 48_000,
+        0,
       ])
     }
 
-    for (const [label, job, firstFrame] of playbackCases) {
+    for (const [label, job, firstFrame, playToEnd] of playbackCases) {
       const result = await runMediaJob(job, { createWorker, directory })
 
       try {
-        const actual = await playbackTiming(result.file)
+        const actual = await playbackTiming(result.file, playToEnd)
 
         assert(
           Math.abs(actual.firstFrame - firstFrame) < 0.00005,
@@ -197,13 +527,28 @@ async function run() {
         )
         assert(
           Math.abs(actual.duration - result.duration) < 0.001,
-          `${label}: browser duration lost the presentation tail`,
+          `${label}: browser duration ${actual.duration} differs from job duration ${result.duration}`,
         )
         checks.push({ playback: label, ...actual })
       } finally {
         await result.dispose()
       }
     }
+
+    if (av1) {
+      await verifyAv1Splice(av1, audio, { createWorker, directory })
+    }
+
+    const audioOptions = {
+      createWorker,
+      directory,
+    }
+
+    if (audioContext) {
+      await verifyEditedAudio(audioContext, audioOptions, false)
+    }
+
+    await verifyNormalizedAudio(audioContext, video, audioOptions)
 
     const fractionalAv = await fixture('fractional-av.mp4')
     const concatenated = await runMediaJob(
@@ -271,7 +616,7 @@ async function run() {
       const result = await pending
 
       assert(
-        result.duration > 3.6 && result.duration < 3.7,
+        Math.abs(result.duration - 3.6) < 0.001,
         'Active job lost its submitted inputs',
       )
       await result.dispose()
@@ -289,13 +634,13 @@ async function run() {
         'sample payload',
         'INVALID_INPUT',
       ],
+      ['no-video', audio, 'required video track', 'MISSING_REQUIRED_TRACK'],
       [
-        'leading-delta',
-        await fixture('leading-delta.mp4'),
-        'keyframe',
+        'cut-mp3',
+        await fixture('leading-delta-mp3.mp4'),
+        'normalizeAudio',
         'UNSUPPORTED_MEDIA_FEATURE',
       ],
-      ['no-video', audio, 'required video track', 'MISSING_REQUIRED_TRACK'],
     ]) {
       let failure
 
@@ -407,13 +752,19 @@ async function run() {
 document.querySelector('#run').addEventListener('click', async () => {
   output.textContent = 'Running'
 
+  const audioContext =
+    typeof AudioContext === 'undefined' ? null : new AudioContext()
+
   try {
-    await run()
+    await audioContext?.resume()
+    await run(audioContext)
   } catch (error) {
     output.textContent = JSON.stringify(
       { status: 'failed', message: error.message, stack: error.stack, checks },
       null,
       2,
     )
+  } finally {
+    await audioContext?.close()
   }
 })
