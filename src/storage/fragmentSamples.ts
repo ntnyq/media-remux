@@ -221,7 +221,8 @@ interface Page {
 }
 
 interface Track {
-  files: Record<FileKind, FragmentSampleFile>
+  files: Record<Exclude<FileKind, SortFileKind>, FragmentSampleFile>
+  sortFiles: Record<SortFileKind, FragmentSampleFile> | undefined
   pages: Page[]
   base: number
   end: number
@@ -275,7 +276,8 @@ function readTimestamp(values: Float64Array, index: number): number {
  *
  * @param open - Async opener for each track and records/media/sort file kind;
  * return distinct files supporting positional I/O, truncation, and closure.
- * Each new track opens all four kinds and truncates each file to zero.
+ * Each new track opens records and media; sort files open only for external
+ * sorting. Opened files remain available until disposal and are cleared before use.
  * @returns A serialized sample store supporting append, get/set, bounded
  * timestamp sorting, media reads up to 64 KiB, prefix release, and disposal.
  * Sample IDs and media offsets remain logical references across compaction;
@@ -364,7 +366,7 @@ export function createDiskFragmentSamples(
   }
 
   /**
-   * Gets track state, lazily opening and clearing all four backing files.
+   * Gets track state, lazily opening and clearing record and media files.
    * Partial opening failures trigger closure of every file already opened.
    *
    * @param trackId - Integer track identifier from 1 through 0xffffffff.
@@ -405,16 +407,11 @@ export function createDiskFragmentSamples(
       const files = {
         records: await getFile(FRAGMENT_SAMPLE_FILE_KIND.records),
         media: await getFile(FRAGMENT_SAMPLE_FILE_KIND.media),
-        [FRAGMENT_SAMPLE_FILE_KIND.sortA]: await getFile(
-          FRAGMENT_SAMPLE_FILE_KIND.sortA,
-        ),
-        [FRAGMENT_SAMPLE_FILE_KIND.sortB]: await getFile(
-          FRAGMENT_SAMPLE_FILE_KIND.sortB,
-        ),
       }
 
       track = {
         files,
+        sortFiles: undefined,
         pages: [],
         base: 0,
         end: 0,
@@ -442,6 +439,54 @@ export function createDiskFragmentSamples(
           await file.close()
         } catch {
           // Preserve the opener error while attempting to close every file.
+        }
+      }
+
+      throw error
+    }
+  }
+
+  /**
+   * Opens external-sort files on demand and keeps them until store disposal.
+   *
+   * @param trackId - Identifier passed to the backing-file opener.
+   * @param track - Track owning the optional pair of sort files.
+   * @returns The initialized sort-file pair.
+   * @throws The original open or truncate error after closing partial opens.
+   */
+  async function getSortFiles(trackId: number, track: Track) {
+    if (track.sortFiles) {
+      return track.sortFiles
+    }
+
+    const opened: FragmentSampleFile[] = []
+
+    try {
+      const getFile = async (kind: SortFileKind) => {
+        const file = await open(trackId, kind)
+
+        opened.push(file)
+        await file.truncate(0)
+
+        return file
+      }
+
+      track.sortFiles = {
+        [FRAGMENT_SAMPLE_FILE_KIND.sortA]: await getFile(
+          FRAGMENT_SAMPLE_FILE_KIND.sortA,
+        ),
+        [FRAGMENT_SAMPLE_FILE_KIND.sortB]: await getFile(
+          FRAGMENT_SAMPLE_FILE_KIND.sortB,
+        ),
+      }
+
+      return track.sortFiles
+    } catch (error) {
+      for (const file of opened) {
+        try {
+          await file.close()
+        } catch {
+          // Preserve the original error while attempting every partial close.
         }
       }
 
@@ -826,6 +871,8 @@ export function createDiskFragmentSamples(
           return
         }
 
+        const sortFiles = await getSortFiles(trackId, track)
+
         // Seed the first sort file with independently sorted, bounded runs.
         track.externalSort = true
         let source: SortFileKind = FRAGMENT_SAMPLE_FILE_KIND.sortA
@@ -843,24 +890,24 @@ export function createDiskFragmentSamples(
 
           run.sort()
           await transferFileBytes(
-            track.files[source],
+            sortFiles[source],
             new Uint8Array(run.buffer, run.byteOffset, run.byteLength),
             offset * 8,
             true,
           )
         }
 
-        await track.files[source].truncate(count * 8)
+        await sortFiles[source].truncate(count * 8)
 
         // Merge adjacent runs, doubling their width each pass. Alternate files
         // so output never overwrites timestamps still needed by input cursors.
         for (let width = SORT_RUN; width < count; width *= 2) {
-          await track.files[destination].truncate(0)
+          await sortFiles[destination].truncate(0)
           const output = new Float64Array(IO_SIZE / 8)
           let used = 0
           let written = 0
-          const outputFile = track.files[destination]
-          const inputFile = track.files[source]
+          const outputFile = sortFiles[destination]
+          const inputFile = sortFiles[source]
 
           /**
            * Buffers one merged timestamp, flushing a full output page to disk.
@@ -974,7 +1021,7 @@ export function createDiskFragmentSamples(
           // The last partial output page must reach disk before swapping files.
           if (used) {
             await transferFileBytes(
-              track.files[destination],
+              sortFiles[destination],
               new Uint8Array(output.buffer, output.byteOffset, used * 8),
               written * 8,
               true,
@@ -1023,7 +1070,7 @@ export function createDiskFragmentSamples(
           )
 
           await transferFileBytes(
-            track.files[track.sortedFile],
+            (await getSortFiles(trackId, track))[track.sortedFile],
             bytes,
             offset,
             false,
@@ -1148,9 +1195,9 @@ export function createDiskFragmentSamples(
         track.sortedCount = 0
         track.sortedPage = undefined
 
-        if (track.externalSort) {
-          await track.files[FRAGMENT_SAMPLE_FILE_KIND.sortA].truncate(0)
-          await track.files[FRAGMENT_SAMPLE_FILE_KIND.sortB].truncate(0)
+        if (track.externalSort && track.sortFiles) {
+          await track.sortFiles[FRAGMENT_SAMPLE_FILE_KIND.sortA].truncate(0)
+          await track.sortFiles[FRAGMENT_SAMPLE_FILE_KIND.sortB].truncate(0)
           track.externalSort = false
         }
       })
@@ -1171,7 +1218,10 @@ export function createDiskFragmentSamples(
         let closeFailure: { error: unknown } | undefined
 
         for (const track of tracks.values()) {
-          for (const file of Object.values(track.files)) {
+          for (const file of [
+            ...Object.values(track.files),
+            ...Object.values(track.sortFiles ?? {}),
+          ]) {
             try {
               await file.close()
             } catch (error) {

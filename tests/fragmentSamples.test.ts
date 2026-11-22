@@ -103,7 +103,7 @@ test.each([1, 4096, 4097, 10_003])(
   },
 )
 
-function memoryFiles() {
+function memoryFiles(failOpenKind?: string) {
   const files: {
     kind: string
     bytes: Uint8Array<ArrayBuffer>
@@ -113,12 +113,18 @@ function memoryFiles() {
   let fail: 'read' | 'write' | 'truncate' | 'close' | undefined
   const failure = new DOMException('disk unavailable', 'QuotaExceededError')
   const store = createDiskFragmentSamples(async (_track, kind) => {
+    if (kind === failOpenKind) {
+      throw failure
+    }
+
     const file = { kind, bytes: new Uint8Array(0), closed: 0, bytesWritten: 0 }
 
     files.push(file)
 
     return {
       async read(data, position) {
+        assert.equal(file.closed, 0, 'must not use a closed file')
+
         if (fail === 'read') {
           throw failure
         }
@@ -132,6 +138,8 @@ function memoryFiles() {
         return count
       },
       async write(data, position) {
+        assert.equal(file.closed, 0, 'must not use a closed file')
+
         if (fail === 'write') {
           throw failure
         }
@@ -151,6 +159,8 @@ function memoryFiles() {
         return count
       },
       async truncate(length) {
+        assert.equal(file.closed, 0, 'must not use a closed file')
+
         if (fail === 'truncate') {
           throw failure
         }
@@ -240,7 +250,7 @@ test('retries partial positional I/O across media pages and sorts independent tr
     await store.dispose()
   }
 
-  assert.equal(files.length, 8)
+  assert.equal(files.length, 4)
   assert.ok(files.every(file => file.closed === 1))
 })
 
@@ -321,7 +331,7 @@ test('closes partially opened tracks without masking the original open error', a
   let opened = 0
   let closed = 0
   const store = createDiskFragmentSamples(async () => {
-    if (++opened === 3) {
+    if (++opened === 2) {
       throw failure
     }
 
@@ -343,9 +353,9 @@ test('closes partially opened tracks without masking the original open error', a
     store.append(1, sample(0), Uint8Array.of(1)),
     error => error === failure,
   )
-  assert.equal(closed, 2)
+  assert.equal(closed, 1)
   await store.dispose()
-  assert.equal(closed, 2)
+  assert.equal(closed, 1)
 })
 
 test('rejects non-progressing writes and truncated sample-media reads', async () => {
@@ -375,4 +385,89 @@ test('rejects non-progressing writes and truncated sample-media reads', async ()
       await store.dispose()
     }
   }
+})
+
+test.each([4096, 4097])(
+  'opens sort files only for external sorting of %s timestamps',
+  async count => {
+    const { store, files } = memoryFiles()
+
+    try {
+      for (let index = 0; index < count; index++) {
+        await store.append(1, sample(count - index), Uint8Array.of(1))
+      }
+
+      assert.deepEqual(
+        files.map(file => file.kind),
+        ['records', 'media'],
+      )
+      await store.sort(1, 0, count)
+      assert.equal(files.length, count === 4096 ? 2 : 4)
+
+      for (let index = 0; index < count; index++) {
+        assert.equal(await store.sorted(1, index), index + 1)
+      }
+
+      await store.release(1, count)
+      assert.ok(files.every(file => file.bytes.length === 0))
+    } finally {
+      await store.dispose()
+      await store.dispose()
+    }
+
+    assert.ok(files.every(file => file.closed === 1))
+  },
+)
+
+test('reuses live sort files across external, memory and released ranges without stale results', async () => {
+  const { store, files } = memoryFiles()
+
+  try {
+    for (let index = 0; index < 8200; index++) {
+      await store.append(1, sample(8200 - index), Uint8Array.of(1))
+    }
+
+    for (const [start, count] of [
+      [0, 8200],
+      [0, 4097],
+      [10, 3],
+      [1, 4097],
+    ] as const) {
+      await store.sort(1, start, count)
+
+      for (let index = 0; index < count; index++) {
+        assert.equal(await store.sorted(1, index), 8201 - start - count + index)
+      }
+    }
+
+    await store.release(1, 4100)
+    await store.sort(1, 4100, 4100)
+
+    for (let index = 0; index < 4100; index++) {
+      assert.equal(await store.sorted(1, index), index + 1)
+    }
+
+    assert.equal(files.length, 4)
+    assert.ok(files.every(file => file.closed === 0))
+  } finally {
+    await store.dispose()
+  }
+
+  assert.ok(files.every(file => file.closed === 1))
+})
+
+test('closes the first sort file if opening the second fails, without closing it twice', async () => {
+  const { store, files, failure } = memoryFiles('sort-b')
+
+  for (let index = 0; index < 4097; index++) {
+    await store.append(1, sample(index), Uint8Array.of(1))
+  }
+
+  await assert.rejects(store.sort(1, 0, 4097), error => error === failure)
+  assert.equal(files.length, 3)
+  assert.equal(files[2]?.closed, 1)
+  await assert.rejects(store.sort(1, 0, 1), error => error === failure)
+  await store.dispose()
+  await store.dispose()
+  assert.ok(files.every(file => file.closed === 1))
 })

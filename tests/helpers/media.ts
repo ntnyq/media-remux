@@ -162,7 +162,7 @@ export function memoryTarget(strategy?: QueuingStrategy<MediaOutputChunk>) {
  * @param blob - Media file to inspect.
  * @param kind - Track kind to collect.
  * @param options - Whether to omit complete audio packets outside the media edit.
- * @returns Packet bytes, types, timestamps, and durations, or an empty array if absent.
+ * @returns Packet bytes, types, timestamps, and presentation and decode durations, or an empty array if absent.
  */
 export async function packets(
   blob: Blob,
@@ -195,6 +195,7 @@ export async function packets(
         type: packet.type,
         timestamp: packet.timestamp,
         duration: packet.duration,
+        decodeDuration: packet.sideData.decodeDuration,
       })
     }
 

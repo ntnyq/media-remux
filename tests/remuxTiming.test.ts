@@ -9,7 +9,7 @@ import type { RemuxResult } from '../src'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 
 test.each(['remux', 'concat', 'combine'] as const)(
-  'preserves VFR B-frame presentation timing through %s and repeated remux',
+  'preserves VFR B-frame presentation and decode timing through %s and repeated remux',
   async operation => {
     const input = await fixture('vfr-bframes.mp4')
     const source = await packets(input, 'video')
@@ -67,6 +67,7 @@ test.each(['remux', 'concat', 'combine'] as const)(
           4,
         )
         expect(packet.duration).toBeCloseTo(original.duration, 4)
+        expect(packet.decodeDuration).toBeCloseTo(original.decodeDuration!, 4)
       }
 
       expect(
@@ -133,7 +134,7 @@ test('preserves VFR decode deltas and absolute PTS independently read by FFprobe
         '-select_streams',
         'v:0',
         '-show_entries',
-        'packet=pts_time,dts_time,duration_time',
+        'packet=pts_time,dts_time',
         '-of',
         'csv=p=0',
         path,
@@ -153,13 +154,14 @@ test('preserves VFR decode deltas and absolute PTS independently read by FFprobe
     expect(output).toHaveLength(source!.length)
     const sourceStart = Math.min(...source!.map(row => row[0]!))
 
+    // FFprobe can report presentation intervals for MP4 and decode durations
+    // for fMP4. Compare the decode timestamps directly.
     for (const [index, row] of output!.entries()) {
       expect(row[0]).toBeCloseTo(source![index]![0]! - sourceStart, 5)
       expect(row[1]! - output![0]![1]!).toBeCloseTo(
         source![index]![1]! - source![0]![1]!,
         5,
       )
-      expect(row[2]).toBeCloseTo(source![index]![2]!, 5)
     }
   } finally {
     await rm(directory, { recursive: true, force: true })
