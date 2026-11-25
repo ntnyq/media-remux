@@ -75,7 +75,7 @@ async function playbackTiming(
       resolve(metadata.mediaTime)
 
       if (onFrame) {
-        onFrame(metadata.mediaTime)
+        onFrame(metadata.mediaTime, metadata)
         callback = video.requestVideoFrameCallback(observeFrame)
       }
     }
@@ -622,6 +622,65 @@ async function run(audioContext) {
         checks.push({ playback: label, ...actual })
       } finally {
         await result.dispose()
+      }
+    }
+
+    const switchedTs = await fixture('rendition-switch.mpegts')
+    const renditionCases = [
+      {
+        label: 'mpeg-ts-rendition-switches',
+        blob: switchedTs,
+        segmentOffsets: [0, 31396, 51888],
+        widths: [96, 48, 96],
+      },
+      {
+        label: 'mpeg-ts-rendition-upshift',
+        blob: switchedTs.slice(31396),
+        segmentOffsets: [0, 51888 - 31396],
+        widths: [48, 96],
+      },
+    ]
+
+    for (const { label, blob, segmentOffsets, widths } of renditionCases) {
+      const renditionSwitches = segmentOffsets
+        .slice(1)
+        .map((_, index) => index + 1)
+      const switching = runMediaJob(
+        {
+          operation: MEDIA_JOB_OPERATION.remux,
+          input: {
+            blob,
+            segmentOffsets,
+            allowContinuityCounterReset: true,
+            renditionSwitches,
+          },
+        },
+        { createWorker, directory },
+      )
+
+      renditionSwitches.length = 0
+
+      const switched = await switching
+
+      try {
+        const observedWidths = []
+        const actual = await playbackTiming(switched.file, {
+          label,
+          playToEnd: true,
+          onFrame(_, { width }) {
+            if (width !== observedWidths.at(-1)) {
+              observedWidths.push(width)
+            }
+          },
+        })
+
+        assert(
+          observedWidths.join() === widths.join(),
+          `Expected AVC frame widths ${widths.join()}, got ${observedWidths.join()}`,
+        )
+        checks.push({ playback: label, ...actual })
+      } finally {
+        await switched.dispose()
       }
     }
 

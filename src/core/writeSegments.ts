@@ -201,6 +201,7 @@ export async function writeSegments(
     target: new StreamTarget(options.writable, {
       chunked: true,
       chunkSize: 1024 * 1024,
+      _signal: options.signal,
       _beforeClose() {
         checkAbort(options.signal)
         isCommitting = true

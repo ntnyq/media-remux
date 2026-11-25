@@ -25,6 +25,23 @@ Small synthetic FFmpeg-generated media fixtures. They contain generated test pat
   cat part0.ts part1.ts part2.ts part3.ts part4.ts > continuous-av.mpegts
   ```
 
+- `rendition-switch.mpegts` joins three independent one-second H.264/AAC segments at byte offsets 0, 31396, and 51888. Video switches from 96×64 at 60 fps to 48×32 at 30 fps and back. At the first switch the video PTS advances 1500 ticks and the DTS goes back 1500 ticks on the 90 kHz clock.
+
+  ```sh
+  make_part() {
+    ffmpeg -f lavfi -i "testsrc2=size=${2}:rate=${3}:duration=1" \
+      -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.97 \
+      -c:v libx264 -preset fast -profile:v high -level:v "$4" \
+      -x264-params 'aud=1:keyint=120:scenecut=0:bframes=2:b-adapt=0' \
+      -c:a aac -b:a 24k -mpegts_copyts 1 -muxdelay 0 -avoid_negative_ts disabled \
+      -output_ts_offset "$1" -f mpegts "rendition-$1.ts"
+  }
+  make_part 1 96x64 60 3.2
+  make_part 2 48x32 30 1.3
+  make_part 3 96x64 60 3.2
+  cat rendition-1.ts rendition-2.ts rendition-3.ts > rendition-switch.mpegts
+  ```
+
 - `progressive.mkv` contains H.264 B frames and 48 kHz AAC-LC with an intentionally delayed audio track and `CodecDelay`. Generated with `ffmpeg -i video.mp4 -itsoffset 0.2 -f lavfi -i sine=frequency=440:sample_rate=48000:duration=1.3 -map 0:v -map 1:a -c:v copy -c:a aac progressive.mkv`.
 - `bt709-full-range.mkv` uses the H.264 packets from `video.mp4` with Matroska Colour metadata. Generated with `ffmpeg -i video.mp4 -map 0:v:0 -c:v copy -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc bt709-full-range.mkv`.
 - `audio-edited-head.m4a` contains an AAC head edit at 0.5 seconds within a packet, with a 330 Hz tone before the edit and 990 Hz after it.

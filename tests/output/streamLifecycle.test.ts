@@ -178,6 +178,29 @@ test.each([
   },
 )
 
+test('signals a pending output write before waiting for it to settle', async () => {
+  const controller = new AbortController()
+  const reason = new Error('cancel a backpressured write')
+  let writeAbortReason: unknown
+  const writable = new WritableStream({
+    async write(_chunk, sink) {
+      controller.abort(reason)
+      await setImmediate()
+      writeAbortReason = sink.signal.reason
+    },
+  })
+
+  await expect(
+    remuxMedia(await fixture('video.mp4'), {
+      writable,
+      storage: await diskStorage(),
+      signal: controller.signal,
+    }),
+  ).rejects.toBe(reason)
+  expect(writeAbortReason).toBe(reason)
+  expect(writable.locked).toBe(false)
+})
+
 test('emits audio fragments as the final track continues after video ends', async () => {
   const video = await fixture('bt709-full-range.flv')
   const sampleCount = 640

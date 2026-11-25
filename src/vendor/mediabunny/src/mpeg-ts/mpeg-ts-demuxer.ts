@@ -42,7 +42,7 @@ type TsPayload = { counter: number; packet: TsPacket; data: Uint8Array };
 type SegmentOptions = { segmentOffsets: readonly number[]; allowContinuityCounterReset?: boolean };
 type ProgramAssociation = { number: number; mapPid: number };
 type ProgramStream = { type: number; pid: number; privateAudio: boolean };
-type PesTiming = { pts: number; dts: number };
+type PesTiming = { pts: number; dts: number; segmentIndex: number | undefined };
 type PesPayload = { data: Uint8Array; timing: PesTiming | null };
 export type AdtsFrame = PesPayload & { header: AdtsFrameHeader };
 type PesState = {
@@ -54,6 +54,7 @@ type PesState = {
     open: boolean;
     previousPayload?: TsPayload;
     segmentIndex?: number | undefined;
+    pesStartSegmentIndex?: number | undefined;
 };
 
 function withPacketLocation(message: string, packet: TsPacket | undefined) {
@@ -137,7 +138,7 @@ function readPesTimestamp(bits: Bitstream, prefix: number, packet: TsPacket) {
     return timestamp;
 }
 
-function readPesTiming(header: Uint8Array, size: number, packet: TsPacket): PesTiming | null {
+function readPesTiming(header: Uint8Array, size: number, packet: TsPacket, segmentIndex: number | undefined): PesTiming | null {
     const ptsDtsFlags = header[7]! >> 6;
     if (ptsDtsFlags === 0) {
         return null;
@@ -147,7 +148,7 @@ function readPesTiming(header: Uint8Array, size: number, packet: TsPacket): PesT
     }
     const bits = new Bitstream(header.subarray(9, size));
     const pts = readPesTimestamp(bits, ptsDtsFlags, packet);
-    return { pts, dts: ptsDtsFlags === 3 ? readPesTimestamp(bits, 1, packet) : pts };
+    return { pts, dts: ptsDtsFlags === 3 ? readPesTimestamp(bits, 1, packet) : pts, segmentIndex };
 }
 
 export class MpegTsDemuxer {
@@ -408,6 +409,7 @@ export class MpegTsDemuxer {
                 stream.headerSize = 9;
                 stream.bytesLeft = -1;
                 stream.timing = null;
+                stream.pesStartSegmentIndex = segmentIndex;
                 stream.open = true;
             }
             if (!stream.open) {
@@ -432,7 +434,7 @@ export class MpegTsDemuxer {
                     }
                 }
                 if (stream.headerBytes === stream.headerSize) {
-                    stream.timing = readPesTiming(stream.header, stream.headerSize, packet);
+                    stream.timing = readPesTiming(stream.header, stream.headerSize, packet, stream.pesStartSegmentIndex);
                 }
             }
             const count = Math.min(data.length, stream.bytesLeft);

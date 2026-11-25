@@ -9,6 +9,10 @@ import {
 import { REMUX_ERROR_CODE } from '../../src/constants'
 import { openMediaInput } from '../../src/core/input/openMediaInput'
 import {
+  AvcNalUnitType,
+  iterateNalUnitsInAnnexB,
+} from '../../src/vendor/mediabunny/src/codec-data'
+import {
   MpegTsDemuxer,
   UnsupportedMpegTsError,
 } from '../../src/vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
@@ -23,6 +27,7 @@ const pmtPid = 0x1000
 const clock = 90_000
 const wrap = 2 ** 33
 const segmentOffsets = [0, 5076, 8648, 13912, 17296]
+const renditionOffsets = [0, 31396, 51888]
 
 // Independent ffprobe PTS values in decode order. DTS advances by 7500 ticks.
 const videoPts = [
@@ -187,6 +192,198 @@ async function remux(input: RemuxInput, tracks?: RemuxTrackSelection) {
 
   return { result, output: target.blob() }
 }
+
+test('remuxes explicitly switched AVC renditions on the original A/V presentation clock', async () => {
+  const blob = await fixture('rendition-switch.mpegts')
+  const input = {
+    blob,
+    segmentOffsets: renditionOffsets,
+    allowContinuityCounterReset: true,
+    renditionSwitches: [1, 2],
+  }
+  const { result, output } = await remux(input)
+  const ends = [...renditionOffsets.slice(1), blob.size]
+  const sources = ends.map((end, index) =>
+    blob.slice(renditionOffsets[index], end),
+  )
+  const video = await packets(output, 'video')
+  const audio = await packets(output, 'audio')
+  const sourceVideo = (
+    await Promise.all(sources.map(part => packets(part, 'video')))
+  ).flat()
+  const sourceAudio = (
+    await Promise.all(sources.map(part => packets(part, 'audio')))
+  ).flat()
+
+  expect(video).toHaveLength(150)
+  expect(audio).toHaveLength(141)
+  expect(
+    video.flatMap(({ type }, index) => (type === 'key' ? [index] : [])),
+  ).toEqual([0, 60, 90])
+
+  const origin = sourceAudio[0]!.timestamp
+
+  for (const [actual, source] of [
+    [video, sourceVideo],
+    [audio, sourceAudio],
+  ] as const) {
+    for (const [index, packet] of actual.entries()) {
+      expect(packet.data).toStrictEqual(source[index]!.data)
+      expect(packet.timestamp).toBeCloseTo(source[index]!.timestamp - origin, 5)
+      expect(packet.decodeDuration).toBeGreaterThan(0)
+    }
+  }
+
+  expect(result.duration).toBeCloseTo(3 + 1024 / 48000, 5)
+})
+
+test('rejects DTS overlap and AVC parameter changes outside marked switches', async () => {
+  const blob = await fixture('rendition-switch.mpegts')
+  const input = {
+    blob,
+    segmentOffsets: renditionOffsets,
+    allowContinuityCounterReset: true,
+  }
+
+  await expect(remux(input)).rejects.toThrow('MPEG-TS AVC DTS must increase.')
+  await expect(remux({ ...input, renditionSwitches: [1] })).rejects.toThrow(
+    'Incompatible MPEG-TS AVC sequence parameter set change.',
+  )
+})
+
+test('requires an independent AVC access unit at a marked switch', async () => {
+  const blob = await fixture('continuous-av.mpegts')
+
+  await expect(
+    remux({ blob, segmentOffsets, renditionSwitches: [1] }),
+  ).rejects.toThrow(
+    'An MPEG-TS rendition switch requires an AVC IDR with SPS and PPS.',
+  )
+})
+
+/** Returns two compatible renditions in ascending resolution on one clock. */
+async function ascendingRenditions() {
+  const bytes = Buffer.from(
+    await (await fixture('rendition-switch.mpegts')).arrayBuffer(),
+  )
+  const low = bytes.subarray(renditionOffsets[1], renditionOffsets[2])
+  const high = bytes.subarray(0, renditionOffsets[1])
+
+  shiftPesTimestamps(low, -clock)
+  shiftPesTimestamps(high, clock)
+
+  return { low, high, repeat: bytes.subarray(renditionOffsets[2]) }
+}
+
+test('advertises the largest AVC dimensions and level when the input starts at a lower rendition', async () => {
+  const { low, high } = await ascendingRenditions()
+  const { output } = await remux({
+    blob: new Blob([low, high]),
+    segmentOffsets: [0, low.length],
+    allowContinuityCounterReset: true,
+    renditionSwitches: [1],
+  })
+  const input = await openMediaInput(output)
+
+  try {
+    expect(input.tracks[0]?.config).toMatchObject({
+      codec: 'avc3.640020',
+      codedWidth: 96,
+      codedHeight: 64,
+    })
+  } finally {
+    input.dispose()
+  }
+})
+
+test('requires the IDR at a rendition switch to reference the accompanying PPS', async () => {
+  const { low, high } = await ascendingRenditions()
+  const [first] = readPes(high, videoPid, 1)
+  const pps = [...iterateNalUnitsInAnnexB(first!.data)].find(
+    ({ offset }) => (first!.data[offset]! & 31) === AvcNalUnitType.PPS,
+  )!
+
+  // Replace pic_parameter_set_id = 0 (1) with 1 (010), retaining the other bits.
+  const start = pps.offset + 1
+  const original = first!.data.subarray(start, pps.offset + pps.length)
+  const replacement = Buffer.alloc(original.length + 1)
+  let last = 0x40
+
+  for (const [index, byte] of original.entries()) {
+    replacement[index] = last | ((index === 0 ? byte & 0x7f : byte) >> 2)
+    last = (byte << 6) & 0xff
+  }
+
+  replacement[original.length] = last
+  const changed = replacePes(high, videoPid, first!.start, first!.end, [
+    {
+      header: first!.header,
+      data: Buffer.concat([
+        first!.data.subarray(0, start),
+        replacement,
+        first!.data.subarray(pps.offset + pps.length),
+      ]),
+    },
+  ])
+
+  await expect(
+    remux({
+      blob: new Blob([low, changed]),
+      segmentOffsets: [0, low.length],
+      allowContinuityCounterReset: true,
+      renditionSwitches: [1],
+    }),
+  ).rejects.toThrow(
+    'An MPEG-TS rendition switch requires an AVC IDR with SPS and PPS.',
+  )
+})
+
+test('keeps a later IDR without the current rendition parameter sets out of the MP4 sync index', async () => {
+  const { low, high, repeat } = await ascendingRenditions()
+  const [first] = readPes(repeat, videoPid, 1)
+  const data = Buffer.concat(
+    [...iterateNalUnitsInAnnexB(first!.data)].flatMap(({ offset, length }) =>
+      [AvcNalUnitType.SPS, AvcNalUnitType.PPS].some(
+        type => (first!.data[offset]! & 31) === type,
+      )
+        ? []
+        : [
+            Buffer.from([0, 0, 0, 1]),
+            first!.data.subarray(offset, offset + length),
+          ],
+    ),
+  )
+  const changed = replacePes(repeat, videoPid, first!.start, first!.end, [
+    { header: first!.header, data },
+  ])
+  const { output } = await remux({
+    blob: new Blob([low, high, changed]),
+    segmentOffsets: [0, low.length, low.length + high.length],
+    allowContinuityCounterReset: true,
+    renditionSwitches: [1],
+  })
+  const video = await packets(output, 'video')
+
+  expect(video).toHaveLength(150)
+  expect(
+    video.flatMap(({ type }, index) => (type === 'key' ? [index] : [])),
+  ).toEqual([0, 30])
+})
+
+test.each([0, -1, 1.5, 3, Number.NaN])(
+  'rejects invalid rendition switch index %s',
+  async index => {
+    const blob = await fixture('rendition-switch.mpegts')
+
+    await expect(
+      remux({
+        blob,
+        segmentOffsets: renditionOffsets,
+        renditionSwitches: [index],
+      }),
+    ).rejects.toMatchObject({ code: REMUX_ERROR_CODE.invalidInput })
+  },
+)
 
 test('remuxes consecutive TS fragments that start on dependent pictures', async () => {
   const source = await fixture('continuous-av.mpegts')
@@ -575,7 +772,7 @@ test('bounds pending PES timestamps while framing AVC across payloads', async ()
 
   using ref = source.ref()
   const demuxer = new MpegTsDemuxer(new Reader(ref.source), 0, () => {})
-  const timing = { pts: 0, dts: 0 }
+  const timing = { pts: 0, dts: 0, segmentIndex: undefined }
   const byte = Uint8Array.of(0xff)
 
   vi.spyOn(demuxer, 'pesPayloads').mockImplementation(async function* () {

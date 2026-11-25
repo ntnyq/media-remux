@@ -51,6 +51,7 @@ interface MpegTsInput {
   blob: Blob
   segmentOffsets: readonly number[]
   allowContinuityCounterReset?: boolean
+  renditionSwitches?: readonly number[]
 }
 ```
 
@@ -60,6 +61,7 @@ interface MpegTsInput {
 | `MpegTsInput.blob`                        | 由按顺序排列的 TS 分片组成的一条完整 MPEG-TS 字节流。                                                            |
 | `MpegTsInput.segmentOffsets`              | 各分片在 `blob` 中的绝对字节起始位置。首项必须是 `0`，其余值严格递增，全部为小于 `blob.size` 的 188 字节整数倍。 |
 | `MpegTsInput.allowContinuityCounterReset` | 可选，默认 `false`。启用后，满足 PES 完整性条件的分片边界允许所选 PID 的首个有效载荷重置连续计数器。             |
+| `MpegTsInput.renditionSwitches`           | 可选。标记兼容 AVC 画质切换的 `segmentOffsets` 零基索引，每个索引必须指向首段之后的分片。                        |
 
 描述符可用于 `remuxMedia`、`combineTracks` 及其对应的 Worker 任务。拼接 API 的公开输入类型为 `readonly Blob[]`。[TS 分片边界规则](./compatibility.md#mpeg-ts-分片边界) · [构造描述符示例](./examples.md#保留-mpeg-ts-分片边界)
 
@@ -74,7 +76,7 @@ interface MpegTsInput {
 | `signal`         | `AbortSignal`                       | 可选。在检查、复制、存储和提交之前检查取消，取消时传递原始 `signal.reason`。                                  |
 | `onProgress`     | `(progress: RemuxProgress) => void` | 可选。在当前执行上下文中同步调用。抛错会使任务失败，回调返回的 Promise 不会被等待。                           |
 
-任务开始时捕获顶层选项、输入列表及描述符偏移数组等配置。传入的信号、输出流和存储资源持续使用原有引用。
+任务开始时捕获顶层选项、输入列表、分片偏移及画质切换索引。传入的信号、输出流和存储资源持续使用原有引用。
 
 ### `RemuxTrackSelection`
 

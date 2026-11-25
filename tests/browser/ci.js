@@ -11,6 +11,8 @@ const requiredPlayback = [
   'mpeg-ts-remux',
   'segmented-mpeg-ts-remux',
   'segmented-mpeg-ts-combine',
+  'mpeg-ts-rendition-switches',
+  'mpeg-ts-rendition-upshift',
   'mixed-container-combine',
   'aligned-mixed-container-combine',
   'offset-normalized-audio',

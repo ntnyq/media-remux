@@ -28,6 +28,13 @@ export interface MpegTsInput {
    * indistinguishable from a reset.
    */
   allowContinuityCounterReset?: boolean
+
+  /**
+   * Zero-based indexes into segmentOffsets where an independent AVC rendition
+   * begins on the same presentation timeline. Each switch must start with an
+   * IDR access unit carrying compatible SPS and PPS NAL units.
+   */
+  renditionSwitches?: readonly number[]
 }
 
 /**

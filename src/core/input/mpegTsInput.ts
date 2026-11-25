@@ -28,6 +28,7 @@ import {
   getAacProgramConfigElementChannelCount,
   readAdtsProgramConfigElement,
 } from '../../vendor/mediabunny/shared/aac-misc'
+import { Bitstream } from '../../vendor/mediabunny/shared/bitstream'
 import {
   AvcNalUnitType,
   concatNalUnitsInLengthPrefixed,
@@ -35,8 +36,13 @@ import {
   extractNalUnitTypeForAvc,
   iterateNalUnitsInAnnexB,
   parseAvcSps,
+  removeEmulationPreventionBytes,
   serializeAvcDecoderConfigurationRecord,
 } from '../../vendor/mediabunny/src/codec-data'
+import {
+  readExpGolomb,
+  simplifyRational,
+} from '../../vendor/mediabunny/src/misc'
 import {
   InvalidMpegTsError,
   MPEG_TS_TIMESCALE,
@@ -280,7 +286,7 @@ async function openAudioTrack(
  * Builds AVC decoder metadata for MP4 with in-band parameter sets.
  *
  * @param data - Annex B access unit containing SPS and PPS NAL units.
- * @returns The avc3 decoder configuration and parsed sequence parameter set.
+ * @returns The avc3 decoder configuration, its record, and the parsed sequence parameter set.
  * @throws If required parameter sets are missing or invalid.
  */
 function avcDescription(data: Uint8Array) {
@@ -298,6 +304,7 @@ function avcDescription(data: Uint8Array) {
 
   return {
     config: { ...config, codec: config.codec.replace('avc1.', 'avc3.') },
+    record,
     sps,
   }
 }
@@ -306,24 +313,95 @@ function avcDescription(data: Uint8Array) {
  * Serializes SPS properties that must stay compatible with the MP4 sample entry.
  *
  * @param sps - Parsed AVC sequence parameter set.
- * @returns A JSON signature for comparing initial and later parameter sets.
+ * @param includeRendition - Whether to compare dimensions and level as well.
+ * @returns A JSON signature for comparing parameter sets.
  */
-function spsSignature(sps: NonNullable<ReturnType<typeof parseAvcSps>>) {
+function spsSignature(
+  sps: NonNullable<ReturnType<typeof parseAvcSps>>,
+  includeRendition = true,
+) {
   return JSON.stringify([
     sps.profileIdc,
     sps.constraintFlags,
-    sps.levelIdc,
     sps.chromaFormatIdc,
     sps.bitDepthLumaMinus8,
     sps.bitDepthChromaMinus8,
-    sps.displayWidth,
-    sps.displayHeight,
-    sps.pixelAspectRatio,
+    simplifyRational(sps.pixelAspectRatio),
     sps.colourPrimaries,
     sps.transferCharacteristics,
     sps.matrixCoefficients,
     sps.fullRangeFlag,
+    ...(includeRendition
+      ? [sps.levelIdc, sps.displayWidth, sps.displayHeight]
+      : []),
   ])
+}
+
+/**
+ * Checks that the PPS and SPS referenced by every IDR slice precede it in the access unit.
+ *
+ * @param data - Annex B access unit already identified as an IDR picture.
+ * @returns Whether the picture can load its referenced parameter sets from this access unit.
+ */
+function hasInBandAvcParameterSets(data: Uint8Array) {
+  const sequenceSets = new Set<number>()
+  const pictureSets = new Map<number, number>()
+
+  try {
+    for (const { offset, length } of iterateNalUnitsInAnnexB(data)) {
+      const type = extractNalUnitTypeForAvc(data[offset]!)
+
+      if (
+        type !== AvcNalUnitType.SPS &&
+        type !== AvcNalUnitType.PPS &&
+        type !== AvcNalUnitType.IDR
+      ) {
+        continue
+      }
+
+      // The IDs occur near the start of the RBSP. Do not copy full slices.
+      const prefix = data.subarray(offset, offset + Math.min(length, 32))
+      const bits = new Bitstream(removeEmulationPreventionBytes(prefix))
+
+      if (type === AvcNalUnitType.SPS) {
+        bits.seekToByte(4)
+        const spsId = readExpGolomb(bits)
+
+        if (spsId > 31) {
+          return false
+        }
+
+        sequenceSets.add(spsId)
+      } else if (type === AvcNalUnitType.PPS) {
+        bits.seekToByte(1)
+        const ppsId = readExpGolomb(bits)
+        const spsId = readExpGolomb(bits)
+
+        if (ppsId > 255 || spsId > 31) {
+          return false
+        }
+
+        pictureSets.set(ppsId, spsId)
+      } else {
+        bits.seekToByte(1)
+        readExpGolomb(bits) // first_mb_in_slice
+        readExpGolomb(bits) // slice_type
+        const spsId = pictureSets.get(readExpGolomb(bits))
+
+        if (isUndefined(spsId) || !sequenceSets.has(spsId)) {
+          return false
+        }
+      }
+
+      if (bits.getBitsLeft() <= 0) {
+        return false
+      }
+    }
+  } catch {
+    return false
+  }
+
+  return true
 }
 
 /**
@@ -332,6 +410,7 @@ function spsSignature(sps: NonNullable<ReturnType<typeof parseAvcSps>>) {
  * @param demuxer - Shared transport-stream demuxer.
  * @param pid - Packet identifier of the selected AVC stream.
  * @param reference - Shared timestamp rollover reference in MPEG-TS clock ticks.
+ * @param switches - Segment indexes where an independently decodable rendition begins.
  * @returns A promise resolving to the AVC decoder configuration and packet reader.
  * @throws If the stream has no AVC access units or its initial parameter sets are invalid.
  */
@@ -339,6 +418,7 @@ async function openVideoTrack(
   demuxer: MpegTsDemuxer,
   pid: number,
   reference: number,
+  switches: ReadonlySet<number>,
 ): Promise<VideoPacketTrack> {
   const probe = demuxer.readAvc(pid)
   const first = await probe.next()
@@ -349,13 +429,21 @@ async function openVideoTrack(
     throw new InvalidMpegTsError('MPEG-TS video track has no AVC access units.')
   }
 
-  const { config, sps } = avcDescription(first.value.data)
-  const signature = spsSignature(sps)
+  const {
+    config: initialConfig,
+    record,
+    sps,
+  } = avcDescription(first.value.data)
+  const initialSignature = spsSignature(sps)
+  const compatibleSignature = spsSignature(sps, false)
+  let config = initialConfig
 
   return {
     kind: MEDIA_TRACK_KIND.video,
     codec: MEDIA_CODEC.avc,
-    config,
+    get config() {
+      return config
+    },
     async *packets(metadataOnly = false, skipPackets = 0) {
       // Adjacent presentation timestamps can be separated by reordering on
       // either side of the current sample. AVC allows up to 16 reordered frames.
@@ -369,8 +457,17 @@ async function openVideoTrack(
         dts: number
       }[] = []
       let sequenceNumber = 0
+      let signature = initialSignature
+      let previousSegment: number | undefined
+      let remainingSwitches = switches.size
+      let previousRawDts: number | undefined
       let previousDts: number | undefined
+      let latestPts = -Infinity
+      let decodeShift = 0
       let decodeDuration = MPEG_TS_TIMESCALE / 30
+      let maximumWidth = sps.displayWidth
+      let maximumHeight = sps.displayHeight
+      let maximumLevel = sps.levelIdc
 
       function takePacket() {
         const current = pending.shift()!
@@ -431,20 +528,28 @@ async function openVideoTrack(
           )
         }
 
-        const dts = normalizeWrappedTimestamp(
+        const rawDts = normalizeWrappedTimestamp(
           timing.dts,
-          previousDts ?? reference,
+          previousRawDts ?? reference,
         )
-        const pts = normalizeWrappedTimestamp(timing.pts, dts)
-
-        if (!isUndefined(previousDts) && dts <= previousDts) {
-          throw new UnsupportedMpegTsError('MPEG-TS AVC DTS must increase.')
-        }
-
-        previousDts = dts
+        const pts = normalizeWrappedTimestamp(timing.pts, rawDts)
+        const { segmentIndex } = timing
+        const switching =
+          segmentIndex !== previousSegment &&
+          !isUndefined(segmentIndex) &&
+          switches.has(segmentIndex)
         const nals = []
         let key = false
+        let nextSignature: string | undefined
         let size = 0
+
+        if (
+          !switching &&
+          !isUndefined(previousRawDts) &&
+          rawDts <= previousRawDts
+        ) {
+          throw new UnsupportedMpegTsError('MPEG-TS AVC DTS must increase.')
+        }
 
         for (const { offset, length } of iterateNalUnitsInAnnexB(data)) {
           const nal = data.subarray(offset, offset + length)
@@ -459,10 +564,25 @@ async function openVideoTrack(
               )
             }
 
-            if (spsSignature(updated) !== signature) {
+            const updatedSignature = spsSignature(updated)
+
+            if (
+              updatedSignature !== (nextSignature ?? signature) &&
+              (!switching ||
+                !isUndefined(nextSignature) ||
+                spsSignature(updated, false) !== compatibleSignature)
+            ) {
               throw new UnsupportedMpegTsError(
                 'Incompatible MPEG-TS AVC sequence parameter set change.',
               )
+            }
+
+            nextSignature = updatedSignature
+
+            if (switching) {
+              maximumWidth = Math.max(maximumWidth, updated.displayWidth)
+              maximumHeight = Math.max(maximumHeight, updated.displayHeight)
+              maximumLevel = Math.max(maximumLevel, updated.levelIdc)
             }
           }
 
@@ -473,6 +593,40 @@ async function openVideoTrack(
             nals.push(nal)
           }
         }
+
+        if (key && (switching || remainingSwitches < switches.size)) {
+          // After a switch the initialization record may have older definitions
+          // for the same IDs. Only index IDRs that carry the sets they reference.
+          key = hasInBandAvcParameterSets(data)
+        }
+
+        if (switching) {
+          if (!key || isUndefined(nextSignature)) {
+            throw new UnsupportedMpegTsError(
+              'An MPEG-TS rendition switch requires an AVC IDR with SPS and PPS.',
+            )
+          }
+
+          if (isUndefined(previousDts) || pts <= latestPts) {
+            throw new UnsupportedMpegTsError(
+              'An MPEG-TS rendition switch must advance the AVC presentation clock.',
+            )
+          }
+
+          // If decode times overlap, splice them at the presentation gap.
+          // Keep DTS deltas inside the new rendition and leave all PTS intact.
+          decodeShift =
+            rawDts <= previousDts ? previousDts + (pts - latestPts) - rawDts : 0
+          signature = nextSignature
+          remainingSwitches--
+        }
+
+        const dts = rawDts + decodeShift
+
+        previousSegment = segmentIndex
+        previousRawDts = rawDts
+        previousDts = dts
+        latestPts = Math.max(latestPts, pts)
 
         pending.push({
           data: metadataOnly
@@ -493,11 +647,40 @@ async function openVideoTrack(
         }
       }
 
+      if (remainingSwitches > 0) {
+        throw new UnsupportedMpegTsError(
+          'An MPEG-TS rendition switch has no AVC access unit at its segment boundary.',
+        )
+      }
+
       while (pending.length) {
         const packet = takePacket()
 
         if (packet.sequenceNumber >= skipPackets) {
           yield packet
+        }
+      }
+
+      // Preflight drains this metadata iterator before the muxer reads config.
+      // avcC keeps the initial parameter sets while signaling the highest level.
+      if (metadataOnly && switches.size > 0) {
+        const { pixelAspectRatio } = sps
+
+        config = {
+          ...initialConfig,
+          codec: `${initialConfig.codec.slice(0, -2)}${maximumLevel.toString(16).padStart(2, '0')}`,
+          codedWidth: maximumWidth,
+          codedHeight: maximumHeight,
+          ...(pixelAspectRatio.num === pixelAspectRatio.den
+            ? {}
+            : {
+                displayAspectWidth: maximumWidth * pixelAspectRatio.num,
+                displayAspectHeight: maximumHeight * pixelAspectRatio.den,
+              }),
+          description: serializeAvcDecoderConfigurationRecord({
+            ...record,
+            avcLevelIndication: maximumLevel,
+          }),
         }
       }
     },
@@ -542,7 +725,7 @@ async function timestampReference(
  * @param blob - Source MPEG-TS Blob.
  * @param signal - Optional cancellation signal used during opening and packet reads.
  * @param selection - Requested media kinds to expose as repeatable packet readers.
- * @param segmented - Declared packet-aligned segment starts and reset policy.
+ * @param segmented - Declared segment starts, counter reset policy and rendition switches.
  * @returns A promise resolving to the selected tracks and a disposer for the Blob reader.
  * @throws If transport-stream parsing fails, a selected format is unsupported, or reading is aborted.
  */
@@ -552,6 +735,8 @@ export async function openMpegTsInput(
   selection: RemuxTrackSelection,
   segmented?: Omit<MpegTsInput, 'blob'>,
 ): Promise<MediaInput> {
+  const switches = new Set(segmented?.renditionSwitches)
+
   if (segmented) {
     const { segmentOffsets } = segmented
 
@@ -578,6 +763,19 @@ export async function openMpegTsInput(
       }
 
       previous = offset
+    }
+
+    for (const index of switches) {
+      if (
+        !Number.isSafeInteger(index) ||
+        index <= 0 ||
+        index >= segmentOffsets.length
+      ) {
+        throw createRemuxError(
+          REMUX_ERROR_CODE.invalidInput,
+          'MPEG-TS rendition switches must refer to later segment boundaries.',
+        )
+      }
     }
   }
 
@@ -655,7 +853,9 @@ export async function openMpegTsInput(
     const reference = await timestampReference(demuxer, pids, selectedPids)
 
     if (selectedVideo) {
-      tracks.push(await openVideoTrack(demuxer, selectedVideo.pid, reference))
+      tracks.push(
+        await openVideoTrack(demuxer, selectedVideo.pid, reference, switches),
+      )
     }
 
     if (selectedAudio) {

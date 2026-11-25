@@ -51,6 +51,7 @@ interface MpegTsInput {
   blob: Blob
   segmentOffsets: readonly number[]
   allowContinuityCounterReset?: boolean
+  renditionSwitches?: readonly number[]
 }
 ```
 
@@ -60,6 +61,7 @@ interface MpegTsInput {
 | `MpegTsInput.blob`                        | One MPEG-TS byte stream assembled from ordered segments.                                                                                                            |
 | `MpegTsInput.segmentOffsets`              | Absolute byte starts of all segments. The first value is `0`, the remaining values are strictly increasing, and every value is a multiple of 188 below `blob.size`. |
 | `MpegTsInput.allowContinuityCounterReset` | Optional, defaults to `false`. At qualifying segment boundaries, allows the first payload on a selected PID to reset its continuity counter if the PES checks pass. |
+| `MpegTsInput.renditionSwitches`           | Optional zero-based indexes into `segmentOffsets` for compatible AVC rendition switches. Every index must refer to a segment after the first.                       |
 
 Pass a descriptor to `remuxMedia`, either input of `combineTracks`, or the corresponding Worker job. Concatenation takes `readonly Blob[]`. [TS boundary rules](./compatibility.md#mpeg-ts-segment-boundaries) · [Descriptor example](./examples.md#preserve-mpeg-ts-segment-boundaries)
 
@@ -74,7 +76,7 @@ Pass a descriptor to `remuxMedia`, either input of `combineTracks`, or the corre
 | `signal`         | `AbortSignal`                       | Optional. Checked during inspection, copying, storage operations, and before output commit. Cancellation propagates the original `signal.reason`. |
 | `onProgress`     | `(progress: RemuxProgress) => void` | Optional. Called synchronously in the current context. A thrown error fails the job. Returned promises are ignored.                               |
 
-The job captures option fields, the input list, and descriptor offsets at submission. It keeps using the referenced signal, writable stream, and storage.
+The job captures option fields, the input list, segment offsets, and rendition switch indexes at submission. It keeps using the referenced signal, writable stream, and storage.
 
 ### `RemuxTrackSelection`
 

@@ -237,6 +237,8 @@ export type StreamTargetOptions = {
     chunked?: boolean | undefined;
     /** When using `chunked: true`, this specifies the maximum size of each chunk. Defaults to 16 MiB. */
     chunkSize?: number | undefined;
+    /** @internal Signals a pending sink write on cancellation before commit. */
+    _signal?: AbortSignal | undefined;
     /** @internal Runs after buffered writes finish and immediately before committing the sink. */
     _beforeClose?: (() => void) | undefined;
 };
@@ -279,6 +281,14 @@ export class StreamTarget extends Target {
     _streamWriter: WritableStreamDefaultWriter<StreamTargetChunk> | null = null;
     private writeFailure: { reason: unknown } | null = null;
     private pendingWrite: Promise<void> | null = null;
+    private pendingAbort: Promise<void> | null = null;
+    private onAbort = () => {
+        const writer = this._streamWriter;
+        if (writer) {
+            this.pendingAbort = writer.abort(this._options._signal?.reason);
+            void this.pendingAbort.catch(() => { }); // _release awaits the same request.
+        }
+    };
     // These variables regard chunked mode:
     /** @internal */
     _chunked: boolean;
@@ -312,7 +322,10 @@ export class StreamTarget extends Target {
     }
     /** @internal */
     _start() {
+        const signal = this._options._signal;
+        signal?.throwIfAborted();
         this._streamWriter = this._writable.getWriter();
+        signal?.addEventListener('abort', this.onAbort, { once: true });
     }
     /** @internal */
     _write(data: Uint8Array, pos: number) {
@@ -511,6 +524,7 @@ export class StreamTarget extends Target {
         await this.pendingWrite;
         this.checkWriteFailure();
         assert(this._streamWriter);
+        this._options._signal?.removeEventListener('abort', this.onAbort);
         this._options._beforeClose?.();
         try {
             await this._streamWriter.close();
@@ -523,10 +537,11 @@ export class StreamTarget extends Target {
     }
     /** @internal */
     async _release() {
+        this._options._signal?.removeEventListener('abort', this.onAbort);
         const writer = this._streamWriter;
         this._streamWriter = null;
         try {
-            await writer?.abort();
+            await (this.pendingAbort ?? writer?.abort());
         }
         finally {
             writer?.releaseLock();

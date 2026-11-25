@@ -14,6 +14,8 @@ The MPEG-TS subset adapts the upstream demuxer's transport and PES parsing, time
 
 The TS reader checks payload continuity, skips duplicate transport payloads, and validates PAT/PMT checksums. It rejects program changes and changes to a selected stream's PID or codec. With explicit segment starts and opt-in resets, it permits a counter jump only on a selected PID's first payload in a later segment when that payload begins a PES and the previous PES passes the existing completeness check. The reset does not affect timestamp unwrapping or elementary stream assembly.
 
+PES timing markers carry the segment index of the PES start. The package adapter uses it to identify the first AVC access unit at a declared rendition switch. The package adapter reuses the AVC emulation-prevention byte helper when checking the parameter sets referenced by IDR slices.
+
 The elementary-stream framer bounds its scratch buffer at 32 MiB and caps pending PES timestamp markers. Oversized inputs fail with an unsupported-feature error.
 
 The TS reader exposes private audio signaled through DVB and common registration descriptors. The core can report unsupported selected audio alongside a supported video track.
@@ -39,6 +41,7 @@ Regression tests cover sparse large-file paging and real media round trips.
 - Optional internal fields admit `undefined` under `exactOptionalPropertyTypes`. Unknown WebCodecs color fields use `null`; absent decoder descriptions are omitted.
 - Required `Symbol.dispose` initialization precedes class definitions. Packet iterators implement `Symbol.asyncDispose` for current TypeScript contracts.
 - Stream backpressure waits for queued writes, including when the writable high-water mark is zero. Stream cancellation aborts/unlocks its writer. After all writes settle, successful finalization checks cancellation before committing the stream.
+- Before commit, job cancellation aborts the writer immediately so a pending write can observe cancellation through its sink controller's signal. Cleanup still drains outstanding work and releases the lock.
 - Blob source disposal cancels active stream reads as well as idle readers and rejects pending range requests.
 - Blob source read failures release the failed reader. Requested ranges propagate I/O failures to the caller, while a failed speculative read leaves missing bytes available for a later request to retry.
 - Source close promises include asynchronous muxer work. Cancellation/finalization wait for every source before releasing targets, including when a source fails; cancellation attempts every target cleanup before propagating an error.

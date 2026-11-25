@@ -38,8 +38,8 @@ export async function readBlobBytes(
  * Checks the MPEG-TS descriptor shape before the reader validates offset values.
  *
  * @param value - Candidate media input.
- * @returns Whether the value has a Blob, an array of segment offsets, and a
- * boolean or absent continuity reset flag.
+ * @returns Whether the value has a Blob, a segment offset array, and valid
+ * types for the optional reset flag and rendition switch array.
  */
 export function isMpegTsInput(value: unknown): value is MpegTsInput {
   return (
@@ -51,15 +51,18 @@ export function isMpegTsInput(value: unknown): value is MpegTsInput {
     isArray(value.segmentOffsets) &&
     (!('allowContinuityCounterReset' in value) ||
       isUndefined(value.allowContinuityCounterReset) ||
-      isBoolean(value.allowContinuityCounterReset))
+      isBoolean(value.allowContinuityCounterReset)) &&
+    (!('renditionSwitches' in value) ||
+      isUndefined(value.renditionSwitches) ||
+      isArray(value.renditionSwitches))
   )
 }
 
 /**
- * Captures segment starts before asynchronous work or callbacks can change them.
+ * Captures segment starts and switches before asynchronous work or callbacks can change them.
  *
  * @param input - Media Blob or MPEG-TS input descriptor to snapshot.
- * @returns A descriptor with a copied offset array, or the original input
+ * @returns A descriptor with copied arrays, or the original input
  * when it is a Blob or fails the descriptor shape check.
  */
 export function captureRemuxInput(input: RemuxInput): RemuxInput {
@@ -67,7 +70,12 @@ export function captureRemuxInput(input: RemuxInput): RemuxInput {
     return input
   }
 
-  const { blob, segmentOffsets, allowContinuityCounterReset } = input
+  const {
+    blob,
+    segmentOffsets,
+    allowContinuityCounterReset,
+    renditionSwitches,
+  } = input
 
   return {
     blob,
@@ -75,5 +83,8 @@ export function captureRemuxInput(input: RemuxInput): RemuxInput {
     ...(isUndefined(allowContinuityCounterReset)
       ? {}
       : { allowContinuityCounterReset }),
+    ...(isUndefined(renditionSwitches)
+      ? {}
+      : { renditionSwitches: [...renditionSwitches] }),
   }
 }
