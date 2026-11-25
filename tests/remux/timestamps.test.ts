@@ -8,6 +8,116 @@ import { combineTracks, concatMedia, remuxMedia } from '../../src'
 import type { RemuxResult } from '../../src'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
+test.each([
+  {
+    mode: 'shared timeline',
+    timeline: undefined,
+    videoStart: 1 / 6,
+    audioStart: 0,
+  },
+  {
+    mode: 'aligned starts',
+    timeline: 'align-starts',
+    videoStart: 0,
+    audioStart: 0,
+  },
+  {
+    mode: 'manual offsets',
+    timeline: { videoOffset: -1 / 6, audioOffset: 0.25 },
+    videoStart: 0,
+    audioStart: 0.25,
+  },
+] as const)(
+  'combines segmented TS video and fragmented MP4 audio with $mode',
+  async ({ timeline, videoStart, audioStart }) => {
+    const video = await fixture('continuous-av.mpegts')
+    const audio = await fixture('subtitle-first.mp4')
+    const target = memoryTarget()
+    const options = {
+      storage: await diskStorage(),
+      writable: target.writable,
+      ...(timeline === undefined ? {} : { timeline }),
+    }
+    const result = await combineTracks(
+      { blob: video, segmentOffsets: [0, 5076] },
+      audio,
+      options,
+    )
+    let end = 0
+
+    for (const [input, kind, expectedStart] of [
+      [video, 'video', videoStart],
+      [audio, 'audio', audioStart],
+    ] as const) {
+      const source = await packets(input, kind)
+      const output = await packets(target.blob(), kind)
+      const start = Math.min(...source.map(packet => packet.timestamp))
+
+      expect(output).toHaveLength(source.length)
+
+      for (const [index, packet] of output.entries()) {
+        const original = source[index]!
+        const timestamp = original.timestamp - start + expectedStart
+
+        expect(packet.timestamp).toBeCloseTo(timestamp, 4)
+        expect(packet.decodeDuration).toBeCloseTo(original.decodeDuration!, 4)
+        end = Math.max(end, timestamp + original.duration)
+      }
+    }
+
+    expect(result.duration).toBeCloseTo(end, 4)
+  },
+)
+
+test('shifts audio PTS and inferred DTS together in the MP4 written by combine', async context => {
+  const exec = promisify(execFile)
+
+  try {
+    await exec('ffprobe', ['-version'])
+  } catch {
+    context.skip()
+
+    return
+  }
+
+  const video = await fixture('continuous-av.mpegts')
+  const audio = await fixture('subtitle-first.mp4')
+  const target = memoryTarget()
+
+  await combineTracks(video, audio, {
+    storage: await diskStorage(),
+    writable: target.writable,
+    timeline: { audioOffset: 0.25 },
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'media-remux-combine-timing-'))
+
+  try {
+    const path = join(directory, 'output.mp4')
+
+    await writeFile(path, new Uint8Array(await target.blob().arrayBuffer()))
+    const { stdout } = await exec('ffprobe', [
+      '-v',
+      'error',
+      '-select_streams',
+      'a:0',
+      '-read_intervals',
+      '%+#1',
+      '-show_entries',
+      'packet=pts_time,dts_time',
+      '-of',
+      'csv=p=0',
+      path,
+    ])
+    const [pts, dts] = stdout.trim().split(',').map(Number)
+    const expected = 0.25 - 1 / 6
+
+    expect(pts).toBeCloseTo(expected, 5)
+    expect(dts).toBeCloseTo(expected, 5)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test.each(['remux', 'concat', 'combine'] as const)(
   'preserves VFR B-frame presentation and decode timing through %s and repeated remux',
   async operation => {
@@ -309,6 +419,31 @@ test('starts H.264 MP4 at the first keyframe after leading dependent frames', as
   expect(after.map(packet => packet.data)).toStrictEqual(
     before.slice(firstKeyframe).map(packet => packet.data),
   )
+})
+
+test('aligns independent audio to the retained H.264 keyframe', async () => {
+  const video = await fixture('leading-delta.mp4')
+  const audio = await fixture('audio-edited-head.m4a')
+  const target = memoryTarget()
+
+  await combineTracks(video, audio, {
+    storage: await diskStorage(),
+    writable: target.writable,
+    timeline: 'align-starts',
+  })
+
+  const outputVideo = await packets(target.blob(), 'video')
+  const outputAudio = await packets(target.blob(), 'audio', {
+    applyAudioEdit: true,
+  })
+  const playableAudio = await packets(audio, 'audio', { applyAudioEdit: true })
+
+  expect(outputVideo[0]?.type).toBe('key')
+  expect(outputVideo[0]?.timestamp).toBe(0)
+  expect(outputAudio.map(packet => packet.data)).toStrictEqual(
+    playableAudio.map(packet => packet.data),
+  )
+  expect(outputAudio[0]?.timestamp).toBeCloseTo(playableAudio[0]!.timestamp, 4)
 })
 
 test('trims H.264 and AAC on the same presentation timeline', async () => {

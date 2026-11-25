@@ -81,6 +81,26 @@ test.each([
 )
 
 test.each([
+  { timeline: undefined, isValid: true },
+  { timeline: 'align-starts', isValid: true },
+  { timeline: { videoOffset: -1.5, audioOffset: 0.25 }, isValid: true },
+  { timeline: 'unknown', isValid: false },
+  { timeline: { videoOffset: Infinity }, isValid: false },
+  { timeline: { audioOffset: '0.25' }, isValid: false },
+  { timeline: null, isValid: false },
+])('validates the combine timeline: $timeline', ({ timeline, isValid }) => {
+  const input = new Blob(['media'])
+
+  expect(
+    isWorkerRequest({
+      type: 'run',
+      job: { operation: 'combine', video: input, audio: input, timeline },
+      path: ['job'],
+    }),
+  ).toBe(isValid)
+})
+
+test.each([
   { code: undefined, isValid: true },
   { code: 'UNSUPPORTED_CODEC', isValid: true },
   { code: 'QuotaExceededError', isValid: false },

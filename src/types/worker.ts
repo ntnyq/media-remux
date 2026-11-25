@@ -1,6 +1,7 @@
 import type { MEDIA_JOB_OPERATION, WORKER_MESSAGE_TYPE } from '../constants'
 import type { RemuxErrorCode } from './errors'
 import type {
+  CombineTimeline,
   RemuxInput,
   RemuxProgress,
   RemuxResult,
@@ -49,6 +50,9 @@ export type MediaJob = {
        * Media Blob or MPEG-TS descriptor supplying the primary audio track.
        */
       audio: RemuxInput
+
+      /** Defaults to preserving the source relative timing. */
+      timeline?: CombineTimeline
     }
   | {
       /**

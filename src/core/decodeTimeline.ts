@@ -107,19 +107,21 @@ export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
     },
 
     /**
-     * Applies the segment's common presentation shift to its decode constraints.
+     * Applies the segment's presentation shifts to its decode constraints.
      *
      * @param info - Validated shared presentation origin and span, in seconds.
+     * @param unshiftedStart - Earliest playable timestamp before track alignment.
      * @returns Nothing.
      */
-    finishSegment(info: SegmentInfo) {
-      for (const clock of clocks) {
+    finishSegment(info: SegmentInfo, unshiftedStart: number) {
+      for (const [index, clock] of clocks.entries()) {
         if (clock.segmentStart === Infinity) {
           // Audio can end before a trimmed segment's video starts.
           continue
         }
 
-        const segmentStart = clock.segmentStart - info.start + elapsed
+        const origin = info.trackOrigins?.[index] ?? info.start
+        const segmentStart = clock.segmentStart - origin + elapsed
 
         if (clock.isAv1) {
           if (clock.av1DecodeEnd - segmentStart > 1 / clock.timescale) {
@@ -129,18 +131,20 @@ export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
             )
           }
 
-          clock.av1DecodeEnd = clock.segmentAv1DecodeEnd - info.start + elapsed
+          clock.av1DecodeEnd = clock.segmentAv1DecodeEnd - origin + elapsed
           clock.segmentAv1DecodeEnd = -Infinity
           clock.segmentLastAv1Timestamp = -Infinity
         } else {
-          const earliestOrigin = clock.segmentMinimum - info.start + elapsed
+          const earliestOrigin = clock.segmentMinimum - origin + elapsed
           const sourceOrigin = clock.sourceDecodeStart
+          // Shift the inferred decode start by the same amount as presentation.
+          const shiftUnits = Math.round(
+            (unshiftedStart - origin) * clock.timescale,
+          )
           const decodeStartUnits =
             sourceOrigin === undefined
-              ? clock.decodeStartUnits
-              : Math.round(
-                  (sourceOrigin - info.start + elapsed) * clock.timescale,
-                )
+              ? clock.decodeStartUnits + shiftUnits
+              : Math.round((sourceOrigin - origin + elapsed) * clock.timescale)
 
           clock.decodeStartUnits = Math.min(
             decodeStartUnits,
@@ -151,7 +155,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
 
         clock.segmentMinimum = Infinity
         clock.start = Math.min(clock.start, segmentStart)
-        clock.end = Math.max(clock.end, clock.segmentEnd - info.start + elapsed)
+        clock.end = Math.max(clock.end, clock.segmentEnd - origin + elapsed)
         clock.segmentStart = Infinity
         clock.segmentEnd = -Infinity
       }

@@ -166,7 +166,7 @@ function runMediaJob(
 | `operation` | Required fields                          | Optional fields | Behavior                                                                                                |
 | ----------- | ---------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
 | `'remux'`   | `input: RemuxInput`                      | `tracks`        | Copy selected primary tracks from one input.                                                            |
-| `'combine'` | `video: RemuxInput`, `audio: RemuxInput` | None            | Use only primary video from `video` and primary audio from `audio`.                                     |
+| `'combine'` | `video: RemuxInput`, `audio: RemuxInput` | `timeline`      | Use only primary video from `video` and primary audio from `audio`.                                     |
 | `'concat'`  | `inputs: readonly Blob[]`                | `tracks`        | Join a nonempty list in playback order. Copy mode requires matching layouts and decoder configurations. |
 
 `tracks` defaults to `'all'`, which retains the available primary tracks. `'audio'` and `'video'` require and retain only the selected kind. Use `'video-with-optional-audio'` to require a primary video track in every input and keep its primary audio track when present. Use `'first-video-with-optional-audio'` to select the first video and first available audio in file order, matching FFmpeg's `-map 0:v:0 -map 0:a:0?`. Concat in copy mode requires matching track layouts. Combine jobs select video from the first input and audio from the second.
@@ -203,7 +203,7 @@ function remuxMedia(
 function combineTracks(
   video: RemuxInput,
   audio: RemuxInput,
-  options: Omit<RemuxOptions, 'tracks'>,
+  options: CombineOptions,
 ): Promise<RemuxResult>
 
 function concatMedia(
@@ -231,9 +231,18 @@ function concatMedia(
 
 These APIs return a summary, not a `File`. The caller owns the output destination and temporary files. Successful processing closes/unlocks `writable`; write-stage failure aborts/unlocks it. Preflight failure leaves the supplied stream untouched, so the caller must close or abort it as needed. Cancellation can stop the job until the output stream starts closing. Once closing starts, the stream's commit result determines the outcome. Store disposal closes handles but does not remove files.
 
-Remux and combine normalize the earliest playable timestamp to zero, preserving relative A/V offsets. Concat places each normalized segment after the preceding presentation end. H.264 MP4 with leading dependent frames starts at the first sync sample verified to contain an IDR picture. Whole audio packets with presentation timestamps before that picture are discarded. Copy mode rejects a cut where the first retained MP3 frame needs the discarded data. Use `normalizeAudio: true` for such cuts. Missing tracks, incompatible segment configurations, malformed media or timing, and video without a usable keyframe at the start of the retained segment reject the promise. I/O and callback errors also propagate.
+Remux and combine default to preserving relative A/V offsets and moving the earliest playable timestamp to zero. Concat places each normalized segment after the preceding presentation end. H.264 MP4 with leading dependent frames starts at the first sync sample verified to contain an IDR picture. With a shared timeline, whole audio packets with presentation timestamps before that picture are discarded. Copy mode rejects a cut where the first retained MP3 frame needs the discarded data. Use `normalizeAudio: true` for such cuts. Missing tracks, incompatible segment configurations, malformed media or timing, and video without a usable keyframe at the start of the retained segment reject the promise. I/O and callback errors also propagate.
 
 </details>
+
+### Aligning separate inputs
+
+Set `timeline` on a `combine` Worker job or in the `CombineOptions` passed to `combineTracks`. Omit it when both inputs use a shared media clock.
+
+- Use `timeline: 'align-starts'` when each input has its own clock and both tracks should start at zero. The earliest playable timestamp of each track becomes zero. Video starts after any required H.264 trim, and audio keeps its own playable start.
+- Use `timeline: { videoOffset: -1.483333, audioOffset: 0.25 }` to add signed offsets in seconds. Either field can be omitted and defaults to zero. Positive values delay that track relative to the other. The earliest playable timestamp after applying the offsets becomes zero. If video requires a trim, the shifted video and audio timestamps determine the audio cut.
+
+The shifts apply to presentation and decode timing before the output duration is determined.
 
 <details>
 <summary>Shared types — <code>RemuxResult</code>, <code>RemuxProgress</code>, <code>MediaOutputChunk</code>, and storage</summary>

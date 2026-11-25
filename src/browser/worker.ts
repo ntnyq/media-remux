@@ -168,7 +168,10 @@ export function installMediaWorker(
         }
 
         case MEDIA_JOB_OPERATION.combine: {
-          result = await combineTracks(job.video, job.audio, options)
+          result = await combineTracks(job.video, job.audio, {
+            ...options,
+            ...(job.timeline === undefined ? {} : { timeline: job.timeline }),
+          })
           break
         }
 

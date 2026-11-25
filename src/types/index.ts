@@ -23,6 +23,8 @@ export type {
   MediaOutputChunk,
   RemuxProgress,
   RemuxOptions,
+  CombineOptions,
+  CombineTimeline,
   RemuxResult,
 } from './remux'
 export type {

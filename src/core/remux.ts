@@ -8,6 +8,7 @@ import {
   REMUX_TRACK_SELECTION,
 } from '../constants'
 import type {
+  CombineOptions,
   RemuxInput,
   RemuxOptions,
   RemuxResult,
@@ -16,6 +17,7 @@ import type {
   SegmentInfo,
 } from '../types'
 import { checkAbort, createRemuxError } from '../utils'
+import { captureCombineTimeline } from '../utils/combineTimeline'
 import { captureRemuxInput } from '../utils/remuxInput'
 import { checkAudioDecoder } from './audioCodecs'
 import { createDecodeTimeline } from './decodeTimeline'
@@ -227,15 +229,16 @@ async function remuxInputs(
 
 /**
  * Combines the primary video and audio from separate MP4/FLV/MKV/MPEG-TS inputs.
- * Existing relative timestamps are preserved and the earliest playable time becomes zero.
- * When H.264 MP4 video is trimmed to an IDR, audio before its PTS is discarded.
+ * Defaults to preserving relative timestamps and normalizing the earliest
+ * playable time to zero. Independently timed tracks can be aligned explicitly.
+ * On a shared timeline, trimming leading H.264 MP4 video also trims audio.
  * Success closes the output stream; write-stage failures attempt cancellation.
  * The caller must supply fresh temporary stores and dispose them after the job.
  *
  * @param video - Media Blob or MPEG-TS descriptor supplying the primary video track.
  * @param audio - Media Blob or MPEG-TS descriptor supplying the primary audio track.
  * @param options - Positioned output stream, fresh temporary stores, optional
- * cancellation signal, and progress callback.
+ * timeline, cancellation signal, and progress callback.
  * @returns A promise resolving to the shared presentation span in seconds,
  * video/mp4 MIME type, and encoded payload bytes written, excluding container overhead.
  * @throws {TypeError} If either input is not a nonempty media input.
@@ -247,9 +250,10 @@ async function remuxInputs(
 export async function combineTracks(
   video: RemuxInput,
   audio: RemuxInput,
-  options: Omit<RemuxOptions, 'tracks'>,
+  options: CombineOptions,
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
+  const timeline = captureCombineTimeline(options.timeline)
 
   checkAbort(settings.signal)
   const videoSource = captureRemuxInput(video)
@@ -302,6 +306,8 @@ export async function combineTracks(
       settings.signal,
       decodeTimeline,
       settings.normalizeAudio,
+      true,
+      timeline,
     )
 
     if (

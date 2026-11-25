@@ -18,6 +18,7 @@ import {
 } from '../constants'
 import type { WorkerRequest, WorkerResponse } from '../types'
 import { isRemuxErrorCode } from '../utils'
+import { parseCombineTimeline } from '../utils/combineTimeline'
 import { isMpegTsInput } from '../utils/remuxInput'
 
 /**
@@ -136,6 +137,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   if (job['operation'] === MEDIA_JOB_OPERATION.combine) {
     return (
+      parseCombineTimeline(job['timeline']) !== null &&
       (job['video'] instanceof Blob || isMpegTsInput(job['video'])) &&
       (job['audio'] instanceof Blob || isMpegTsInput(job['audio']))
     )

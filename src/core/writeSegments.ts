@@ -228,7 +228,7 @@ export async function writeSegments(
 
   /**
    * Supplies the continuous encoded audio packets that start in this segment.
-   * @yields Normalized audio packets on the segment's original time base.
+   * @yields Normalized audio packets on the segment's shared time base.
    */
   async function* segmentAudio(info: SegmentInfo, isLast: boolean) {
     if (!audioPackets) {
@@ -271,6 +271,7 @@ export async function writeSegments(
                 segment.info.skippedPackets?.[index],
               ),
               writer,
+              origin: segment.info.trackOrigins?.[index] ?? segment.info.start,
               next: undefined as
                 | IteratorResult<EncodedPacket, void>
                 | undefined,
@@ -284,6 +285,7 @@ export async function writeSegments(
       cursors.push({
         iterator: segmentAudio(segment.info, segment.isLast),
         writer: normalizedWriter,
+        origin: segment.info.start,
         next: undefined,
       })
     }
@@ -315,7 +317,8 @@ export async function writeSegments(
           .toSorted(
             (left, right) =>
               (left.next?.value?.timestamp ?? 0) -
-              (right.next?.value?.timestamp ?? 0),
+              (right.next?.value?.timestamp ?? 0) -
+              (left.origin - right.origin),
           )
 
         if (!cursor || !cursor.next || cursor.next.done) {
@@ -324,13 +327,12 @@ export async function writeSegments(
 
         const packet = cursor.next.value
 
-        // Apply one shared shift to every track in this segment, preserving A/V
-        // offsets while placing its earliest presentation time after prior segments.
+        // The inspected origin maps source time to the segment start.
         await cursor.writer.add(
           new EncodedPacket(
             packet.data,
             packet.type,
-            packet.timestamp - segment.info.start + duration,
+            packet.timestamp - cursor.origin + duration,
             packet.duration,
             packet.sequenceNumber,
             packet.byteLength,

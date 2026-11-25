@@ -18,6 +18,7 @@ import type {
   WorkerResponse,
 } from '../types'
 import { checkAbort, withRemuxErrorCode } from '../utils'
+import { captureCombineTimeline } from '../utils/combineTimeline'
 import { captureRemuxInput } from '../utils/remuxInput'
 import { isWorkerResponse } from './protocol'
 
@@ -54,10 +55,13 @@ function captureJob(job: MediaJob): MediaJob {
       }
     }
     case MEDIA_JOB_OPERATION.combine: {
+      const timeline = captureCombineTimeline(job.timeline)
+
       return {
         operation: MEDIA_JOB_OPERATION.combine,
         video: captureRemuxInput(job.video),
         audio: captureRemuxInput(job.audio),
+        ...(isUndefined(timeline) ? {} : { timeline }),
         ...audioOptions,
       }
     }

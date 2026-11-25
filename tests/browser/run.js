@@ -240,6 +240,40 @@ async function verifyNormalizedAudio(context, video, options) {
 
   await verifyEditedAudio(context, options, true)
 
+  const offsetAudio = await runMediaJob(
+    {
+      operation: MEDIA_JOB_OPERATION.combine,
+      video,
+      audio: await fixture('audio-edited-head.m4a'),
+      normalizeAudio: true,
+      timeline: { audioOffset: 0.25 },
+    },
+    options,
+  )
+
+  try {
+    const decoded = await context.decodeAudioData(
+      await offsetAudio.file.arrayBuffer(),
+    )
+    const pcm = decoded.getChannelData(0)
+    const peak = (start, end) =>
+      pcm
+        .subarray(
+          Math.round(start * decoded.sampleRate),
+          Math.round(end * decoded.sampleRate),
+        )
+        .reduce((max, sample) => Math.max(max, Math.abs(sample)), 0)
+
+    assert(peak(0.1, 0.2) < 0.005, 'Audio started before the specified offset')
+    assert(
+      peak(0.28, 0.32) > 0.03,
+      'Audio was silent after the specified offset',
+    )
+    checks.push({ playback: 'offset-normalized-audio' })
+  } finally {
+    await offsetAudio.dispose()
+  }
+
   const [aac48, aac44] = await Promise.all([
     fixture('progressive.mp4'),
     fixture('progressive-two-audio.mp4'),
@@ -451,6 +485,7 @@ async function run(audioContext) {
       allowContinuityCounterReset: true,
     }
     const tsVideoStart = (15000 - 12910) / 90000
+    const fragmentedAudio = await fixture('subtitle-first.mp4')
     const playbackCases = [
       ['cfr-av', { operation: MEDIA_JOB_OPERATION.combine, video, audio }, 0],
       [
@@ -515,6 +550,25 @@ async function run(audioContext) {
         },
         tsVideoStart,
         true,
+      ],
+      [
+        'mixed-container-combine',
+        {
+          operation: MEDIA_JOB_OPERATION.combine,
+          video: segmentedTs,
+          audio: fragmentedAudio,
+        },
+        1 / 6,
+      ],
+      [
+        'aligned-mixed-container-combine',
+        {
+          operation: MEDIA_JOB_OPERATION.combine,
+          video: segmentedTs,
+          audio: fragmentedAudio,
+          timeline: 'align-starts',
+        },
+        0,
       ],
       [
         'vfr-mp4-flv',

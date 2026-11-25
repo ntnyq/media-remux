@@ -126,6 +126,25 @@ export interface RemuxOptions {
 }
 
 /**
+ * Aligns the earliest playable video and audio timestamps at zero, or adds
+ * signed offsets in seconds before normalizing the earliest track to zero.
+ */
+export type CombineTimeline =
+  | 'align-starts'
+  | {
+      /** Seconds to add to video timing. Defaults to zero. */
+      videoOffset?: number
+      /** Seconds to add to audio timing. Defaults to zero. */
+      audioOffset?: number
+    }
+
+/** Output and timeline options for combining separate video and audio inputs. */
+export interface CombineOptions extends Omit<RemuxOptions, 'tracks'> {
+  /** Defaults to preserving the source relative timing. */
+  timeline?: CombineTimeline
+}
+
+/**
  * Summary of a completed remux, track-combining, or concatenation operation.
  */
 export interface RemuxResult {

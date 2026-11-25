@@ -221,10 +221,12 @@ async function* pcmInputs(
   }
 
   for await (const { tracks, info } of segments) {
-    const track = tracks.find(
+    const audioIndex = tracks.findIndex(
       candidate => candidate.kind === MEDIA_TRACK_KIND.audio,
     )
-    const shift = (elapsed - info.start) * AAC_SAMPLE_RATE + preroll
+    const track = tracks[audioIndex]
+    const origin = info.trackOrigins?.[audioIndex] ?? info.start
+    const shift = (elapsed - origin) * AAC_SAMPLE_RATE + preroll
     const segmentStart = Math.round(elapsed * AAC_SAMPLE_RATE) + preroll
 
     elapsed += info.duration

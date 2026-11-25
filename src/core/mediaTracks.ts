@@ -9,6 +9,7 @@ import {
   REMUX_TRACK_SELECTION,
 } from '../constants'
 import type {
+  CombineTimeline,
   RemuxOptions,
   DecodeTimeline,
   MediaInput,
@@ -151,6 +152,7 @@ export function trackSignature(track: PacketTrack): string {
  * @param decodeTimeline - Optional output decode-clock planner shared across segments.
  * @param normalizeAudio - Collect the retained audio span for WebCodecs processing.
  * @param isFirstSegment - Whether a track-level edit can hide leading audio.
+ * @param timeline - Optional alignment or offsets for inputs to combine.
  * @returns A promise resolving to the earliest presentation timestamp and the
  * duration through the latest packet end, both measured in seconds.
  * @throws {Error} If timing or packet size is invalid, a source track is empty,
@@ -164,19 +166,29 @@ export async function inspectTracks(
   decodeTimeline?: DecodeTimeline,
   normalizeAudio = false,
   isFirstSegment = true,
+  timeline?: CombineTimeline,
 ): Promise<SegmentInfo> {
   let start = Infinity
+  let unshiftedStart = Infinity
   let end = -Infinity
   let trimBefore: number | undefined
   let audioRange: SegmentInfo['audioRange']
   const skippedPackets: number[] = []
+  const trackOffsets: number[] = []
+  const alignStarts = timeline === 'align-starts'
 
   for (const [index, track] of tracks.entries()) {
+    const isVideo = track.kind === MEDIA_TRACK_KIND.video
     const processesAudio =
       normalizeAudio && track.kind === MEDIA_TRACK_KIND.audio
     const { audioEditStart } = track
+    const manualOffset = alignStarts
+      ? 0
+      : ((isVideo ? timeline?.videoOffset : timeline?.audioOffset) ?? 0)
     let count = 0
     let skipped = 0
+    let trackStart = Infinity
+    let trackEnd = -Infinity
     let firstVideoSequence: number | undefined
     let maxTimestamp = -Infinity
     let maxTimestampBeforeLastKeyPacket = -Infinity
@@ -199,7 +211,7 @@ export async function inspectTracks(
       if (
         count === 0 &&
         skipped === 0 &&
-        track.kind === MEDIA_TRACK_KIND.video &&
+        isVideo &&
         packet.type !== FRAGMENT_SAMPLE_TYPE.key
       ) {
         if (!track.findNextRandomAccessPacket) {
@@ -221,7 +233,10 @@ export async function inspectTracks(
         }
 
         firstVideoSequence = key.sequenceNumber
-        trimBefore = key.timestamp
+
+        if (!alignStarts) {
+          trimBefore = key.timestamp + manualOffset
+        }
       }
 
       if (
@@ -230,7 +245,7 @@ export async function inspectTracks(
         (track.kind === MEDIA_TRACK_KIND.audio &&
           count === 0 &&
           !isUndefined(trimBefore) &&
-          packet.timestamp < trimBefore)
+          packet.timestamp + manualOffset < trimBefore)
       ) {
         skipped++
         continue
@@ -306,8 +321,8 @@ export async function inspectTracks(
 
       // B-frame presentation timestamps can arrive out of order. Inspect every
       // packet rather than treating the first decoded packet as the start.
-      start = Math.min(start, presentationStart)
-      end = Math.max(end, packet.timestamp + packet.duration)
+      trackStart = Math.min(trackStart, presentationStart)
+      trackEnd = Math.max(trackEnd, packet.timestamp + packet.duration)
       count++
     }
 
@@ -318,10 +333,19 @@ export async function inspectTracks(
       )
     }
 
+    unshiftedStart = Math.min(unshiftedStart, trackStart)
+
+    const offset = alignStarts && count > 0 ? -trackStart : manualOffset
+
+    start = Math.min(start, trackStart + offset)
+    end = Math.max(end, trackEnd + offset)
+    trackOffsets.push(offset)
     skippedPackets.push(skipped)
   }
 
-  if (!(end > start)) {
+  const duration = end - start
+
+  if (!(duration > 0) || !Number.isFinite(duration)) {
     throw createRemuxError(
       REMUX_ERROR_CODE.invalidInput,
       'Media segment has no positive duration.',
@@ -330,12 +354,15 @@ export async function inspectTracks(
 
   const info = {
     start,
-    duration: end - start,
+    duration,
+    ...(isUndefined(timeline)
+      ? {}
+      : { trackOrigins: trackOffsets.map(offset => start - offset) }),
     ...(skippedPackets.some(count => count > 0) ? { skippedPackets } : {}),
     ...(isUndefined(audioRange) ? {} : { audioRange }),
   }
 
-  decodeTimeline?.finishSegment(info)
+  decodeTimeline?.finishSegment(info, unshiftedStart)
 
   return info
 }

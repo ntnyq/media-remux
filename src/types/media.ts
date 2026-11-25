@@ -94,6 +94,12 @@ export interface SegmentInfo {
   start: number
 
   /**
+   * Per-track source timestamps that map to the segment start when combining
+   * independently timed inputs. By default every track uses `start`.
+   */
+  trackOrigins?: readonly number[]
+
+  /**
    * Positive span in seconds from start through the latest selected packet end.
    */
   duration: number
@@ -139,12 +145,13 @@ export interface DecodeTimeline {
   ): void
 
   /**
-   * Applies the segment's common presentation shift to its decode constraints.
+   * Applies the segment's presentation shifts to its decode constraints.
    *
    * @param info - Validated shared presentation origin and span, in seconds.
+   * @param unshiftedStart - Earliest playable timestamp before track alignment.
    * @returns Nothing.
    */
-  finishSegment(info: SegmentInfo): void
+  finishSegment(info: SegmentInfo, unshiftedStart: number): void
 
   /**
    * Snapshots decode origins and presentation bounds for one-based track IDs.

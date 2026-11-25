@@ -21,6 +21,8 @@ export type {
   MpegTsInput,
   RemuxInput,
   RemuxOptions,
+  CombineOptions,
+  CombineTimeline,
   RemuxResult,
   RemuxStorage,
   RemuxProgress,
