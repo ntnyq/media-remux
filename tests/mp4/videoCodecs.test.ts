@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict'
 import { expect, test } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
-import { parseHevcSps } from '../src/vendor/mediabunny/src/codec-data'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
+import {
+  deserializeAvcDecoderConfigurationRecord,
+  parseAvcSps,
+  parseHevcSps,
+  serializeAvcDecoderConfigurationRecord,
+} from '../../src/vendor/mediabunny/src/codec-data'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+
+const high444Sps = '67f4000a919b28c4d87370101014000003000400000300c03c489658'
 
 const videoTimescale = 57_600
 
@@ -463,4 +470,49 @@ test('preserves an AV1 video gap across a segment boundary and repeated remux', 
       }
     }
   }
+})
+
+test.each([134, 135, 138, 139, 144])(
+  'reads the common high-profile SPS fields for AVC profile %i',
+  profileIdc => {
+    // Use the shared SPS syntax preceding VUI, with x264's High 4:4:4
+    // dimensions, 4:3 sample aspect ratio, and full-range BT.709 metadata.
+    const sps = Buffer.from(high444Sps, 'hex')
+
+    sps[1] = profileIdc
+    expect(parseAvcSps(sps)).toMatchObject({
+      chromaFormatIdc: 3,
+      displayWidth: 96,
+      displayHeight: 64,
+      pixelAspectRatio: { num: 4, den: 3 },
+      fullRangeFlag: 1,
+      colourPrimaries: 1,
+      transferCharacteristics: 1,
+      matrixCoefficients: 1,
+    })
+  },
+)
+
+test('round-trips the High 4:4:4 Predictive AVC configuration extension', () => {
+  const sps = Buffer.from(high444Sps, 'hex')
+  const pps = Buffer.from('68ebe3c44844', 'hex')
+  const description = Buffer.concat([
+    Buffer.from([1, 244, 0, 10, 255, 225, 0, sps.length]),
+    sps,
+    Buffer.from([1, 0, pps.length]),
+    pps,
+    Buffer.from([255, 248, 248, 0]),
+  ])
+  const record = deserializeAvcDecoderConfigurationRecord(description)
+
+  expect(record).toMatchObject({
+    chromaFormat: 3,
+    bitDepthLumaMinus8: 0,
+    bitDepthChromaMinus8: 0,
+    sequenceParameterSetExt: [],
+  })
+  assert.ok(record)
+  expect(
+    Buffer.from(serializeAvcDecoderConfigurationRecord(record)),
+  ).toStrictEqual(description)
 })

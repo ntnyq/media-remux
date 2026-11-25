@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
-import { concatMedia, remuxMedia } from '../src'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { concatMedia, remuxMedia } from '../../src'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 test('preserves a 32-bit pixel aspect ratio with large coprime coded dimensions', async () => {
   const original = await fixture('video.mp4')

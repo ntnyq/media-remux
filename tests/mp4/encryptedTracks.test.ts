@@ -1,8 +1,8 @@
 import { getEventListeners } from 'node:events'
 import { expect, test } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
-import type { RemuxResult } from '../src'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
+import type { RemuxResult } from '../../src'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 test.each(['complete', 'unsupported-scheme', 'missing-auxiliary'] as const)(
   'rejects selected encrypted MP4 tracks before touching output: %s',

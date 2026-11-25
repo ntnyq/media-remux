@@ -33,10 +33,20 @@ async function listNames(directory) {
   return names.toSorted()
 }
 
-async function playbackTiming(file, playToEnd = false, onFrame) {
+async function playbackTiming(
+  file,
+  {
+    label,
+    playToEnd = false,
+    onFrame,
+    waitForInitialFrame = true,
+    timeoutMs = 10_000,
+  },
+) {
   const video = document.createElement('video')
 
   video.muted = true
+  video.preload = 'auto'
   document.body.append(video)
   const url = URL.createObjectURL(file)
   let timer
@@ -51,7 +61,15 @@ async function playbackTiming(file, playToEnd = false, onFrame) {
         )
       : null
 
-    timer = setTimeout(() => reject(new Error('Playback timed out')), 10_000)
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${label}: playback timed out at ${video.currentTime}s of ${video.duration}s (readyState ${video.readyState}, paused ${video.paused})`,
+          ),
+        ),
+      timeoutMs,
+    )
 
     function observeFrame(_, metadata) {
       resolve(metadata.mediaTime)
@@ -69,6 +87,12 @@ async function playbackTiming(file, playToEnd = false, onFrame) {
       { once: true },
     )
     video.src = url
+
+    // Capture the initial frame while paused so playback cannot advance past it.
+    if (waitForInitialFrame) {
+      await Promise.race([frame, failed])
+    }
+
     const [firstFrame] = await Promise.race([
       Promise.all([frame, video.play(), ended]),
       failed,
@@ -106,15 +130,20 @@ async function verifyAv1Splice(video, audio, options) {
       let previousFrame = 0
       let longestFrameInterval = 0
       let resumedAt = 0
-      const actual = await playbackTiming(joined.file, true, timestamp => {
-        const interval = timestamp - previousFrame
+      const actual = await playbackTiming(joined.file, {
+        label: 'av1-splice-gap',
+        playToEnd: true,
+        waitForInitialFrame: false,
+        onFrame(timestamp) {
+          const interval = timestamp - previousFrame
 
-        if (interval > longestFrameInterval) {
-          longestFrameInterval = interval
-          resumedAt = timestamp
-        }
+          if (interval > longestFrameInterval) {
+            longestFrameInterval = interval
+            resumedAt = timestamp
+          }
 
-        previousFrame = timestamp
+          previousFrame = timestamp
+        },
       })
       const expectedResume = clip.duration
 
@@ -224,18 +253,6 @@ async function verifyNormalizedAudio(context, video, options) {
     },
     options,
   )
-  const element = document.createElement('video')
-  const analyser = context.createAnalyser()
-  const mute = context.createGain()
-
-  mute.gain.value = 0
-  analyser.fftSize = 2048
-  const source = context.createMediaElementSource(element)
-
-  source.connect(analyser).connect(mute).connect(context.destination)
-  document.body.append(element)
-  const url = URL.createObjectURL(result.file)
-  const samples = new Float32Array(analyser.fftSize)
   const expected = [
     [1, 0],
     [3, 440],
@@ -244,88 +261,58 @@ async function verifyNormalizedAudio(context, video, options) {
     [7.5, 0],
   ]
   const observed = []
-  let interval
-  let timeout
 
   try {
-    const finished = new Promise((resolve, reject) => {
-      element.addEventListener('ended', resolve, { once: true })
-      element.addEventListener(
-        'error',
-        () => reject(new Error(element.error?.message ?? 'Playback failed')),
-        { once: true },
-      )
-      timeout = setTimeout(
-        () => reject(new Error('Normalized audio playback timed out')),
-        15_000,
-      )
-
-      interval = setInterval(() => {
-        const next = expected[observed.length]
-
-        if (!next || element.currentTime < next[0]) {
-          return
-        }
-
-        analyser.getFloatTimeDomainData(samples)
-        let crossings = 0
-
-        for (let index = 1; index < samples.length; index++) {
-          if (samples[index - 1] <= 0 && samples[index] > 0) {
-            crossings++
-          }
-        }
-
-        observed.push({
-          timestamp: element.currentTime,
-          rms: Math.sqrt(
-            samples.reduce((sum, sample) => sum + sample * sample, 0) /
-              samples.length,
-          ),
-          frequency: (crossings * context.sampleRate) / samples.length,
-        })
-      }, 20)
+    const decoded = await context.decodeAudioData(
+      await result.file.arrayBuffer(),
+    )
+    const pcm = decoded.getChannelData(0)
+    const { duration } = await playbackTiming(result.file, {
+      label: 'normalized-mixed-audio',
+      playToEnd: true,
+      timeoutMs: 30_000,
     })
 
-    element.src = url
-    await Promise.all([element.play(), finished])
     assert(
-      Math.abs(element.duration - result.duration) < 0.005,
-      `Normalized audio duration ${element.duration} differs from the job duration ${result.duration}`,
+      Math.abs(duration - result.duration) < 0.005,
+      `Normalized audio duration ${duration} differs from the job duration ${result.duration}`,
     )
-    assert(observed.length === expected.length, 'Missing audio measurements')
 
-    for (const [index, [timestamp, frequency]] of expected.entries()) {
-      const sample = observed[index]
+    for (const [timestamp, frequency] of expected) {
+      const end = Math.round(timestamp * decoded.sampleRate)
+      const samples = pcm.subarray(end - 2048, end)
 
-      assert(
-        sample.timestamp - timestamp < 0.15,
-        'Audio measurement missed its target',
+      assert(samples.length === 2048, `Missing audio at ${timestamp} seconds`)
+
+      let crossings = 0
+
+      for (let index = 1; index < samples.length; index++) {
+        if (samples[index - 1] <= 0 && samples[index] > 0) {
+          crossings++
+        }
+      }
+
+      const pitch = (crossings * decoded.sampleRate) / samples.length
+      const rms = Math.sqrt(
+        samples.reduce((sum, sample) => sum + sample * sample, 0) /
+          samples.length,
       )
+
       assert(
         frequency === 0
-          ? sample.rms < 0.002
-          : sample.rms > 0.01 && Math.abs(sample.frequency - frequency) < 30,
+          ? rms < 0.002
+          : rms > 0.01 && Math.abs(pitch - frequency) < 30,
         `Unexpected audio level or pitch at ${timestamp} seconds`,
       )
+      observed.push({ timestamp, rms, frequency: pitch })
     }
 
     checks.push({
       playback: 'normalized-mixed-audio',
-      duration: element.duration,
+      duration,
       observed,
     })
   } finally {
-    clearInterval(interval)
-    clearTimeout(timeout)
-    element.pause()
-    element.removeAttribute('src')
-    element.load()
-    element.remove()
-    source.disconnect()
-    analyser.disconnect()
-    mute.disconnect()
-    URL.revokeObjectURL(url)
     await result.dispose()
   }
 
@@ -563,7 +550,12 @@ async function run(audioContext) {
       const result = await runMediaJob(job, { createWorker, directory })
 
       try {
-        const actual = await playbackTiming(result.file, playToEnd)
+        const actual = await playbackTiming(result.file, {
+          label,
+          playToEnd,
+          // AV1 can require active playback before Chrome presents a frame.
+          waitForInitialFrame: label !== 'av1-av',
+        })
 
         assert(
           Math.abs(actual.firstFrame - firstFrame) < 0.00005,

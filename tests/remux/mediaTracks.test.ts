@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
-import { inspectTracks, trackSignature } from '../src/core/mediaTracks'
-import type { PacketTrack } from '../src/types'
-import { EncodedPacket } from '../src/vendor/mediabunny/src/packet'
+import { inspectTracks, trackSignature } from '../../src/core/mediaTracks'
+import type { PacketTrack } from '../../src/types'
+import { EncodedPacket } from '../../src/vendor/mediabunny/src/packet'
 
 /**
  * Creates a repeatable video track with a caller-selected decode-order timeline.

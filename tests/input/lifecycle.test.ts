@@ -1,8 +1,10 @@
+import { getEventListeners } from 'node:events'
 import { expect, test } from 'vitest'
-import { openMediaInput } from '../src/core/input/mediaInput'
-import { inspectTracks } from '../src/core/mediaTracks'
-import { fixture } from './helpers/media'
-import { fragmentedMp4 } from './helpers/mp4Fragments'
+import { combineTracks } from '../../src'
+import { openMediaInput } from '../../src/core/input/mediaInput'
+import { inspectTracks } from '../../src/core/mediaTracks'
+import { diskStorage, fixture, memoryTarget } from '../helpers/media'
+import { fragmentedMp4 } from '../helpers/mp4Fragments'
 
 test.each([
   { name: 'video.mp4', length: 4 },
@@ -224,5 +226,30 @@ test.each([false, true])(
       await iterator.return()
       input.dispose()
     }
+  },
+)
+
+test.each(['empty', 'malformed'] as const)(
+  'releases the video input when opening %s audio fails',
+  async kind => {
+    const audio = kind === 'empty' ? new Blob() : new Blob(['invalid media'])
+    const controller = new AbortController()
+    const target = memoryTarget()
+
+    await expect(
+      combineTracks(await fixture('video.mp4'), audio, {
+        signal: controller.signal,
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toThrow(
+      kind === 'empty' ? 'nonempty Blob' : 'unsupported or unrecognizable',
+    )
+    const listeners = getEventListeners(controller.signal, 'abort')
+
+    controller.abort()
+    expect(listeners).toStrictEqual([])
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
   },
 )

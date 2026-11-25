@@ -6,7 +6,7 @@ Each case ran serially three times through `runMediaJob`, with both input and ou
 
 ## Results
 
-Both inputs contain 150 seconds of 1280×720, 30 fps H.264 with B frames and 48 kHz AAC. Each has 4,500 video frames; the normal case has 75 keyframes, the long-GOP case one keyframe. The latter exceeds the 4,096-timestamp in-memory sorting run and exercises disk sorting.
+Both inputs contain 150 seconds of 1280×720, 30 fps H.264 with B frames and 48 kHz AAC. Each has 4,500 video frames. The normal case has 75 keyframes, and the long-GOP case has one. The measured build sent the long GOP through disk sorting. The current copy path uses the preflight decode clock and skips that sort when decode timing is available.
 
 | Input           |      Size | Three elapsed times      |   Median | Median throughput |
 | --------------- | --------: | ------------------------ | -------: | ----------------: |

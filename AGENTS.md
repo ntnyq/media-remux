@@ -6,7 +6,9 @@
 - `src/core/` handles remuxing, track combining, segment concatenation, and audio normalization. Format-specific readers live in `src/core/input/`.
 - `src/browser/` owns the Worker client and protocol. `src/storage/` defines disk-backed fragment stores and their Origin Private File System (OPFS) adapters.
 - `src/vendor/mediabunny/` contains patched upstream sources. Preserve license headers and consult `MIGRATION.md` there before changing the vendored code.
-- `tests/` holds Vitest suites, `tests/helpers/` holds shared test utilities, `tests/fixtures/` holds sample media, and `tests/browser/` holds the browser harness.
+- `tests/input/` covers input readers and lifecycle, `tests/mp4/` covers MP4 boxes, tracks, and codecs, and `tests/remux/` covers the public APIs, timeline handling, and audio normalization.
+- `tests/output/` covers muxer timing and stream lifecycle, `tests/storage/` covers disk-backed fragment stores, and `tests/browser/` holds Worker tests and the browser harness.
+- `tests/helpers/` holds shared test utilities and `tests/fixtures/` holds sample media.
 
 ## Build, Test, and Development Commands
 
@@ -23,7 +25,7 @@ Follow strict TypeScript and ESM conventions. Use two spaces, single quotes, LF 
 
 ## Testing Guidelines
 
-Put regression tests in `tests/<feature>.test.ts`. Run a focused suite with `pnpm test tests/remux.test.ts`. Reuse small fixtures and document generation commands for new fixtures in `tests/fixtures/README.md`. Install FFmpeg to enable the optional independent decode check. Run browser coverage for changes to Worker, OPFS, playback, or native AAC behavior.
+Put regression tests in the corresponding `tests/<area>/<feature>.test.ts` suite. Run a focused suite with `pnpm test tests/remux/api.test.ts` or run a whole area with `pnpm test tests/mp4/`. Reuse small fixtures and document generation commands for new fixtures in `tests/fixtures/README.md`. Install FFmpeg to enable the optional independent decode check. Run browser coverage for changes to Worker, OPFS, playback, or native AAC behavior.
 
 ## Commits and Pull Requests
 

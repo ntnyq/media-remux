@@ -1,8 +1,11 @@
 import { expect, test } from 'vitest'
-import { concatMedia, remuxMedia } from '../src'
-import { openMediaInput } from '../src/core/input/mediaInput'
-import { trackSignature } from '../src/core/mediaTracks'
-import { fixture, packets, diskStorage, memoryTarget } from './helpers/media'
+import { concatMedia, remuxMedia } from '../../src'
+import { openMediaInput } from '../../src/core/input/mediaInput'
+import { trackSignature } from '../../src/core/mediaTracks'
+import { Input } from '../../src/vendor/mediabunny/src/input'
+import { MP4 } from '../../src/vendor/mediabunny/src/input-format'
+import { BlobSource } from '../../src/vendor/mediabunny/src/source'
+import { fixture, packets, diskStorage, memoryTarget } from '../helpers/media'
 
 test.each([false, true])(
   'retains VFR decode durations in FLV packets (metadataOnly=%s)',
@@ -583,4 +586,33 @@ test('extracts selected AAC without requiring the discarded FLV video codec', as
     before.map(packet => packet.data),
   )
   await expect(packets(target.blob(), 'video')).resolves.toStrictEqual([])
+})
+
+test('remuxes AAC-LC FLV with a channel layout in the program config element', async () => {
+  const input = await fixture('aac-pce.flv')
+  const target = memoryTarget()
+
+  await remuxMedia(input, {
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+
+  const output = target.blob()
+  const parsed = new Input({
+    formats: [MP4],
+    source: new BlobSource(output),
+  })
+
+  try {
+    const track = await parsed.getPrimaryAudioTrack()
+
+    await expect(track?.getNumberOfChannels()).resolves.toBe(2)
+    await expect(track?.getSampleRate()).resolves.toBe(48_000)
+  } finally {
+    parsed.dispose()
+  }
+
+  expect(
+    (await packets(output, 'audio')).map(packet => packet.data),
+  ).toStrictEqual((await packets(input, 'audio')).map(packet => packet.data))
 })

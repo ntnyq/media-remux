@@ -5,10 +5,10 @@ import {
   remuxMedia,
   type RemuxInput,
   type RemuxTrackSelection,
-} from '../src'
-import { REMUX_ERROR_CODE } from '../src/constants'
-import { openMediaInput } from '../src/core/input/mediaInput'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+} from '../../src'
+import { REMUX_ERROR_CODE } from '../../src/constants'
+import { openMediaInput } from '../../src/core/input/mediaInput'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 const packetSize = 188
 const videoPid = 0x100

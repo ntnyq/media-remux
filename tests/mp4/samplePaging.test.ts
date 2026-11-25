@@ -1,12 +1,12 @@
 import { expect, test } from 'vitest'
-import { Input } from '../src/vendor/mediabunny/src/input'
-import { MP4 } from '../src/vendor/mediabunny/src/input-format'
-import { EncodedPacketSink } from '../src/vendor/mediabunny/src/media-sink'
-import { BlobSource } from '../src/vendor/mediabunny/src/source'
-import { fixture as readFixture } from './helpers/media'
-import { fragmentedMp4 } from './helpers/mp4Fragments'
-import { indexedMp4 } from './helpers/mp4Index'
-import { largeMoof } from './helpers/mp4Moof'
+import { Input } from '../../src/vendor/mediabunny/src/input'
+import { MP4 } from '../../src/vendor/mediabunny/src/input-format'
+import { EncodedPacketSink } from '../../src/vendor/mediabunny/src/media-sink'
+import { BlobSource } from '../../src/vendor/mediabunny/src/source'
+import { fixture as readFixture } from '../helpers/media'
+import { fragmentedMp4 } from '../helpers/mp4Fragments'
+import { indexedMp4 } from '../helpers/mp4Index'
+import { largeMoof } from '../helpers/mp4Moof'
 
 test.each([
   { trunVersion: 0, compositionShift: 2 ** 31 - 1 },

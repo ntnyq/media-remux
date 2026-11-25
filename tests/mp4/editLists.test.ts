@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
-import type { RemuxResult } from '../src'
-import { openMediaInput } from '../src/core/input/mediaInput'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
-import { indexedMp4 } from './helpers/mp4Index'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
+import type { RemuxResult } from '../../src'
+import { openMediaInput } from '../../src/core/input/mediaInput'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+import { indexedMp4 } from '../helpers/mp4Index'
 
 test.each(['remux', 'combine'] as const)(
   'can %s AAC when a discarded video track has an unsupported dwell edit',

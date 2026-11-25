@@ -1,12 +1,12 @@
 import { expect, test } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
-import type { RemuxResult } from '../src'
-import { Input } from '../src/vendor/mediabunny/src/input'
-import { MP4 } from '../src/vendor/mediabunny/src/input-format'
-import { IsobmffDemuxer } from '../src/vendor/mediabunny/src/isobmff/isobmff-demuxer'
-import { CustomSource } from './helpers/CustomSource'
-import { diskStorage, fixture, memoryTarget } from './helpers/media'
-import { fragmentedMp4 } from './helpers/mp4Fragments'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
+import type { RemuxResult } from '../../src'
+import { Input } from '../../src/vendor/mediabunny/src/input'
+import { MP4 } from '../../src/vendor/mediabunny/src/input-format'
+import { IsobmffDemuxer } from '../../src/vendor/mediabunny/src/isobmff/isobmff-demuxer'
+import { CustomSource } from '../helpers/CustomSource'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+import { fragmentedMp4 } from '../helpers/mp4Fragments'
 
 test.each([0, 1])(
   'rejects a zero or duplicate MP4 track ID (%s) before touching output',
@@ -218,4 +218,63 @@ test('retries hybrid decode-time recovery after a sample-table read fails', asyn
   } finally {
     input.dispose()
   }
+})
+
+test('rejects backwards fragment timestamps before touching any core output', async () => {
+  const fragmented = await fragmentedMp4({ fragments: 3, indexed: false })
+  const original = fragmented.blob()
+  const bytes = Buffer.from(await original.arrayBuffer())
+  const offset = bytes.indexOf('tfdt', fragmented.fragmentOffset(1, 1))
+
+  expect(offset).toBeGreaterThan(0)
+  bytes.writeBigUInt64BE(0n, offset + 8)
+  const malformed = new Blob([bytes])
+  const video = await fixture('video.mp4')
+
+  for (const operation of ['remux', 'concat', 'combine'] as const) {
+    const target = memoryTarget()
+    const options = {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }
+    let job: Promise<RemuxResult>
+
+    if (operation === 'combine') {
+      job = combineTracks(video, malformed, options)
+    } else if (operation === 'concat') {
+      job = concatMedia([original, malformed], options)
+    } else {
+      job = remuxMedia(malformed, options)
+    }
+
+    await expect(job).rejects.toThrow('previous GOP')
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.state.isClosed).toBe(false)
+    expect(target.state.isAborted).toBe(false)
+    expect(target.writable.locked).toBe(false)
+  }
+})
+
+test('extracts unchanged AAC payloads after a subtitle traf with an implicit data base', async () => {
+  const input = await fixture('subtitle-first.mp4')
+  const expected = await packets(await fixture('audio.m4a'), 'audio')
+  const parsed = await packets(input, 'audio')
+
+  expect(parsed.map(packet => packet.data)).toStrictEqual(
+    expected.map(packet => packet.data),
+  )
+  const target = memoryTarget()
+  const result = await remuxMedia(input, {
+    tracks: 'audio',
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+  const actual = await packets(target.blob(), 'audio')
+
+  expect(actual.map(packet => packet.data)).toStrictEqual(
+    expected.map(packet => packet.data),
+  )
+  expect(actual).toHaveLength(expected.length)
+  expect(result.mimeType).toBe('audio/mp4')
+  expect(target.state.isClosed).toBe(true)
 })

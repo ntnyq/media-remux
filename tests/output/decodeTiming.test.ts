@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
-import { concatMedia, remuxMedia } from '../src'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
-import { indexedMp4 } from './helpers/mp4Index'
+import { concatMedia, remuxMedia } from '../../src'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+import { indexedMp4 } from '../helpers/mp4Index'
 
 test('plans decode lead before writing an earlier segment with no reordering', async () => {
   const first = (

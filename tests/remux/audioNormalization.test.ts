@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { remuxMedia } from '../src'
-import { encodeAac } from '../src/core/audioCodecs'
-import { diskStorage, fixture, memoryTarget } from './helpers/media'
+import { remuxMedia } from '../../src'
+import { encodeAac } from '../../src/core/audioCodecs'
+import { diskStorage, fixture, memoryTarget } from '../helpers/media'
 
 afterEach(() => vi.unstubAllGlobals())
 

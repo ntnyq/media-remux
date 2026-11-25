@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'vitest'
-import { createDiskFragmentSamples } from '../src/storage/fragmentSamples'
-import type { FragmentSample } from '../src/types'
-import { temporaryFragmentSamples } from './helpers/fragmentSamples'
+import { createDiskFragmentSamples } from '../../src/storage/fragmentSamples'
+import type { FragmentSample } from '../../src/types'
+import { temporaryFragmentSamples } from '../helpers/fragmentSamples'
 
 function sample(
   timestamp: number,

@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
-import { concatMedia, remuxMedia } from '../src'
-import { openMediaInput } from '../src/core/input/mediaInput'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { concatMedia, remuxMedia } from '../../src'
+import { openMediaInput } from '../../src/core/input/mediaInput'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 test('copies MKV H.264 B frames and AAC with their shared presentation timeline', async () => {
   const source = await fixture('progressive.mkv')

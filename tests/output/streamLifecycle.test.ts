@@ -1,13 +1,16 @@
+import assert from 'node:assert/strict'
 import { setImmediate } from 'node:timers/promises'
 import { expect, test, vi } from 'vitest'
-import { combineTracks, concatMedia, remuxMedia } from '../src'
-import { EncodedAudioPacketSource } from '../src/vendor/mediabunny/src/media-source'
-import { Output } from '../src/vendor/mediabunny/src/output'
-import { Mp4OutputFormat } from '../src/vendor/mediabunny/src/output-format'
-import { StreamTarget } from '../src/vendor/mediabunny/src/target'
-import { temporaryFragmentSamples } from './helpers/fragmentSamples'
-import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
-import { indexedMp4 } from './helpers/mp4Index'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
+import { EncodedAudioPacketSource } from '../../src/vendor/mediabunny/src/media-source'
+import { Output } from '../../src/vendor/mediabunny/src/output'
+import { Mp4OutputFormat } from '../../src/vendor/mediabunny/src/output-format'
+import { StreamTarget } from '../../src/vendor/mediabunny/src/target'
+import type { StreamTargetChunk } from '../../src/vendor/mediabunny/src/target'
+import { Writer } from '../../src/vendor/mediabunny/src/writer'
+import { temporaryFragmentSamples } from '../helpers/fragmentSamples'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+import { indexedMp4 } from '../helpers/mp4Index'
 
 test('releases the output stream when the muxer fails to start', async () => {
   const target = memoryTarget()
@@ -315,3 +318,64 @@ test.each([
     }
   },
 )
+
+test('preserves the abort reason and aborts/unlocks a partially written output', async () => {
+  const controller = new AbortController()
+  const reason = new Error('test cancellation')
+  const target = memoryTarget()
+
+  await expect(
+    remuxMedia(await fixture('video.mp4'), {
+      writable: target.writable,
+      storage: await diskStorage(),
+      signal: controller.signal,
+      onProgress(progress) {
+        if (progress.phase === 'remux') {
+          controller.abort(reason)
+        }
+      },
+    }),
+  ).rejects.toBe(reason)
+  expect(target.state.isAborted).toBe(true)
+  expect(target.state.isClosed).toBe(false)
+  expect(target.writable.locked).toBe(false)
+})
+
+test('propagates output I/O failures and releases the stream lock', async () => {
+  const failure = new Error('disk full')
+  const writable = new WritableStream({
+    write() {
+      throw failure
+    },
+  })
+
+  await expect(
+    remuxMedia(await fixture('video.mp4'), {
+      writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toBe(failure)
+  expect(writable.locked).toBe(false)
+})
+
+test('writes a single buffer spanning thousands of stream chunks', async () => {
+  const input = new Uint8Array(16 * 1024 * 1024 + 17).fill(0xab)
+  let end = 0
+  const stream = new WritableStream<StreamTargetChunk>({
+    write({ data, position }) {
+      assert.equal(position, end)
+      assert.equal(data[0], 0xab)
+      assert.equal(data.at(-1), 0xab)
+      end += data.byteLength
+    },
+  })
+  const target = new StreamTarget(stream, { chunked: true, chunkSize: 1024 })
+  const writer = new Writer(target, true)
+
+  writer.start()
+  writer.write(input)
+  await writer.flush()
+  await writer.finalize()
+  expect(end).toBe(input.byteLength)
+  expect(stream.locked).toBe(false)
+})
