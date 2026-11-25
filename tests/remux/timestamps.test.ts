@@ -27,6 +27,12 @@ test.each([
     videoStart: 0,
     audioStart: 0.25,
   },
+  {
+    mode: 'a large common offset',
+    timeline: { videoOffset: 2 ** 50, audioOffset: 2 ** 50 + 0.25 },
+    videoStart: 0,
+    audioStart: 0.25 - 1 / 6,
+  },
 ] as const)(
   'combines segmented TS video and fragmented MP4 audio with $mode',
   async ({ timeline, videoStart, audioStart }) => {

@@ -288,7 +288,7 @@ export type BlobSourceOptions = {
      * field to `false` to try a slower but more stable reading method.
      */
     useStreamReader?: boolean | undefined;
-    /** Handles errors that occur while no read is pending. By default, these become unhandled rejections. */
+    /** Reports speculative read failures. A later request can retry the missing bytes. */
     handleUnhandledError?: ((error: unknown) => unknown) | undefined;
 };
 const blobReaderRegistry = typeof FinalizationRegistry !== 'undefined'
@@ -396,7 +396,6 @@ export class BlobSource extends Source {
                     break;
                 }
                 if (done) {
-                    this._orchestrator.onWorkerFinished(worker);
                     throw new Error('Blob reader stopped unexpectedly before all requested data was read.');
                 }
                 this._dispatchRead(worker.currentPos, worker.currentPos + value.length);
@@ -406,6 +405,9 @@ export class BlobSource extends Source {
                 const data = await this._blob.slice(worker.currentPos, worker.targetPos).arrayBuffer();
                 if (worker.aborted) {
                     break;
+                }
+                if (data.byteLength === 0) {
+                    throw new Error('Blob reader stopped unexpectedly before all requested data was read.');
                 }
                 this._dispatchRead(worker.currentPos, worker.currentPos + data.byteLength);
                 this._orchestrator.supplyWorkerData(worker, new Uint8Array(data));
@@ -633,8 +635,12 @@ class ReadOrchestrator {
         };
         // Fire off workers to take care of patching the holes
         outer: for (const outerHole of outerHoles) {
+            // A read only depends on workers covering bytes in its requested range.
+            const pending = pendingSlice && outerHole.start < innerEnd && outerHole.end > innerStart
+                ? [pendingSlice]
+                : [];
             for (const worker of this.workers) {
-                const addedToWorker = this.checkHoleAgainstWorker(worker, outerHole, pendingSlice ? [pendingSlice] : []);
+                const addedToWorker = this.checkHoleAgainstWorker(worker, outerHole, pending);
                 if (addedToWorker) {
                     this.checkQueuedReadsAgainstWorker(worker);
                     continue outer;
@@ -644,9 +650,7 @@ class ReadOrchestrator {
             const strictTarget = outerHole.end < outerEnd || this.fileSize !== null;
             const newWorker = this.createWorker(outerHole.start, outerHole.end, strictTarget);
             if (newWorker) {
-                if (pendingSlice) {
-                    newWorker.pendingSlices = [pendingSlice];
-                }
+                newWorker.pendingSlices = pending;
                 this.runWorker(newWorker);
             }
             else {
@@ -658,9 +662,7 @@ class ReadOrchestrator {
                 if (entry && outerHole.start <= entry.hole.end) {
                     entry.hole.end = Math.max(entry.hole.end, outerHole.end);
                     entry.strictTarget &&= strictTarget;
-                    if (pendingSlice) {
-                        entry.pendingSlices.push(pendingSlice);
-                    }
+                    entry.pendingSlices.push(...pending);
                 }
                 else {
                     index++;
@@ -671,7 +673,7 @@ class ReadOrchestrator {
                             end: outerHole.end,
                         },
                         strictTarget,
-                        pendingSlices: pendingSlice ? [pendingSlice] : [],
+                        pendingSlices: pending,
                         age: this.nextAge++,
                     };
                     this.queuedReads.splice(index, 0, entry);
@@ -697,21 +699,6 @@ class ReadOrchestrator {
                 view: toDataView(bytes),
                 offset: innerStart,
             } satisfies ReadResult));
-        }
-        else {
-            // The requested region was satisfied by the cache, but the entire prefetch region was not
-            promise.catch((error) => {
-                if (this.disposed) {
-                    return; // Swallow the error
-                }
-                // Nobody's awaiting this result but an errored read is still notable
-                if (this.options.handleUnhandledError) {
-                    this.options.handleUnhandledError(error);
-                }
-                else {
-                    throw error;
-                }
-            });
         }
         return result;
     }
@@ -801,17 +788,20 @@ class ReadOrchestrator {
         void this.options.runWorker(worker)
             .catch((error) => {
             worker.running = false;
+            if (worker.aborted || this.disposed) {
+                return;
+            }
+            // Discard a failed reader so the next request can reopen the range.
+            const index = this.workers.indexOf(worker);
+            assert(index !== -1);
+            this.workers.splice(index, 1);
+            this.options.onWorkerRemoved?.(worker);
             if (worker.pendingSlices.length > 0) {
                 worker.pendingSlices.forEach(x => x.reject(error)); // Make sure to propagate any errors
                 worker.pendingSlices.length = 0;
             }
-            else if (!worker.aborted && !this.disposed) {
-                if (this.options.handleUnhandledError) {
-                    this.options.handleUnhandledError(error);
-                }
-                else {
-                    throw error; // So it doesn't get swallowed
-                }
+            else {
+                this.options.handleUnhandledError?.(error);
             }
         })
             .finally(() => {
@@ -899,49 +889,6 @@ class ReadOrchestrator {
             }
         }
     }
-    supplyFileSize(size: number) {
-        assert(this.fileSize === null);
-        this.fileSize = size;
-        // Trim the workers with this new information
-        for (const worker of this.workers) {
-            worker.targetPos = Math.min(worker.targetPos, size);
-            worker.strictTarget = true;
-            for (let i = 0; i < worker.pendingSlices.length; i++) {
-                const pendingSlice = worker.pendingSlices[i]!;
-                for (const hole of pendingSlice.holes) {
-                    if (hole.end > size) {
-                        // Can't satisfy this slice anymore
-                        pendingSlice.resolve(null);
-                        worker.pendingSlices.splice(i, 1);
-                        i--;
-                        break;
-                    }
-                }
-            }
-        }
-        // Trim the queued reads as well
-        for (let i = 0; i < this.queuedReads.length; i++) {
-            const queuedRead = this.queuedReads[i]!;
-            for (let j = 0; j < queuedRead.pendingSlices.length; j++) {
-                const slice = queuedRead.pendingSlices[j]!;
-                // If the slice itself is out of bounds, resolve it
-                if (slice.start + slice.bytes.length > size) {
-                    slice.resolve(null);
-                    queuedRead.pendingSlices.splice(j, 1);
-                    j--;
-                }
-            }
-            if (queuedRead.hole.start >= size) {
-                // Entirely out of bounds
-                this.queuedReads.splice(i, 1);
-                i--;
-            }
-            else {
-                queuedRead.hole.end = Math.min(queuedRead.hole.end, size);
-                queuedRead.strictTarget = true;
-            }
-        }
-    }
     signalWorkerStoppedRunning(worker: ReadWorker) {
         worker.running = false;
         if (!worker.aborted) {
@@ -950,24 +897,6 @@ class ReadOrchestrator {
             // Since targetPos has been reached, we can confidently say that this worker has completed its share of work
             // on the pending slices and must no longer care about them.
             worker.pendingSlices.length = 0;
-        }
-    }
-    /** Called when a worker reaches the end of the underlying data and must be cleaned up. */
-    onWorkerFinished(worker: ReadWorker) {
-        const index = this.workers.indexOf(worker);
-        assert(index !== -1);
-        worker.running = false;
-        this.workers.splice(index, 1);
-        this.options.onWorkerRemoved?.(worker);
-        if (this.fileSize === null) {
-            // We can now deduce the file size!
-            this.supplyFileSize(worker.currentPos);
-        }
-        for (const pendingSlice of worker.pendingSlices) {
-            // Slices ending before this point are still being filled by other workers
-            if (pendingSlice.start + pendingSlice.bytes.length > worker.currentPos) {
-                pendingSlice.resolve(null);
-            }
         }
     }
     insertIntoCache(entry: CacheEntry) {

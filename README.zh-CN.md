@@ -163,11 +163,11 @@ function runMediaJob(
 
 `job` 是由 `operation` 区分的联合类型。`RemuxInput` 接受非空的 MP4/FLV/MKV/MPEG-TS `Blob`（包括 `File`），也接受 [MPEG-TS 分片描述符](#mpeg-ts-分片边界)。
 
-| `operation` | 必填字段                                 | 可选字段 | 行为                                                           |
-| ----------- | ---------------------------------------- | -------- | -------------------------------------------------------------- |
-| `'remux'`   | `input: RemuxInput`                      | `tracks` | 复制单个输入中所选的主轨道。                                   |
-| `'combine'` | `video: RemuxInput`、`audio: RemuxInput` | 无       | 仅使用 `video` 的主视频轨道和 `audio` 的主音轨。               |
-| `'concat'`  | `inputs: readonly Blob[]`                | `tracks` | 按播放顺序拼接非空列表。复制模式要求轨道布局和解码器配置一致。 |
+| `operation` | 必填字段                                 | 可选字段   | 行为                                                           |
+| ----------- | ---------------------------------------- | ---------- | -------------------------------------------------------------- |
+| `'remux'`   | `input: RemuxInput`                      | `tracks`   | 复制单个输入中所选的主轨道。                                   |
+| `'combine'` | `video: RemuxInput`、`audio: RemuxInput` | `timeline` | 仅使用 `video` 的主视频轨道和 `audio` 的主音轨。               |
+| `'concat'`  | `inputs: readonly Blob[]`                | `tracks`   | 按播放顺序拼接非空列表。复制模式要求轨道布局和解码器配置一致。 |
 
 `tracks` 默认为 `'all'`，保留可用的主轨道。`'audio'` 和 `'video'` 只保留所选类型，并要求存在对应轨道。`'video-with-optional-audio'` 要求每个输入都有主视频，并保留已有的主音轨。`'first-video-with-optional-audio'` 按文件顺序选择第一条视频和可选的第一条音轨，对应 FFmpeg 的 `-map 0:v:0 -map 0:a:0?`。默认复制模式的拼接要求各段轨道布局一致。合并任务从首个输入选择视频，从第二个输入选择音频。
 
@@ -203,7 +203,7 @@ function remuxMedia(
 function combineTracks(
   video: RemuxInput,
   audio: RemuxInput,
-  options: Omit<RemuxOptions, 'tracks'>,
+  options: CombineOptions,
 ): Promise<RemuxResult>
 
 function concatMedia(
@@ -231,9 +231,18 @@ function concatMedia(
 
 这些方法返回处理摘要，不返回 `File`。输出目标及临时文件均由调用方管理。处理成功会关闭 `writable` 并释放锁；写入阶段失败会中止流并释放锁；预检查失败不会操作传入的流，调用方需按需关闭或中止它。输出流开始关闭前可以取消，开始关闭后由流的提交结果决定任务结果。释放存储只关闭句柄，不删除文件。
 
-重新封装和合并会将最早的可播放时间戳归零，保留音视频之间的相对偏移。拼接会将每个归零后的片段接到前一片段的呈现结束位置。H.264 MP4 如果以依赖帧开头，会从第一个确认含有 IDR 图像的同步样本开始，并整包丢弃呈现时间早于该帧的音频。如果保留的第一个 MP3 帧依赖已丢弃的数据，复制模式会拒绝，可改用 `normalizeAudio: true`。缺少所选轨道、片段配置不兼容、媒体或时间信息异常，以及保留片段开头缺少可用关键帧，都会导致 Promise 拒绝。I/O 和回调错误也会向上传递。
+重新封装和合并默认将最早的可播放时间戳归零，保留音视频之间的相对偏移。拼接会将每个归零后的片段接到前一片段的呈现结束位置。H.264 MP4 如果以依赖帧开头，会从第一个确认含有 IDR 图像的同步样本开始。使用共享时间轴时，呈现时间早于该帧的音频会整包丢弃。如果保留的第一个 MP3 帧依赖已丢弃的数据，复制模式会拒绝，可改用 `normalizeAudio: true`。缺少所选轨道、片段配置不兼容、媒体或时间信息异常，以及保留片段开头缺少可用关键帧，都会导致 Promise 拒绝。I/O 和回调错误也会向上传递。
 
 </details>
+
+### 对齐独立输入的时间轴
+
+在 `combine` Worker 任务或传给 `combineTracks` 的 `CombineOptions` 中设置 `timeline`。如果两个输入共享媒体时间轴，可省略该字段。
+
+- `timeline: 'align-starts'` 将两条轨道各自最早的可播放时间戳对齐到零。视频从必要的 H.264 裁切之后开始，音频保留自己的可播放起点。
+- `timeline: { videoOffset: -1.483333, audioOffset: 0.25 }` 为各轨道添加以秒为单位的偏移量。两个字段均可省略，默认值为零。正值会推迟该轨道。应用偏移后，最早的可播放时间戳会归零。需要裁切视频时，使用偏移后的时间戳确定音频裁切点。
+
+偏移会在计算输出时长前应用到呈现与解码时间。
 
 <details>
 <summary>共用类型：<code>RemuxResult</code>、<code>RemuxProgress</code>、<code>MediaOutputChunk</code> 与存储</summary>

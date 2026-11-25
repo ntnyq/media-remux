@@ -1,10 +1,81 @@
 import { getEventListeners } from 'node:events'
+import { setImmediate } from 'node:timers/promises'
 import { expect, test } from 'vitest'
 import { combineTracks } from '../../src'
 import { openMediaInput } from '../../src/core/input/mediaInput'
 import { inspectTracks } from '../../src/core/mediaTracks'
+import { Reader, readU8 } from '../../src/vendor/mediabunny/src/reader'
+import { BlobSource } from '../../src/vendor/mediabunny/src/source'
 import { diskStorage, fixture, memoryTarget } from '../helpers/media'
 import { fragmentedMp4 } from '../helpers/mp4Fragments'
+
+test('retries requested Blob bytes after a speculative stream read fails', async () => {
+  const prefetch =
+    Promise.withResolvers<ReadableStreamDefaultController<Uint8Array>>()
+  let isFirstStream = true
+
+  class InterruptedPrefetchBlob extends Blob {
+    public override slice(start = 0, end?: number, type?: string) {
+      const part = super.slice(start, end, type)
+
+      if (isFirstStream) {
+        isFirstStream = false
+        part.stream = () =>
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array([42]))
+            },
+            pull(controller) {
+              prefetch.resolve(controller)
+
+              return new Promise(() => {})
+            },
+          })
+      }
+
+      return part
+    }
+  }
+
+  const blob = new InterruptedPrefetchBlob([new Uint8Array([42, 43])])
+  const source = new BlobSource(blob)
+  const ref = source.ref()
+  const reader = new Reader(source)
+
+  try {
+    expect(readU8((await reader.requestSlice(0, 1))!)).toBe(42)
+    const controller = await prefetch.promise
+
+    controller.error(new Error('speculative read failed'))
+    await setImmediate()
+    expect(readU8((await reader.requestSlice(1, 1))!)).toBe(43)
+  } finally {
+    ref[Symbol.dispose]()
+  }
+})
+
+test.each([true, false])(
+  'rejects a short Blob read (useStreamReader=%s)',
+  async useStreamReader => {
+    class ShortReadBlob extends Blob {
+      public override slice() {
+        return new Blob()
+      }
+    }
+
+    const blob = new ShortReadBlob([new Uint8Array([42])])
+    const source = new BlobSource(blob, { useStreamReader })
+    const ref = source.ref()
+
+    try {
+      await expect(new Reader(source).requestSlice(0, 1)).rejects.toThrow(
+        'Blob reader stopped unexpectedly',
+      )
+    } finally {
+      ref[Symbol.dispose]()
+    }
+  },
+)
 
 test.each([
   { name: 'video.mp4', length: 4 },

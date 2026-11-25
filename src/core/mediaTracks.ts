@@ -176,15 +176,19 @@ export async function inspectTracks(
   const skippedPackets: number[] = []
   const trackOffsets: number[] = []
   const alignStarts = timeline === 'align-starts'
+  const offsets = alignStarts ? undefined : timeline
+  const videoOffset = offsets?.videoOffset ?? 0
+  const audioOffset = offsets?.audioOffset ?? 0
+  // The common shift cancels at normalization. Remove it before adding it to
+  // source timestamps, where a large offset can round away packet timing.
+  const commonOffset = Math.min(videoOffset, audioOffset)
 
   for (const [index, track] of tracks.entries()) {
     const isVideo = track.kind === MEDIA_TRACK_KIND.video
     const processesAudio =
       normalizeAudio && track.kind === MEDIA_TRACK_KIND.audio
     const { audioEditStart } = track
-    const manualOffset = alignStarts
-      ? 0
-      : ((isVideo ? timeline?.videoOffset : timeline?.audioOffset) ?? 0)
+    const manualOffset = (isVideo ? videoOffset : audioOffset) - commonOffset
     let count = 0
     let skipped = 0
     let trackStart = Infinity
