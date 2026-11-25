@@ -26,11 +26,13 @@ export class MkvReader {
    * @param signal - Optional cancellation signal checked during range reads.
    */
   constructor(blob: Blob, signal?: AbortSignal) {
+    checkAbort(signal)
     const source = new BlobSource(blob, { maxCacheSize: 4 * 1024 * 1024 })
 
     this.source = source.ref()
     this.reader = new Reader(source)
     this.signal = signal
+    signal?.addEventListener('abort', this.dispose, { once: true })
   }
 
   /**
@@ -43,15 +45,22 @@ export class MkvReader {
    */
   async slice(start: number, size: number) {
     checkAbort(this.signal)
-    const slice = await this.reader.requestSlice(start, size)
 
-    checkAbort(this.signal)
+    try {
+      const slice = await this.reader.requestSlice(start, size)
 
-    if (!slice) {
-      throw invalidMkv('Truncated MKV element.')
+      checkAbort(this.signal)
+
+      if (!slice) {
+        throw invalidMkv('Truncated MKV element.')
+      }
+
+      return slice
+    } catch (error) {
+      checkAbort(this.signal)
+
+      throw error
     }
-
-    return slice
   }
 
   /**
@@ -248,7 +257,8 @@ export class MkvReader {
   /**
    * Releases the Blob read cache.
    */
-  dispose() {
-    this.source.free()
+  dispose = () => {
+    this.signal?.removeEventListener('abort', this.dispose)
+    this.source[Symbol.dispose]()
   }
 }

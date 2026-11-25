@@ -4,6 +4,101 @@ import { inspectTracks } from '../src/core/mediaTracks'
 import { fixture } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
+test.each([
+  { name: 'video.mp4', length: 4 },
+  { name: 'continuous-av.mpegts', length: 377 },
+  { name: 'progressive.flv', length: 9 },
+])('cancels a pending $name Blob range read', async ({ name, length }) => {
+  const controller = new AbortController()
+  const reason = new Error('cancel pending Blob range')
+  const started = Promise.withResolvers<void>()
+  const range = Promise.withResolvers<ArrayBuffer>()
+
+  class PendingRangeBlob extends Blob {
+    public override slice(start = 0, end?: number, type?: string) {
+      const part = super.slice(start, end, type)
+
+      if (part.size === length) {
+        part.arrayBuffer = () => {
+          started.resolve()
+
+          return range.promise
+        }
+      }
+
+      return part
+    }
+  }
+
+  const input = openMediaInput(
+    new PendingRangeBlob([await fixture(name)]),
+    controller.signal,
+  )
+  const outcome = input.catch((error: unknown) => error)
+
+  try {
+    await started.promise
+    controller.abort(reason)
+    const nextTurn = new Promise(resolve => setImmediate(resolve))
+
+    expect(await Promise.race([outcome, nextTurn])).toBe(reason)
+  } finally {
+    range.reject(new Error('underlying range read failed'))
+    await outcome
+  }
+})
+
+test.each(['video.mp4', 'progressive.mkv', 'continuous-av.mpegts'])(
+  'releases the active $0 Blob stream on abort',
+  async name => {
+    const controller = new AbortController()
+    const reason = new Error('cancel pending Blob stream')
+    const started = Promise.withResolvers<void>()
+    let streamController: ReadableStreamDefaultController<Uint8Array>
+    let canceled = false
+
+    class PendingStreamBlob extends Blob {
+      public override slice(start = 0, end?: number, type?: string) {
+        const part = super.slice(start, end, type)
+
+        part.stream = () =>
+          new ReadableStream({
+            pull(output) {
+              streamController = output
+              started.resolve()
+
+              return new Promise(() => {})
+            },
+            cancel() {
+              canceled = true
+            },
+          })
+
+        return part
+      }
+    }
+
+    const input = openMediaInput(
+      new PendingStreamBlob([await fixture(name)]),
+      controller.signal,
+    )
+    const outcome = input.catch((error: unknown) => error)
+
+    try {
+      await started.promise
+      controller.abort(reason)
+      expect(canceled).toBe(true)
+      expect(await outcome).toBe(reason)
+    } finally {
+      if (!canceled) {
+        streamController!.close()
+      }
+
+      await outcome
+    }
+  },
+)
+
 test.each([false, true])(
   'keeps the abort reason before the first MP4 read (metadataOnly=%s)',
   async metadataOnly => {

@@ -560,7 +560,7 @@ export async function openMkvInput(
       }
     }
 
-    return { tracks, dispose: () => reader.dispose() }
+    return { tracks, dispose: reader.dispose }
   } catch (error) {
     reader.dispose()
 

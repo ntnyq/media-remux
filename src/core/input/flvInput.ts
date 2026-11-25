@@ -22,6 +22,7 @@ import {
   createRemuxError,
   parseMp3FrameHeader,
 } from '../../utils'
+import { readBlobBytes } from '../../utils/remuxInput'
 import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 
 /**
@@ -47,11 +48,7 @@ async function readBytes(
     throw createRemuxError(REMUX_ERROR_CODE.invalidInput, 'Truncated FLV file.')
   }
 
-  const bytes = new Uint8Array(
-    await blob.slice(offset, offset + length).arrayBuffer(),
-  )
-
-  checkAbort(signal)
+  const bytes = await readBlobBytes(blob, offset, offset + length, signal)
 
   if (bytes.length !== length) {
     throw createRemuxError(

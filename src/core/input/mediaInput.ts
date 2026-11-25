@@ -14,7 +14,7 @@ import type {
   PacketTrack,
 } from '../../types'
 import { checkAbort, createRemuxError, withRemuxErrorCode } from '../../utils'
-import { isMpegTsInput } from '../../utils/remuxInput'
+import { isMpegTsInput, readBlobBytes } from '../../utils/remuxInput'
 import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
 import {
   AvcNalUnitType,
@@ -132,9 +132,7 @@ export async function openMediaInput(
     )
   }
 
-  const magic = new Uint8Array(await blob.slice(0, 4).arrayBuffer())
-
-  checkAbort(signal)
+  const magic = await readBlobBytes(blob, 0, 4, signal)
 
   if (magic[0] === 0x46 && magic[1] === 0x4c && magic[2] === 0x56) {
     return openFlvInput(blob, signal, selection)
@@ -148,11 +146,7 @@ export async function openMediaInput(
   }
 
   if (magic[0] === 0x47) {
-    const sync = new Uint8Array(
-      await blob.slice(0, 2 * TS_PACKET_SIZE + 1).arrayBuffer(),
-    )
-
-    checkAbort(signal)
+    const sync = await readBlobBytes(blob, 0, 2 * TS_PACKET_SIZE + 1, signal)
 
     if (
       sync[TS_PACKET_SIZE] === 0x47 &&

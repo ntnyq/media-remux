@@ -36,6 +36,7 @@ Regression tests cover sparse large-file paging and real media round trips.
 - Optional internal fields admit `undefined` under `exactOptionalPropertyTypes`. Unknown WebCodecs color fields use `null`; absent decoder descriptions are omitted.
 - Required `Symbol.dispose` initialization precedes class definitions. Packet iterators implement `Symbol.asyncDispose` for current TypeScript contracts.
 - Stream backpressure waits for queued writes, including when the writable high-water mark is zero. Stream cancellation aborts/unlocks its writer. After all writes settle, successful finalization checks cancellation before committing the stream.
+- Blob source disposal cancels active stream reads as well as idle readers and rejects pending range requests.
 - Source close promises include asynchronous muxer work. Cancellation/finalization wait for every source before releasing targets, including when a source fails; cancellation attempts every target cleanup before propagating an error.
 - Disk-backed fragment output checks sample durations and composition offsets before writing fragment headers. Core jobs use unsigned 32-bit values for both fields. The compatibility path without preflight timing uses signed composition offsets.
 - Fragmented output patches movie and track durations before committing, using integer presentation ends from the written fragments to keep edit lists consistent with quantized samples. GOPs with an explicit decode origin and decode durations can skip timestamp sorting.

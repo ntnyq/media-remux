@@ -342,15 +342,7 @@ export class BlobSource extends Source {
             maxCacheSize: options.maxCacheSize ?? (8 * 2 ** 20 /* 8 MiB */),
             maxWorkerCount: 4,
             runWorker: this._runWorker.bind(this),
-            onIdleWorkerRemoved: (worker) => {
-                const reader = this._readers.get(worker);
-                if (reader) {
-                    this._readers.delete(worker);
-                    blobReaderRegistry?.unregister(worker);
-                    // If we don't do this, memory leaks indefinitely
-                    void reader.cancel().catch(() => { });
-                }
-            },
+            onWorkerRemoved: (worker) => this._removeReader(worker),
             prefetchProfile: PREFETCH_PROFILES.fileSystem,
             handleUnhandledError: options.handleUnhandledError,
         });
@@ -363,6 +355,14 @@ export class BlobSource extends Source {
     /** @internal */
     _read(start: number, end: number, minReadPosition: number, maxReadPosition: number): MaybePromise<ReadResult | null> {
         return this._orchestrator.read(start, end, minReadPosition, maxReadPosition);
+    }
+    private _removeReader(worker: ReadWorker) {
+        const reader = this._readers.get(worker);
+        this._readers.delete(worker);
+        if (reader) {
+            blobReaderRegistry?.unregister(worker);
+            void reader.cancel().catch(() => { });
+        }
     }
     /** @internal */
     private async _runWorker(worker: ReadWorker) {
@@ -392,12 +392,12 @@ export class BlobSource extends Source {
         while (worker.currentPos < worker.targetPos && !worker.aborted) {
             if (reader) {
                 const { done, value } = await reader.read();
+                if (worker.aborted) {
+                    break;
+                }
                 if (done) {
                     this._orchestrator.onWorkerFinished(worker);
                     throw new Error('Blob reader stopped unexpectedly before all requested data was read.');
-                }
-                if (worker.aborted) {
-                    break;
                 }
                 this._dispatchRead(worker.currentPos, worker.currentPos + value.length);
                 this._orchestrator.supplyWorkerData(worker, value);
@@ -413,8 +413,7 @@ export class BlobSource extends Source {
         }
         this._orchestrator.signalWorkerStoppedRunning(worker);
         if (worker.aborted) {
-            // MDN: "Calling this method signals a loss of interest in the stream by a consumer."
-            await reader?.cancel().catch(() => { });
+            this._removeReader(worker);
         }
     }
     /** @internal */
@@ -524,7 +523,7 @@ class ReadOrchestrator {
         runWorker: (worker: ReadWorker) => Promise<void>;
         prefetchProfile: PrefetchProfile;
         maxWorkerCount: number;
-        onIdleWorkerRemoved?: ((worker: ReadWorker) => void) | undefined;
+        onWorkerRemoved?: ((worker: ReadWorker) => void) | undefined;
         handleUnhandledError?: ((error: unknown) => unknown) | undefined;
     };
     constructor(options: {
@@ -532,7 +531,7 @@ class ReadOrchestrator {
         runWorker: (worker: ReadWorker) => Promise<void>;
         prefetchProfile: PrefetchProfile;
         maxWorkerCount: number;
-        onIdleWorkerRemoved?: ((worker: ReadWorker) => void) | undefined;
+        onWorkerRemoved?: ((worker: ReadWorker) => void) | undefined;
         handleUnhandledError?: ((error: unknown) => unknown) | undefined;
     }) {
         this.options = options;
@@ -772,7 +771,7 @@ class ReadOrchestrator {
                 assert(oldestIndex !== null);
                 assert(oldestWorker.pendingSlices.length === 0);
                 this.workers.splice(oldestIndex, 1);
-                this.options.onIdleWorkerRemoved?.(oldestWorker);
+                this.options.onWorkerRemoved?.(oldestWorker);
             }
             else {
                 return null; // All workers are still running, we can't create a new one
@@ -895,7 +894,7 @@ class ReadOrchestrator {
             }
             if (closedIntervalsOverlap(start, end, otherWorker.currentPos, otherWorker.targetPos)) {
                 this.workers.splice(i, 1);
-                this.options.onIdleWorkerRemoved?.(otherWorker);
+                this.options.onWorkerRemoved?.(otherWorker);
                 i--;
             }
         }
@@ -959,7 +958,7 @@ class ReadOrchestrator {
         assert(index !== -1);
         worker.running = false;
         this.workers.splice(index, 1);
-        this.options.onIdleWorkerRemoved?.(worker);
+        this.options.onWorkerRemoved?.(worker);
         if (this.fileSize === null) {
             // We can now deduce the file size!
             this.supplyFileSize(worker.currentPos);
@@ -1054,10 +1053,7 @@ class ReadOrchestrator {
             }
             worker.pendingSlices.length = 0;
             worker.aborted = true;
-            if (!worker.running) {
-                // Running workers clean up after themselves when they notice the abort
-                this.options.onIdleWorkerRemoved?.(worker);
-            }
+            this.options.onWorkerRemoved?.(worker);
         }
         for (const queuedRead of this.queuedReads) {
             for (const slice of queuedRead.pendingSlices) {
