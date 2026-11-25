@@ -1,6 +1,7 @@
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
 /* oxlint-disable no-await-in-loop -- OPFS path components resolve from parent to child. */
 
+import { isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_JOB_OPERATION,
   REMUX_PROGRESS_PHASE,
@@ -170,7 +171,7 @@ export function installMediaWorker(
         case MEDIA_JOB_OPERATION.combine: {
           result = await combineTracks(job.video, job.audio, {
             ...options,
-            ...(job.timeline === undefined ? {} : { timeline: job.timeline }),
+            ...(isUndefined(job.timeline) ? {} : { timeline: job.timeline }),
           })
           break
         }

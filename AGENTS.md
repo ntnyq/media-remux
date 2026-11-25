@@ -23,6 +23,12 @@ Use a Node version supported by `package.json` and the pinned pnpm version.
 
 Follow strict TypeScript and ESM conventions. Use two spaces, single quotes, LF endings, trailing commas where supported, and omit semicolons. Use camelCase for source modules and PascalCase for class modules, such as `CustomSource.ts`. Run `pnpm format` for Oxfmt and `pnpm lint` for Oxlint. Both tools exclude vendored sources, which still undergo type checking.
 
+### JSDoc
+
+- In `src/` outside `src/vendor/`, document every top-level function, constant, and type declaration, including internal declarations, and every interface member. Add JSDoc directly above each declaration or member.
+- Use multiline JSDoc exclusively in this scope, even for one-sentence descriptions. Put `/**` and `*/` on separate lines and prefix each body line with `*`.
+- Start with a description and leave a blank JSDoc line before any tags. Use `@param` for each parameter, `@template` for generic parameters, and `@returns` for return values, including void and promises. Document generator output with `@yields` and add `@returns` when the generator returns a final value. Document applicable failure conditions with `@throws`.
+
 ## Testing Guidelines
 
 Put regression tests in the corresponding `tests/<area>/<feature>.test.ts` suite. Run a focused suite with `pnpm test tests/remux/api.test.ts` or run a whole area with `pnpm test tests/mp4/`. Reuse small fixtures and document generation commands for new fixtures in `tests/fixtures/README.md`. Install FFmpeg to enable the optional independent decode check. Run browser coverage for changes to Worker, OPFS, playback, or native AAC behavior.

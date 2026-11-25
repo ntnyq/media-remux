@@ -1,6 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Inspect one track at a time to bound packet metadata reads. */
 
-import { isUndefined } from '@ntnyq/utils'
+import { isEmptyArray, isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_CODEC,
@@ -60,7 +60,7 @@ export function selectTracks(
     )
   }
 
-  if (tracks.length === 0) {
+  if (isEmptyArray(tracks)) {
     throw createRemuxError(
       REMUX_ERROR_CODE.missingRequiredTrack,
       'Input has no selected media tracks.',

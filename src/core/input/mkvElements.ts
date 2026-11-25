@@ -256,6 +256,8 @@ export class MkvReader {
 
   /**
    * Releases the Blob read cache.
+   *
+   * @returns Nothing.
    */
   dispose = () => {
     this.signal?.removeEventListener('abort', this.dispose)

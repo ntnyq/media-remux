@@ -43,11 +43,17 @@ export const WORKER_MESSAGE_TYPE = {
   error: 'error',
 } as const
 
-/** MP4 output file created in each Worker job directory. */
+/**
+ * MP4 output file created in each Worker job directory.
+ */
 export const JOB_OUTPUT_MP4_FILE = 'output.mp4'
 
-/** File name exposed for audio-only output. */
+/**
+ * File name exposed for audio-only output.
+ */
 export const JOB_OUTPUT_M4A_FILE = 'output.m4a'
 
-/** Subdirectory holding temporary storage for each Worker job. */
+/**
+ * Subdirectory holding temporary storage for each Worker job.
+ */
 export const JOB_SPOOL_DIRECTORY = 'spools'

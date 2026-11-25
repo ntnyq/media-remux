@@ -1,3 +1,4 @@
+import { isEmptyArray } from '@ntnyq/utils'
 import { MEDIA_CODEC, REMUX_ERROR_CODE } from '../constants'
 import {
   InvalidAacDescriptionError,
@@ -27,7 +28,7 @@ export function avcDecoderConfig(
   const sps = avc?.sequenceParameterSets[0]
   const info = sps && parseAvcSps(sps)
 
-  if (!avc || !info || avc.pictureParameterSets.length === 0) {
+  if (!avc || !info || isEmptyArray(avc.pictureParameterSets)) {
     throw createRemuxError(
       REMUX_ERROR_CODE.invalidInput,
       `Invalid ${container} AVC decoder configuration.`,

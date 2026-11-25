@@ -51,7 +51,9 @@ export type MediaJob = {
        */
       audio: RemuxInput
 
-      /** Defaults to preserving the source relative timing. */
+      /**
+       * Defaults to preserving the source relative timing.
+       */
       timeline?: CombineTimeline
     }
   | {

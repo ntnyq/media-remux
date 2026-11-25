@@ -18,6 +18,8 @@ type AudioCodec = EventTarget & {
 
   /**
    * Releases resources owned by the native codec.
+   *
+   * @returns Nothing.
    */
   close: () => void
 }
@@ -35,6 +37,8 @@ export interface AudioCodecSession<Source> {
 
   /**
    * Applies the session's decoder or encoder configuration.
+   *
+   * @returns Nothing.
    */
   configure: () => void
 
@@ -49,6 +53,7 @@ export interface AudioCodecSession<Source> {
    * Enqueues an input for encoding or decoding.
    *
    * @param source - Input to submit to the native codec.
+   * @returns Nothing. The native codec delivers output asynchronously.
    */
   submit: (source: Source) => void
 
@@ -56,6 +61,7 @@ export interface AudioCodecSession<Source> {
    * Releases an owned input after submission is attempted.
    *
    * @param source - Input whose resources are owned by the session.
+   * @returns Nothing.
    */
   releaseInput?: (source: Source) => void
 }

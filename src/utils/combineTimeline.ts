@@ -1,9 +1,18 @@
-import { isNumber, isUndefined } from '@ntnyq/utils'
+import {
+  isFunction,
+  isNull,
+  isNumber,
+  isRecord,
+  isUndefined,
+} from '@ntnyq/utils'
 import type { CombineTimeline } from '../types'
 
 /**
  * Reads and snapshots a combine timeline from public options or a Worker request.
- * Returns null for invalid values and undefined for the default shared timeline.
+ *
+ * @param value - Unvalidated timeline mode or track offsets in seconds.
+ * @returns The alignment mode or a copy of the finite offsets, undefined for the
+ * default shared timeline, or null for invalid values.
  */
 export function parseCombineTimeline(
   value: unknown,
@@ -12,12 +21,12 @@ export function parseCombineTimeline(
     return value
   }
 
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+  if (isFunction(value) || !isRecord(value)) {
     return null
   }
 
-  const videoOffset = 'videoOffset' in value ? value.videoOffset : undefined
-  const audioOffset = 'audioOffset' in value ? value.audioOffset : undefined
+  const videoOffset = 'videoOffset' in value ? value['videoOffset'] : undefined
+  const audioOffset = 'audioOffset' in value ? value['audioOffset'] : undefined
 
   if (
     (!isUndefined(videoOffset) &&
@@ -34,13 +43,20 @@ export function parseCombineTimeline(
   }
 }
 
-/** Captures a timeline before asynchronous work and rejects invalid offsets. */
+/**
+ * Captures a timeline before asynchronous work and rejects invalid offsets.
+ *
+ * @param value - Unvalidated timeline mode or track offsets in seconds.
+ * @returns The alignment mode or a copy of the finite offsets, or undefined
+ * when the caller leaves the timeline unspecified.
+ * @throws {TypeError} If the timeline mode or track offsets are invalid.
+ */
 export function captureCombineTimeline(
   value: unknown,
 ): CombineTimeline | undefined {
   const timeline = parseCombineTimeline(value)
 
-  if (timeline === null) {
+  if (isNull(timeline)) {
     throw new TypeError(
       'Expected an "align-starts" timeline or finite track offsets.',
     )

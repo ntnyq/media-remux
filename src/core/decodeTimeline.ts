@@ -141,10 +141,9 @@ export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
           const shiftUnits = Math.round(
             (unshiftedStart - origin) * clock.timescale,
           )
-          const decodeStartUnits =
-            sourceOrigin === undefined
-              ? clock.decodeStartUnits + shiftUnits
-              : Math.round((sourceOrigin - origin + elapsed) * clock.timescale)
+          const decodeStartUnits = isUndefined(sourceOrigin)
+            ? clock.decodeStartUnits + shiftUnits
+            : Math.round((sourceOrigin - origin + elapsed) * clock.timescale)
 
           clock.decodeStartUnits = Math.min(
             decodeStartUnits,

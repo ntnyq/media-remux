@@ -162,9 +162,24 @@ export interface DecodeTimeline {
   trackTimings(): Map<
     number,
     {
+      /**
+       * Initial output decode timestamp in seconds.
+       */
       decodeStart: number
+
+      /**
+       * First visible presentation timestamp in seconds.
+       */
       presentationStart: number
+
+      /**
+       * Exclusive end of the output presentation span in seconds.
+       */
       presentationEnd: number
+
+      /**
+       * Indicates that presentation starts after a retained packet's timestamp.
+       */
       hasLeadingTrim?: true
     }
   >

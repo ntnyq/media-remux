@@ -1,6 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Tracks and segments are consumed in order with bounded memory. */
 
-import { isBoolean, isUndefined } from '@ntnyq/utils'
+import { isBoolean, isEmptyArray, isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
@@ -30,6 +30,7 @@ import { writeSegments } from './writeSegments'
  *
  * @param options - Caller-owned settings whose fields may change during a job.
  * @returns A plain options object retaining the same I/O resources and signal.
+ * @throws {TypeError} If track selection or the audio normalization flag is invalid.
  */
 function captureOptions(options: RemuxOptions): RemuxOptions {
   const { writable, storage, signal, onProgress, tracks, normalizeAudio } =
@@ -108,6 +109,16 @@ export async function concatMedia(
   return await remuxInputs(inputs, options)
 }
 
+/**
+ * Validates selected tracks and computes the shared timeline before writing
+ * one input or a sequence of compatible inputs.
+ *
+ * @param inputs - Media inputs in output order.
+ * @param options - Output stream, temporary storage, track selection, and hooks.
+ * @returns A promise resolving to the output duration, MIME type, and payload bytes written.
+ * @throws If inputs are absent, invalid, or incompatible, or if inspection,
+ * output writing, a progress callback, or cancellation fails the job.
+ */
 async function remuxInputs(
   inputs: readonly RemuxInput[],
   options: RemuxOptions,
@@ -118,7 +129,7 @@ async function remuxInputs(
   checkAbort(settings.signal)
   const sources = Array.from(inputs, captureRemuxInput)
 
-  if (sources.length === 0) {
+  if (isEmptyArray(sources)) {
     throw new TypeError('At least one media segment is required.')
   }
 

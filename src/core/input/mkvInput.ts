@@ -437,7 +437,10 @@ async function createPacketTrack(
      * Streams source frame bytes in decode order. MKV stores PTS, so the MP4
      * writer constructs a decode clock from the supplied frame durations.
      *
+     * @param metadataOnly - Whether to omit encoded bytes while retaining packet metadata.
+     * @param skipPackets - Number of leading packets to skip in decode order.
      * @yields {EncodedPacket} Encoded frames or packet metadata alone.
+     * @throws If block parsing or frame reads fail, video uses lacing, or reading is aborted.
      */
     async *packets(metadataOnly = false, skipPackets = 0) {
       let sequence = 0

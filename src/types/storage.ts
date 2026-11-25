@@ -482,7 +482,15 @@ export interface WorkerFileHandle extends FileSystemFileHandle {
      * @param options.at - Absolute source byte offset in the file.
      * @returns Number of bytes read, which may be less than the buffer length.
      */
-    read: (data: Uint8Array<ArrayBuffer>, options: { at: number }) => number
+    read: (
+      data: Uint8Array<ArrayBuffer>,
+      options: {
+        /**
+         * Absolute source byte offset in the file.
+         */
+        at: number
+      },
+    ) => number
 
     /**
      * Writes synchronously at an explicit file position.
@@ -492,7 +500,15 @@ export interface WorkerFileHandle extends FileSystemFileHandle {
      * @param options.at - Absolute destination byte offset in the file.
      * @returns Number of bytes written, which may be less than the buffer length.
      */
-    write: (data: Uint8Array<ArrayBuffer>, options: { at: number }) => number
+    write: (
+      data: Uint8Array<ArrayBuffer>,
+      options: {
+        /**
+         * Absolute destination byte offset in the file.
+         */
+        at: number
+      },
+    ) => number
 
     /**
      * Resizes the synchronous backing file.

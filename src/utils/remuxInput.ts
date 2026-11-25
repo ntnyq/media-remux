@@ -1,14 +1,23 @@
-import { raceWithSignal } from '@ntnyq/utils'
+import {
+  isArray,
+  isBoolean,
+  isFunction,
+  isObject,
+  isUndefined,
+  raceWithSignal,
+} from '@ntnyq/utils'
 import type { MpegTsInput, RemuxInput } from '../types/remux'
 import { checkAbort } from './abort'
 
 /**
  * Reads a Blob range, allowing cancellation while the native read is pending.
+ *
  * @param blob - Immutable source bytes.
  * @param start - Inclusive start offset.
  * @param end - Exclusive end offset, clamped to the Blob size.
  * @param signal - Optional cancellation signal.
- * @returns The bytes in the requested range.
+ * @returns A promise resolving to the bytes in the requested range.
+ * @throws If the Blob read fails or the signal is aborted.
  */
 export async function readBlobBytes(
   blob: Blob,
@@ -25,22 +34,34 @@ export async function readBlobBytes(
   return new Uint8Array(buffer)
 }
 
-/** Checks the descriptor shape before the TS reader validates offset values. */
+/**
+ * Checks the MPEG-TS descriptor shape before the reader validates offset values.
+ *
+ * @param value - Candidate media input.
+ * @returns Whether the value has a Blob, an array of segment offsets, and a
+ * boolean or absent continuity reset flag.
+ */
 export function isMpegTsInput(value: unknown): value is MpegTsInput {
   return (
-    typeof value === 'object' &&
-    value !== null &&
+    isObject(value) &&
+    !isFunction(value) &&
     'blob' in value &&
     value.blob instanceof Blob &&
     'segmentOffsets' in value &&
-    Array.isArray(value.segmentOffsets) &&
+    isArray(value.segmentOffsets) &&
     (!('allowContinuityCounterReset' in value) ||
-      value.allowContinuityCounterReset === undefined ||
-      typeof value.allowContinuityCounterReset === 'boolean')
+      isUndefined(value.allowContinuityCounterReset) ||
+      isBoolean(value.allowContinuityCounterReset))
   )
 }
 
-/** Captures segment starts before asynchronous work or callbacks can change them. */
+/**
+ * Captures segment starts before asynchronous work or callbacks can change them.
+ *
+ * @param input - Media Blob or MPEG-TS input descriptor to snapshot.
+ * @returns A descriptor with a copied offset array, or the original input
+ * when it is a Blob or fails the descriptor shape check.
+ */
 export function captureRemuxInput(input: RemuxInput): RemuxInput {
   if (input instanceof Blob || !isMpegTsInput(input)) {
     return input
@@ -51,7 +72,7 @@ export function captureRemuxInput(input: RemuxInput): RemuxInput {
   return {
     blob,
     segmentOffsets: [...segmentOffsets],
-    ...(allowContinuityCounterReset === undefined
+    ...(isUndefined(allowContinuityCounterReset)
       ? {}
       : { allowContinuityCounterReset }),
   }

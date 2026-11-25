@@ -1,4 +1,5 @@
 /* oxlint-disable no-await-in-loop -- MPEG-TS cursors consume encoded packets in decode order. */
+import { isEmptyArray, isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
@@ -51,8 +52,10 @@ import {
 import { Reader } from '../../vendor/mediabunny/src/reader'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
 
-// PMT types identify known audio and video even when this reader cannot decode
-// their framing. Private data and unrelated streams are left unclassified.
+/**
+ * Program Map Table stream types recognized as video, including formats this
+ * reader cannot remux.
+ */
 const videoStreamTypes = new Set([
   0x01,
   0x02,
@@ -64,6 +67,11 @@ const videoStreamTypes = new Set([
   0x33,
   0x42,
 ])
+
+/**
+ * Program Map Table stream types recognized as audio, including formats this
+ * reader cannot remux. Private audio is identified through stream descriptors.
+ */
 const audioStreamTypes = new Set([
   0x03,
   0x04,
@@ -216,23 +224,22 @@ async function openAudioTrack(
           throw new InvalidMpegTsError('MPEG-TS AAC PTS and DTS must match.')
         }
 
-        const expected =
-          origin === undefined
-            ? reference
-            : origin + (sequenceNumber - originFrame) * frameTicks
+        const expected = isUndefined(origin)
+          ? reference
+          : origin + (sequenceNumber - originFrame) * frameTicks
 
         if (timing) {
           const pts = normalizeWrappedTimestamp(timing.pts, expected)
 
           // ADTS counts whole audio samples. Avoid introducing sub-sample jitter
           // when the PES clock rounds 44.1 kHz frame boundaries to 90 kHz ticks.
-          if (origin === undefined || Math.abs(pts - expected) > 1 + 1e-6) {
+          if (isUndefined(origin) || Math.abs(pts - expected) > 1 + 1e-6) {
             origin = pts
             originFrame = sequenceNumber
           }
         }
 
-        if (origin === undefined) {
+        if (isUndefined(origin)) {
           throw new InvalidMpegTsError(
             'MPEG-TS AAC track starts without a PES timestamp.',
           )
@@ -427,7 +434,7 @@ async function openVideoTrack(
         )
         const pts = normalizeWrappedTimestamp(timing.pts, dts)
 
-        if (previousDts !== undefined && dts <= previousDts) {
+        if (!isUndefined(previousDts) && dts <= previousDts) {
           throw new UnsupportedMpegTsError('MPEG-TS AVC DTS must increase.')
         }
 
@@ -638,7 +645,7 @@ export async function openMpegTsInput(
       stream ? [stream.pid] : [],
     )
 
-    if (selectedPids.length === 0) {
+    if (isEmptyArray(selectedPids)) {
       return { tracks, dispose }
     }
 

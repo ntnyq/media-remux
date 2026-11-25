@@ -4,6 +4,7 @@ import {
   isInteger,
   isNonEmptyArray,
   isNonEmptyString,
+  isNull,
   isNumber,
   isObject,
   isString,
@@ -137,7 +138,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   if (job['operation'] === MEDIA_JOB_OPERATION.combine) {
     return (
-      parseCombineTimeline(job['timeline']) !== null &&
+      !isNull(parseCombineTimeline(job['timeline'])) &&
       (job['video'] instanceof Blob || isMpegTsInput(job['video'])) &&
       (job['audio'] instanceof Blob || isMpegTsInput(job['audio']))
     )

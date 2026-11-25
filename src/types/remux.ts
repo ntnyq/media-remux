@@ -10,7 +10,9 @@ import type { RemuxStorage } from './storage'
  * One MPEG-TS stream assembled from ordered, packet-aligned segments.
  */
 export interface MpegTsInput {
-  /** Immutable media bytes, for example a File read from OPFS. */
+  /**
+   * Immutable media bytes, for example a File read from OPFS.
+   */
   blob: Blob
 
   /**
@@ -28,7 +30,9 @@ export interface MpegTsInput {
   allowContinuityCounterReset?: boolean
 }
 
-/** A complete media Blob or an MPEG-TS stream with explicit segment starts. */
+/**
+ * A complete media Blob or an MPEG-TS stream with explicit segment starts.
+ */
 export type RemuxInput = Blob | MpegTsInput
 
 /**
@@ -132,15 +136,24 @@ export interface RemuxOptions {
 export type CombineTimeline =
   | 'align-starts'
   | {
-      /** Seconds to add to video timing. Defaults to zero. */
+      /**
+       * Seconds to add to video timing. Defaults to zero.
+       */
       videoOffset?: number
-      /** Seconds to add to audio timing. Defaults to zero. */
+
+      /**
+       * Seconds to add to audio timing. Defaults to zero.
+       */
       audioOffset?: number
     }
 
-/** Output and timeline options for combining separate video and audio inputs. */
+/**
+ * Output and timeline options for combining separate video and audio inputs.
+ */
 export interface CombineOptions extends Omit<RemuxOptions, 'tracks'> {
-  /** Defaults to preserving the source relative timing. */
+  /**
+   * Defaults to preserving the source relative timing.
+   */
   timeline?: CombineTimeline
 }
 

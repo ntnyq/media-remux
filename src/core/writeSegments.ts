@@ -228,6 +228,9 @@ export async function writeSegments(
 
   /**
    * Supplies the continuous encoded audio packets that start in this segment.
+   *
+   * @param info - Segment presentation start and duration in seconds.
+   * @param isLast - Whether to drain all remaining audio packets for this segment.
    * @yields Normalized audio packets on the segment's shared time base.
    */
   async function* segmentAudio(info: SegmentInfo, isLast: boolean) {
@@ -294,6 +297,8 @@ export async function writeSegments(
      * Advances one track and closes its writer if no later segment can use it.
      *
      * @param cursor - Packet iterator and associated output writer.
+     * @returns A promise resolving when the cursor has advanced and any required
+     * writer closure has been requested.
      */
     async function advance(cursor: (typeof cursors)[number]) {
       cursor.next = await cursor.iterator.next()
