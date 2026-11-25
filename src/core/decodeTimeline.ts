@@ -160,25 +160,28 @@ export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
     },
 
     /**
-     * Snapshots decode origins and presentation bounds for one-based track IDs.
+     * Snapshots decode origins and presentation bounds for tracks with retained packets.
      * Negative starts use a media edit. AV1 may begin at a positive tfdt.
      *
      * @returns Track IDs mapped to decode and presentation timing in seconds.
      */
     trackTimings(): Map<number, IsobmffTrackTiming> {
-      return new Map(
-        clocks.map((clock, index) => [
-          index + 1,
-          {
+      const timings = new Map<number, IsobmffTrackTiming>()
+
+      for (const [index, clock] of clocks.entries()) {
+        if (clock.start !== Infinity) {
+          timings.set(index + 1, {
             decodeStart: clock.isAv1
               ? clock.start
               : clock.decodeStartUnits / clock.timescale,
-            presentationStart: clock.start === Infinity ? 0 : clock.start,
-            presentationEnd: clock.end === -Infinity ? 0 : clock.end,
+            presentationStart: clock.start,
+            presentationEnd: clock.end,
             ...(clock.hasLeadingTrim ? { hasLeadingTrim: true } : {}),
-          },
-        ]),
-      )
+          })
+        }
+      }
+
+      return timings
     },
   }
 }

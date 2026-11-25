@@ -8,6 +8,33 @@ import { CustomSource } from './helpers/CustomSource'
 import { diskStorage, fixture, memoryTarget } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
+test.each([0, 1])(
+  'rejects a zero or duplicate MP4 track ID (%s) before touching output',
+  async trackId => {
+    const bytes = Buffer.from(
+      await (await fixture('progressive.mp4')).arrayBuffer(),
+    )
+    const first = bytes.indexOf('tkhd')
+    const second = bytes.indexOf('tkhd', first + 4)
+    const target = memoryTarget()
+
+    expect(bytes[first + 4]).toBe(0)
+    expect(bytes[second + 4]).toBe(0)
+    expect(bytes.readUInt32BE(first + 16)).toBe(1)
+    expect(bytes.readUInt32BE(second + 16)).toBe(2)
+    bytes.writeUInt32BE(trackId, second + 16)
+
+    await expect(
+      remuxMedia(new Blob([bytes]), {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect(target.state.writes).toEqual([])
+    expect(target.state.isAborted).toBe(false)
+  },
+)
+
 test('rejects a partial child box header at the end of a moof', async () => {
   const fragmented = await fragmentedMp4({ fragments: 3, indexed: false })
   const bytes = Buffer.from(await fragmented.blob().arrayBuffer())

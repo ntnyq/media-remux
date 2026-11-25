@@ -420,6 +420,7 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 - MP4 numeric color identifiers from nclx or nclc and MKV Colour fields representable in nclx are carried into the output and used to compare segments.
 - Video sample aspect ratios remain exact across repeated remuxes. Compatibility compares reduced display aspect ratios, so proportional display dimensions match. Explicit MP4 `pasp` signaling takes precedence over SPS metadata regardless of box order.
 - Each segment's earliest playable timestamp becomes the preceding segment's presentation end, preserving internal A/V offsets and gaps. Single remux/combine normalize the earliest playable timestamp to zero. Codec delay and padding may remain where the input does not provide an edit. Gapless audio is not guaranteed.
+- If trimming to a usable H.264 keyframe discards every audio packet across a copy job, the output contains only video.
 - Packet order stays decode order. B-frame PTS is not sorted before copying. Output timestamps round to their container timescale.
 - Preflight plans each track's decode lead across all segments. Output uses nonnegative composition offsets and media edits to preserve the shared presentation origin in players; header durations include the complete presentation tail.
 - Sample durations and nonnegative composition offsets must fit unsigned 32-bit output track units. Values outside these ranges reject the operation instead of wrapping.

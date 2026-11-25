@@ -212,7 +212,7 @@ export async function writeSegments(
   let bytesProcessed = 0
   let duration = 0
   let segmentIndex = 0
-  const writers: TrackWriter[] = []
+  const writers = new Map<number, TrackWriter>()
 
   /**
    * Checks cancellation and reports the current muxing counters.
@@ -258,8 +258,11 @@ export async function writeSegments(
    * @throws If packet iteration, writing, progress reporting, or cancellation fails.
    */
   async function writeSegment(segment: OutputSegment) {
-    const cursors = segment.tracks.flatMap((track, index) =>
-      normalizedAudio && track.kind === MEDIA_TRACK_KIND.audio
+    const cursors = segment.tracks.flatMap((track, index) => {
+      const writer = writers.get(index)
+
+      return !writer ||
+        (normalizedAudio && track.kind === MEDIA_TRACK_KIND.audio)
         ? []
         : [
             {
@@ -267,18 +270,20 @@ export async function writeSegments(
                 false,
                 segment.info.skippedPackets?.[index],
               ),
-              writer: writers[index],
+              writer,
               next: undefined as
                 | IteratorResult<EncodedPacket, void>
                 | undefined,
             },
-          ],
-    )
+          ]
+    })
 
-    if (normalizedAudio) {
+    const normalizedWriter = normalizedAudio && writers.get(audioIndex)
+
+    if (normalizedWriter) {
       cursors.push({
         iterator: segmentAudio(segment.info, segment.isLast),
-        writer: writers[audioIndex],
+        writer: normalizedWriter,
         next: undefined,
       })
     }
@@ -292,7 +297,7 @@ export async function writeSegments(
       cursor.next = await cursor.iterator.next()
 
       if (cursor.next.done && segment.isLast) {
-        cursor.writer?.close()
+        cursor.writer.close()
       }
     }
 
@@ -313,7 +318,7 @@ export async function writeSegments(
               (right.next?.value?.timestamp ?? 0),
           )
 
-        if (!cursor || !cursor.next || cursor.next.done || !cursor.writer) {
+        if (!cursor || !cursor.next || cursor.next.done) {
           break
         }
 
@@ -344,6 +349,12 @@ export async function writeSegments(
 
   try {
     for (const [index, track] of baseline.entries()) {
+      // Video is required to have retained packets. The trailing audio track
+      // can be fully trimmed when video advances to its first usable keyframe.
+      if (!trackTimings.has(index + 1)) {
+        continue
+      }
+
       const transcodes = !isUndefined(normalizedAudio) && index === audioIndex
       const codec = transcodes ? MEDIA_CODEC.aac : track.codec
       const config = transcodes ? normalizedAudio.config : track.config
@@ -367,7 +378,7 @@ export async function writeSegments(
           }),
         })
 
-        writers.push({
+        writers.set(index, {
           /**
            * Adds a normalized video packet with the baseline decoder configuration.
            *
@@ -392,7 +403,7 @@ export async function writeSegments(
 
         output.addAudioTrack(source, { decoderConfig: config })
 
-        writers.push({
+        writers.set(index, {
           /**
            * Adds a normalized audio packet with the baseline decoder configuration.
            *

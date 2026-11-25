@@ -3,6 +3,7 @@ import { combineTracks, concatMedia, remuxMedia } from '../src'
 import type { RemuxResult } from '../src'
 import { openMediaInput } from '../src/core/input/mediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
+import { indexedMp4 } from './helpers/mp4Index'
 
 test.each(['remux', 'combine'] as const)(
   'can %s AAC when a discarded video track has an unsupported dwell edit',
@@ -31,6 +32,73 @@ interface Edit {
   mediaTime?: number
   mediaRate?: number
 }
+
+test('omits an audio track whose last packet is before the retained video', async () => {
+  const video = await fixture('leading-delta.mp4')
+  const audio = await editedMedia([{ duration: 0.1 }], 0, 'audio.m4a')
+  const target = memoryTarget()
+  const result = await combineTracks(video, audio, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const output = await openMediaInput(target.blob())
+
+  try {
+    expect(output.tracks.map(track => track.kind)).toEqual(['video'])
+  } finally {
+    output.dispose()
+  }
+
+  const repeated = memoryTarget()
+
+  await expect(
+    remuxMedia(target.blob(), {
+      writable: repeated.writable,
+      storage: await diskStorage(),
+    }),
+  ).resolves.toMatchObject({ bytesProcessed: result.bytesProcessed })
+})
+
+test('keeps later concatenated audio after an earlier segment trims every audio packet', async () => {
+  const source = await fixture('leading-delta-av.mp4')
+  const bytes = Buffer.from(await source.arrayBuffer())
+  const videoEdit = bytes.indexOf('elst')
+  const audioEdit = bytes.indexOf('elst', videoEdit + 4)
+  const movieHeader = bytes.indexOf('mvhd')
+
+  expect(audioEdit).toBeGreaterThan(videoEdit)
+  expect(bytes[audioEdit + 4]).toBe(0)
+  expect(bytes[movieHeader + 4]).toBe(0)
+  bytes.writeUInt32BE(bytes.readUInt32BE(movieHeader + 16) / 10, audioEdit + 12)
+  const shortAudio = new Blob([bytes])
+  const first = memoryTarget()
+  const { duration } = await remuxMedia(shortAudio, {
+    writable: first.writable,
+    storage: await diskStorage(),
+  })
+  const target = memoryTarget()
+
+  await concatMedia([shortAudio, source], {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  const audio = await packets(target.blob(), 'audio')
+  const keyframe = (await packets(source, 'video')).find(
+    packet => packet.type === 'key',
+  )!
+  const retained = (await packets(source, 'audio')).filter(
+    packet => packet.timestamp >= keyframe.timestamp,
+  )
+
+  expect(retained.length).toBeGreaterThan(0)
+  expect(audio.map(packet => packet.data)).toEqual(
+    retained.map(packet => packet.data),
+  )
+  expect(audio[0]?.timestamp).toBeCloseTo(
+    duration + retained[0]!.timestamp - keyframe.timestamp,
+    4,
+  )
+})
 
 /**
  * Replaces a fixture's first track edit list while keeping sample offsets valid.
@@ -131,21 +199,24 @@ async function editedMedia(
  * @param duration - Media edit duration in seconds; zero is open-ended.
  * @param version - Edit list field width: 32-bit for v0 or 64-bit for v1.
  * @param startShift - Extra media ticks to add to the original edit start.
- * @param sourceName - Fixture used to generate the fragmented track.
+ * @param source - Fixture name or Blob used to generate the fragmented track.
  * @returns Edited input and the unedited fragmented output for packet comparisons.
  */
 async function fragmentedEditedMedia(
   duration: number,
   version: 0 | 1,
   startShift = 0,
-  sourceName = 'video.mp4',
+  source: string | Blob = 'video.mp4',
 ) {
   const target = memoryTarget()
 
-  await remuxMedia(await fixture(sourceName), {
-    writable: target.writable,
-    storage: await diskStorage(),
-  })
+  await remuxMedia(
+    typeof source === 'string' ? await fixture(source) : source,
+    {
+      writable: target.writable,
+      storage: await diskStorage(),
+    },
+  )
   const original = Buffer.from(await target.blob().arrayBuffer())
   const moovStart = original.indexOf('moov') - 4
   const trakStart = original.indexOf('trak') - 4
@@ -209,6 +280,33 @@ async function fragmentedEditedMedia(
 
   return { input: new Blob([bytes]), original: target.blob() }
 }
+
+test.each(['progressive', 'fragmented'] as const)(
+  'retains reordered %s audio inside a tail edit after an excluded packet',
+  async format => {
+    const duration = 0.06
+    const source = await indexedMp4({
+      samples: 3,
+      keyInterval: 3,
+      compositionOffsets: [0, 4096, 0],
+      ...(format === 'progressive' ? { mediaEditDuration: duration } : {}),
+    })
+    const input =
+      format === 'progressive'
+        ? source.blob()
+        : (await fragmentedEditedMedia(duration, 1, 0, source.blob())).input
+    const target = memoryTarget()
+    const result = await remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    })
+
+    expect(
+      (await packets(target.blob(), 'audio')).map(packet => packet.data),
+    ).toEqual([source.packet(0), source.packet(2)])
+    expect(result.duration).toBeCloseTo(duration, 5)
+  },
+)
 
 test.each([0, 1] as const)(
   'preserves a v%s partial video tail edit and A/V offset across concatenation',

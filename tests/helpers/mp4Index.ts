@@ -104,6 +104,7 @@ function boxes(data: Uint8Array): Box[] {
  * @param options.compositionOffsets - Repeating presentation offsets in 48 kHz ticks; defaults to [0, 10].
  * @param options.compositionSamples - Number of samples covered by ctts; defaults to samples.
  * @param options.cttsVersion - Composition-offset table version; defaults to 0.
+ * @param options.mediaEditDuration - Optional duration of a media edit from time zero, in seconds.
  * @param options.keyInterval - Sample interval between sync entries; defaults to 1.
  * @param options.firstKeySample - Zero-based first sync sample index; defaults to 0.
  * @param options.recordReads - Whether source and parser read ranges are recorded; defaults to true.
@@ -124,6 +125,7 @@ export async function indexedMp4(
     compositionOffsets?: readonly number[]
     compositionSamples?: number
     cttsVersion?: 0 | 1
+    mediaEditDuration?: number
     keyInterval?: number
     firstKeySample?: number
     recordReads?: boolean
@@ -142,6 +144,7 @@ export async function indexedMp4(
     compositionOffsets = [0, 10],
     compositionSamples = samples,
     cttsVersion = 0,
+    mediaEditDuration,
     keyInterval = 1,
     firstKeySample = 0,
     recordReads = true,
@@ -282,7 +285,25 @@ export async function indexedMp4(
     return join(
       boxes(data).flatMap(entry => {
         if (entry.name === 'edts') {
-          return []
+          if (mediaEditDuration === undefined) {
+            return []
+          }
+
+          const movieHeader = boxes(originalMoov).find(
+            child => child.name === 'mvhd',
+          )!
+          const timescale = new DataView(
+            movieHeader.payload.buffer,
+            movieHeader.payload.byteOffset,
+          ).getUint32(12)
+          const edit = new Uint8Array(20)
+          const view = new DataView(edit.buffer)
+
+          view.setUint32(4, 1)
+          view.setUint32(8, Math.round(mediaEditDuration * timescale))
+          view.setUint32(16, 65_536)
+
+          return [box('edts', box('elst', edit))]
         }
 
         if (entry.name === 'stbl') {

@@ -228,6 +228,7 @@ export class IsobmffDemuxer extends Demuxer {
     } | null = null;
     tracks: InternalTrack[] = [];
     idToTrack = new Map<number, InternalTrack>();
+    private readonly movieTrackIds = new Set<number>();
     metadataPromise: Promise<void> | null = null;
     movieTimescale = -1;
     movieDurationInTimescale = -1;
@@ -871,6 +872,12 @@ export class IsobmffDemuxer extends Demuxer {
                     } satisfies InternalTrack as InternalTrack;
                     this.currentTrack = track;
                     await this.readContiguousBoxes(slice.slice(contentStartPos, boxInfo.contentSize), fromFile);
+                    if (track.id !== -1) {
+                        if (track.id === 0 || this.movieTrackIds.has(track.id)) {
+                            throw new InvalidIsobmffInputError('Invalid or duplicate MP4 track ID.');
+                        }
+                        this.movieTrackIds.add(track.id);
+                    }
                     if (track.id !== -1
                         && track.timescale !== -1
                         && track.info !== null
@@ -2595,25 +2602,12 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         return null;
     }
     async getFirstPacket(options: PacketRetrievalOptions) {
-        const regularPacket = await this.fetchPacketForSampleIndex(0, options);
+        const regularPacket = await this.fetchNextRegularPacket(0, options);
         if (regularPacket || !this.internalTrack.demuxer.isFragmented) {
             // If there's a non-fragmented packet, always prefer that
             return regularPacket;
         }
-        return this.performFragmentedLookup(null, async (fragment) => {
-            const trackData = fragment.trackData.get(this.internalTrack.id);
-            if (trackData) {
-                return {
-                    sampleIndex: 0,
-                    correctSampleFound: true,
-                };
-            }
-            return {
-                sampleIndex: -1,
-                correctSampleFound: false,
-            };
-        }, -Infinity, // Use -Infinity as a search timestamp to avoid using the lookup entries
-        Infinity, options);
+        return this.fetchNextFragmentPacket(null, 0, options);
     }
     private mapTimestampIntoTimescale(timestamp: number) {
         // Do a little rounding to catch cases where the result is very close to an integer. If it is, it's likely
@@ -2644,7 +2638,7 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
     async getNextPacket(packet: EncodedPacket, options: PacketRetrievalOptions) {
         const regularSampleIndex = this.packetToSampleIndex.get(packet);
         if (regularSampleIndex !== undefined) {
-            const next = await this.fetchPacketForSampleIndex(regularSampleIndex + 1, options);
+            const next = await this.fetchNextRegularPacket(regularSampleIndex + 1, options);
             if (next || !this.internalTrack.demuxer.isFragmented)
                 return next;
         }
@@ -2652,32 +2646,35 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         if (regularSampleIndex === undefined && locationInFragment === undefined) {
             throw new Error('Packet was not created from this track.');
         }
-        return this.performFragmentedLookup(locationInFragment?.fragment ?? null, async (fragment) => {
-            if (locationInFragment && fragment === locationInFragment.fragment) {
-                const trackData = fragment.trackData.get(this.internalTrack.id)!;
-                if (locationInFragment.sampleIndex + 1 < trackData.samples.length) {
-                    // We can simply take the next sample in the fragment
-                    return {
-                        sampleIndex: locationInFragment.sampleIndex + 1,
-                        correctSampleFound: true,
-                    };
-                }
+        return this.fetchNextFragmentPacket(
+            locationInFragment?.fragment ?? null, (locationInFragment?.sampleIndex ?? -1) + 1, options,
+        );
+    }
+    private async fetchNextRegularPacket(index: number, options: PacketRetrievalOptions) {
+        const packet = await this.fetchPacketForSampleIndex(index, options);
+        const editEnd = this.internalTrack.info?.type === 'audio' ? this.getEditEnd() : undefined;
+        if (packet || editEnd === undefined) {
+            return packet;
+        }
+        // An excluded PTS can precede a retained PTS in decode order.
+        const table = await this.internalTrack.demuxer.getSampleTableForTrack(this.internalTrack);
+        const next = await table.nextBefore(index + 1, editEnd);
+        return this.fetchPacketForSampleIndex(next, options);
+    }
+    private fetchNextFragmentPacket(start: Fragment | null, index: number, options: PacketRetrievalOptions) {
+        const editEnd = this.internalTrack.info?.type === 'audio' ? this.getEditEnd() : undefined;
+        return this.performFragmentedLookup(start, async (fragment) => {
+            const trackData = fragment.trackData.get(this.internalTrack.id);
+            let sampleIndex = fragment === start ? index : 0;
+            if (!trackData || sampleIndex >= trackData.samples.length
+                || (editEnd !== undefined && trackData.startTimestamp >= editEnd)) {
+                return { sampleIndex: -1, correctSampleFound: false };
             }
-            else {
-                const trackData = fragment.trackData.get(this.internalTrack.id);
-                if (trackData) {
-                    return {
-                        sampleIndex: 0,
-                        correctSampleFound: true,
-                    };
-                }
+            if (editEnd !== undefined && trackData.endTimestamp >= editEnd) {
+                sampleIndex = await trackData.samples.nextBefore(sampleIndex, editEnd);
             }
-            return {
-                sampleIndex: -1,
-                correctSampleFound: false,
-            };
-        }, -Infinity, // Use -Infinity as a search timestamp to avoid using the lookup entries
-        Infinity, options);
+            return { sampleIndex, correctSampleFound: sampleIndex !== -1 };
+        }, -Infinity, Infinity, options);
     }
     async getKeyPacket(timestamp: number, options: PacketRetrievalOptions) {
         const timestampInTimescale = this.mapTimestampIntoTimescale(timestamp);
@@ -2748,8 +2745,15 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
             throw new InvalidIsobmffInputError('MP4 sample payload extends beyond the input.');
         }
     }
+    private getEditEnd() {
+        const track = this.internalTrack;
+        const edit = track.editListMediaEdit;
+        return edit?.segmentDuration
+            ? edit.mediaTime + Math.round(edit.segmentDuration / track.demuxer.movieTimescale * track.timescale)
+            : undefined;
+    }
     /**
-     * Retains the intersecting final sample and stops at fully excluded audio.
+     * Retains the intersecting final sample and skips fully excluded audio.
      * Use the original media time so leading empty edits do not affect the comparison.
      * Movie-unit rounding permits the edit list's normal timescale quantization.
      */
@@ -2763,11 +2767,11 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         if (isVideo && presentationTimestamp < edit.mediaTime) {
             throw new UnsupportedIsobmffInputError('Unsupported MP4 edit list: media edit trims video sample presentation.');
         }
-        if (edit.segmentDuration === 0) {
+        const mediaEnd = this.getEditEnd();
+        if (mediaEnd === undefined) {
             return duration;
         }
         const movieTimescale = track.demuxer.movieTimescale;
-        const mediaEnd = edit.mediaTime + Math.round(edit.segmentDuration / movieTimescale * track.timescale);
         if (track.info?.type === 'audio' && presentationTimestamp >= mediaEnd) {
             return null;
         }
@@ -4062,6 +4066,26 @@ class FragmentSampleTable {
             return -1;
         });
     }
+    nextBefore(index: number, timestamp: number) {
+        return this.run(async () => {
+            const limit = timestamp - this.timestampOffset;
+            for (const { cursor, count, min } of this.buckets) {
+                if (min >= limit) {
+                    if (this.monotonic)
+                        break;
+                    continue;
+                }
+                const end = cursor.index + count;
+                for (let at = Math.max(index, cursor.index); at < end; at++) {
+                    if ((await this.readRaw(at)).presentationTimestamp < limit)
+                        return at;
+                    if (this.monotonic)
+                        return -1;
+                }
+            }
+            return -1;
+        });
+    }
     private async duration(index: number, sample: FragmentRaw) {
         if (this.monotonic)
             return index + 1 < this.length
@@ -4506,6 +4530,18 @@ class SampleTable {
     }
     async getNextKeyframeIndex(index: number) {
         return this.keyIndex(index, true);
+    }
+    async nextBefore(index: number, timestamp: number) {
+        // With no composition offsets, samples after an excluded one are
+        // excluded too. Bound the search by the earliest possible PTS.
+        if (!this.composition)
+            return -1;
+        const last = await this.decodeIndex(timestamp - this.minOffset - 1);
+        for (let at = index; at <= last; at++) {
+            if (await this.presentationTime(at) < timestamp)
+                return at;
+        }
+        return -1;
     }
     async getSampleIndexForTimestamp(timestamp: number, keyOnly = false) {
         let index = await this.decodeIndex(timestamp - this.maxOffset);
