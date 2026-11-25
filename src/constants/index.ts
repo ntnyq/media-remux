@@ -4,7 +4,7 @@ export {
   AAC_CHANNELS,
   AAC_FRAME_SIZE,
   AAC_ENCODER_CONFIG,
-  AUDIO_SPOOL_ID,
+  NORMALIZED_AUDIO_SPOOL_TRACK_ID,
   RESAMPLE_RADIUS,
   RESAMPLE_PHASES,
 } from './audio'
@@ -15,6 +15,7 @@ export {
   REMUX_PROGRESS_PHASE,
   REMUX_MIME_TYPE,
   MEDIA_CODEC,
+  PACKET_TYPE,
 } from './media'
 export { MKV_ID, MKV_SEGMENT_BOUNDARIES } from './mkv'
 export {

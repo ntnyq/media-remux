@@ -14,7 +14,7 @@ import type {
   RemuxStorage,
   OutputSegment,
   PacketTrack,
-  SegmentInfo,
+  SegmentPlan,
   TrackWriter,
 } from '../types'
 import { checkAbort } from '../utils'
@@ -147,8 +147,8 @@ function abortableStorage(
  * Success finalizes and closes the output; failures attempt output cancellation.
  * The caller owns input disposal and temporary store disposal.
  *
- * @param baseline - Ordered output tracks defining codec configurations and
- * optional video transforms; kinds must match their decoder configurations.
+ * @param outputTrackTemplates - Ordered output tracks defining codec configurations and
+ * optional video transforms.
  * @param segments - Opens an independent pass over the inspected segments.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback. Track selection is already applied.
@@ -156,12 +156,11 @@ function abortableStorage(
  * @param totalDuration - Combined presentation span in seconds.
  * @returns A promise resolving to the total duration in seconds, output MIME
  * type, and encoded payload bytes written, excluding container overhead.
- * @throws {Error} If a baseline kind disagrees with its decoder configuration.
- * Also propagates packet, muxing, storage, stream, and progress callback failures.
+ * @throws If packet, muxing, storage, stream, or progress callback failures occur.
  * @throws The signal's abort reason if cancellation is detected.
  */
 export async function writeSegments(
-  baseline: PacketTrack[],
+  outputTrackTemplates: PacketTrack[],
   segments: () => AsyncIterable<OutputSegment>,
   options: RemuxOptions,
   trackTimings: Map<number, IsobmffTrackTiming>,
@@ -171,7 +170,7 @@ export async function writeSegments(
 
   let isCommitting = false
   const storage = abortableStorage(options.storage, options.signal)
-  const audioIndex = baseline.findIndex(
+  const audioIndex = outputTrackTemplates.findIndex(
     track => track.kind === MEDIA_TRACK_KIND.audio,
   )
   const normalizedAudio =
@@ -229,24 +228,24 @@ export async function writeSegments(
   /**
    * Supplies the continuous encoded audio packets that start in this segment.
    *
-   * @param info - Segment presentation start and duration in seconds.
+   * @param plan - Segment presentation start and duration in seconds.
    * @param isLast - Whether to drain all remaining audio packets for this segment.
    * @yields Normalized audio packets on the segment's shared time base.
    */
-  async function* segmentAudio(info: SegmentInfo, isLast: boolean) {
+  async function* segmentAudio(plan: SegmentPlan, isLast: boolean) {
     if (!audioPackets) {
       return
     }
 
     pendingAudio ??= await audioPackets.next()
 
-    const end = isLast ? Infinity : duration + info.duration
+    const end = isLast ? Infinity : duration + plan.duration
 
     while (!pendingAudio.done && pendingAudio.value.timestamp < end) {
       const packet = pendingAudio.value
 
       yield packet.clone({
-        timestamp: packet.timestamp - duration + info.start,
+        timestamp: packet.timestamp - duration + plan.start,
       })
       pendingAudio = await audioPackets.next()
     }
@@ -271,10 +270,10 @@ export async function writeSegments(
             {
               iterator: track.packets(
                 false,
-                segment.info.skippedPackets?.[index],
+                segment.plan.skippedPackets?.[index],
               ),
               writer,
-              origin: segment.info.trackOrigins?.[index] ?? segment.info.start,
+              origin: segment.plan.trackOrigins?.[index] ?? segment.plan.start,
               next: undefined as
                 | IteratorResult<EncodedPacket, void>
                 | undefined,
@@ -286,9 +285,9 @@ export async function writeSegments(
 
     if (normalizedWriter) {
       cursors.push({
-        iterator: segmentAudio(segment.info, segment.isLast),
+        iterator: segmentAudio(segment.plan, segment.isLast),
         writer: normalizedWriter,
-        origin: segment.info.start,
+        origin: segment.plan.start,
         next: undefined,
       })
     }
@@ -355,26 +354,15 @@ export async function writeSegments(
   }
 
   try {
-    for (const [index, track] of baseline.entries()) {
+    for (const [index, track] of outputTrackTemplates.entries()) {
       // Video is required to have retained packets. The trailing audio track
       // can be fully trimmed when video advances to its first usable keyframe.
       if (!trackTimings.has(index + 1)) {
         continue
       }
 
-      const transcodes = !isUndefined(normalizedAudio) && index === audioIndex
-      const codec = transcodes ? MEDIA_CODEC.aac : track.codec
-      const config = transcodes ? normalizedAudio.config : track.config
-      const isAudioCodec =
-        codec === MEDIA_CODEC.aac ||
-        codec === MEDIA_CODEC.mp3 ||
-        codec === MEDIA_CODEC.ac3
-
-      if (
-        track.kind === MEDIA_TRACK_KIND.video &&
-        !isAudioCodec &&
-        !('sampleRate' in config)
-      ) {
+      if (track.kind === MEDIA_TRACK_KIND.video) {
+        const { config, codec } = track
         const source = new EncodedVideoPacketSource(codec)
 
         output.addVideoTrack(source, {
@@ -387,7 +375,7 @@ export async function writeSegments(
 
         writers.set(index, {
           /**
-           * Adds a normalized video packet with the baseline decoder configuration.
+           * Adds a normalized video packet with the output decoder configuration.
            *
            * @param packet - Encoded video packet to copy into the output.
            * @returns A promise resolving when the video source accepts the packet.
@@ -401,18 +389,16 @@ export async function writeSegments(
            */
           close: () => source.close(),
         })
-      } else if (
-        track.kind === MEDIA_TRACK_KIND.audio &&
-        isAudioCodec &&
-        'sampleRate' in config
-      ) {
+      } else {
+        const codec = normalizedAudio ? MEDIA_CODEC.aac : track.codec
+        const config = normalizedAudio?.config ?? track.config
         const source = new EncodedAudioPacketSource(codec)
 
         output.addAudioTrack(source, { decoderConfig: config })
 
         writers.set(index, {
           /**
-           * Adds a normalized audio packet with the baseline decoder configuration.
+           * Adds a normalized audio packet with the output decoder configuration.
            *
            * @param packet - Encoded audio packet to copy into the output.
            * @returns A promise resolving when the audio source accepts the packet.
@@ -426,8 +412,6 @@ export async function writeSegments(
            */
           close: () => source.close(),
         })
-      } else {
-        throw new Error('Track kind does not match its decoder configuration.')
       }
     }
 
@@ -435,7 +419,7 @@ export async function writeSegments(
 
     for await (const segment of segments()) {
       await writeSegment(segment)
-      duration += segment.info.duration
+      duration += segment.plan.duration
       segmentIndex++
     }
 
@@ -445,7 +429,9 @@ export async function writeSegments(
     return {
       bytesProcessed,
       duration,
-      mimeType: baseline.some(track => track.kind === MEDIA_TRACK_KIND.video)
+      mimeType: outputTrackTemplates.some(
+        track => track.kind === MEDIA_TRACK_KIND.video,
+      )
         ? REMUX_MIME_TYPE.video
         : REMUX_MIME_TYPE.audio,
     }

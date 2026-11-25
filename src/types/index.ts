@@ -9,8 +9,10 @@ export type { RemuxErrorCode, RemuxError } from './errors'
 export type { FlvTag, FlvTrackFormat } from './flv'
 export type {
   PacketTrack,
+  AudioPacketTrack,
+  VideoPacketTrack,
   MediaInput,
-  SegmentInfo,
+  SegmentPlan,
   DecodeTimeline,
   OutputSegment,
   TrackWriter,

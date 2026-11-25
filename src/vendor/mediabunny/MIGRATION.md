@@ -14,11 +14,14 @@ The MPEG-TS subset adapts the upstream demuxer's transport and PES parsing, time
 
 The TS reader checks payload continuity, skips duplicate transport payloads, and validates PAT/PMT checksums. It rejects program changes and changes to a selected stream's PID or codec. With explicit segment starts and opt-in resets, it permits a counter jump only on a selected PID's first payload in a later segment when that payload begins a PES and the previous PES passes the existing completeness check. The reset does not affect timestamp unwrapping or elementary stream assembly.
 
+The elementary-stream framer bounds its scratch buffer at 32 MiB and caps pending PES timestamp markers. Oversized inputs fail with an unsupported-feature error.
+
 The TS reader exposes private audio signaled through DVB and common registration descriptors. The core can report unsupported selected audio alongside a supported video track.
 
 ## Preserved patch behavior
 
-- Range traversal of `moov`, bounded regular sample-table pages/checkpoints.
+- Range traversal of `moov`, bounded regular sample-table pages/checkpoints. Remuxing skips descriptive metadata and PSSH payloads. Fixed-width headers read only the required prefix.
+- Regular MP4 duration lookup uses bounded composition ranges for wide offsets. Extreme offset runs have their own ranges so an isolated outlier does not widen neighboring sample searches.
 - Paged TFRA, bounded fragment summaries/anchors, serialized parsing.
 - When `tfdt` is missing, the reader recovers the fragment's decode origin from the exact sample referenced by TFRA. Without a usable reference, it scans contiguous fragments from a cached decode-time anchor or from the end of `moov`. In a hybrid MP4, that initial decode clock includes the ordinary sample table's decode duration.
 - Range traversal of `moof/trun`, bounded sample/duration caches and auxiliary encryption metadata pages.
@@ -41,6 +44,7 @@ Regression tests cover sparse large-file paging and real media round trips.
 - Source close promises include asynchronous muxer work. Cancellation/finalization wait for every source before releasing targets, including when a source fails; cancellation attempts every target cleanup before propagating an error.
 - Disk-backed fragment output checks sample durations and composition offsets before writing fragment headers. Core jobs use unsigned 32-bit values for both fields. The compatibility path without preflight timing uses signed composition offsets.
 - Fragmented output patches movie and track durations before committing, using integer presentation ends from the written fragments to keep edit lists consistent with quantized samples. GOPs with an explicit decode origin and decode durations can skip timestamp sorting.
+- Regular and fragmented MP4 packet readers expose DTS alongside PTS, with both timestamps adjusted to the movie timeline. Positive decode offsets use an empty edit followed by a media edit that includes any lead before the first PTS.
 - Fragmented files containing AC-3 use zero `mdhd` duration for all initialization tracks. Safari adds fragment durations to that field.
 - Selected tracks with multiple MP4 sample descriptions are rejected: one output track has one configuration. Unsupported edit lists and multiple sample descriptions on discarded tracks do not block extraction.
 - Selected tracks reject sample references outside the single supported description. The reader resolves sample descriptions after reading track headers and applies the movie transformation after reading the complete movie header.
@@ -55,6 +59,8 @@ Regression tests cover sparse large-file paging and real media round trips.
 - Nested movie/fragment traversal also rejects undersized box headers instead of silently ending a container and dropping its remaining samples.
 - The MP4 demuxer distinguishes unsupported features from explicit container validation failures. The adapter maps these errors to stable media codes while preserving read failures and cancellation.
 - Hybrid MP4 inputs continue from ordinary samples into movie fragments for packet/keyframe traversal and timestamp lookup. Missing fragment decode times start after the ordinary sample table's decode duration. Inconsistent size, timing, and chunk sample counts reject during inspection.
+- Regular MP4 sample-to-chunk mappings must start at chunk one and reference only existing chunk offsets.
+- Regular composition offset runs must cover exactly the declared samples. Sync sample indices must be strictly increasing and refer to existing samples.
 - AVC SPS height includes the interlaced frame factor before cropping. The FLV adapter preserves the SPS pixel aspect ratio in output decoder configuration and MP4 `pasp` metadata.
 - Numeric MP4 nclx/nclc color identifiers survive remuxing and participate in segment compatibility even when WebCodecs has no corresponding string value.
 - MP4 tracks retain the exact sample aspect ratio from SPS or `pasp` separately from rounded square-pixel dimensions. Decoder display ratios use reduced integer factors, preserving `pasp` across repeated remuxes. Explicit `pasp` overrides SPS regardless of box order.

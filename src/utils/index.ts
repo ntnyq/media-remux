@@ -1,9 +1,5 @@
 export { checkAbort } from './abort'
-export {
-  avcDecoderConfig,
-  aacLcDecoderConfig,
-  aacFrameSamples,
-} from './codecConfig'
+export { avcDecoderConfig, readAacLcConfig } from './codecConfig'
 export {
   isRemuxErrorCode,
   isRemuxError,
@@ -12,3 +8,4 @@ export {
 } from './errors'
 export { invalidMkv, readVint } from './mkv'
 export { parseMp3FrameHeader, isIndependentMp3Frame } from './mp3Frame'
+export { areBytesSame } from './areBytesSame'

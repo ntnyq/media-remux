@@ -15,6 +15,7 @@ export const MKV_ID = {
   trackType: 0x83,
   flagEnabled: 0xb9,
   flagDefault: 0x88,
+  flagLacing: 0x9c,
   codecId: 0x86,
   codecPrivate: 0x63a2,
   codecDelay: 0x56aa,

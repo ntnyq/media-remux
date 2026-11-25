@@ -1,7 +1,8 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { Input } from '../../src/vendor/mediabunny/src/input'
 import { MP4 } from '../../src/vendor/mediabunny/src/input-format'
 import { EncodedPacketSink } from '../../src/vendor/mediabunny/src/media-sink'
+import * as misc from '../../src/vendor/mediabunny/src/misc'
 import { BlobSource } from '../../src/vendor/mediabunny/src/source'
 import { fixture as readFixture } from '../helpers/media'
 import { fragmentedMp4 } from '../helpers/mp4Fragments'
@@ -291,6 +292,93 @@ test.each([
         ),
       ).toBe(true)
     } finally {
+      input.dispose()
+    }
+  },
+)
+
+test.each([-1, 1])(
+  'bounds regular MP4 duration lookup work with a wide offset in direction %s',
+  async direction => {
+    const samples = 1200
+    const compositionOffsets = Array.from({ length: samples }, (_, index) =>
+      index === (direction > 0 ? 37 : samples - 38)
+        ? direction * samples * 1024
+        : index % 5 === 0
+          ? -30
+          : 0,
+    )
+    const fixture = await indexedMp4({
+      samples,
+      deltas: [1024, 0, 768, 1536],
+      compositionOffsets,
+      cttsVersion: 1,
+    })
+    const ordered = Array.from(
+      { length: samples },
+      (_, index) => index,
+    ).toSorted(
+      (left, right) => fixture.timestamp(left) - fixture.timestamp(right),
+    )
+    const durations = new Map(
+      ordered.map((index, position) => {
+        const next = ordered[position + 1]
+
+        return [
+          index,
+          next === undefined
+            ? fixture.delta(index)
+            : fixture.timestamp(next) - fixture.timestamp(index),
+        ]
+      }),
+    )
+    const input = new Input({ formats: [MP4], source: fixture.source })
+    const toDataView = misc.toDataView
+    let reads = 0
+
+    const readView = vi.spyOn(misc, 'toDataView').mockImplementation(source => {
+      const page = toDataView(source)
+      const view = new DataView(page.buffer, page.byteOffset, page.byteLength)
+      const getUint32 = view.getUint32.bind(view)
+
+      view.getUint32 = (offset, littleEndian) => {
+        reads++
+
+        return getUint32(offset, littleEndian)
+      }
+
+      return view
+    })
+
+    try {
+      const track = await input.getPrimaryAudioTrack()
+
+      if (!track) {
+        throw new Error('Missing track')
+      }
+
+      const sink = new EncodedPacketSink(track)
+      const options = { metadataOnly: true }
+      const actual = []
+      let packet = await sink.getFirstPacket(options)
+
+      while (packet) {
+        actual.push({ timestamp: packet.timestamp, duration: packet.duration })
+        packet = await sink.getNextPacket(packet, options)
+      }
+
+      expect(actual).toHaveLength(samples)
+
+      for (const [index, sample] of actual.entries()) {
+        expect(sample.timestamp).toBe(fixture.timestamp(index))
+        expect(sample.duration).toBeCloseTo(durations.get(index)!, 10)
+      }
+
+      // Count field reads as well as cache misses, without depending on wall time.
+      expect(reads).toBeGreaterThan(samples)
+      expect(reads).toBeLessThan(120 * samples)
+    } finally {
+      readView.mockRestore()
       input.dispose()
     }
   },

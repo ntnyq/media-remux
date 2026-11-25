@@ -177,6 +177,8 @@ export type IsobmffInputFormatOptions = {
     }) => MaybePromise<Uint8Array | string>) | undefined;
     /** @internal */
     _suppressPsshParsing?: boolean | undefined;
+    /** @internal Skips descriptive metadata and track names during box traversal. */
+    _suppressMetadataTags?: boolean | undefined;
 };
 /**
  * Additional HLS input configuration.

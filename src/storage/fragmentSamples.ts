@@ -3,7 +3,7 @@
 import { isInteger, isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_FILE_KIND,
-  FRAGMENT_SAMPLE_TYPE,
+  PACKET_TYPE,
   FRAGMENT_SAMPLE_RECORD_SIZE as RECORD_SIZE,
   FRAGMENT_SAMPLE_RECORDS_PER_PAGE as RECORDS_PER_PAGE,
   FRAGMENT_SAMPLE_PAGE_SIZE as PAGE_SIZE,
@@ -402,7 +402,7 @@ export function createDiskFragmentSamples(
       sample.size > 0xff_ff_ff_ff ||
       !isNonnegativeSafeInteger(sample.timescaleUnitsToNextSample) ||
       !isNonnegativeSafeInteger(sample.mediaOffset) ||
-      !Object.values(FRAGMENT_SAMPLE_TYPE).includes(sample.type)
+      !Object.values(PACKET_TYPE).includes(sample.type)
     ) {
       throw new RangeError('Invalid sample storage field.')
     }
@@ -435,7 +435,7 @@ export function createDiskFragmentSamples(
       size: view.getFloat64(24),
       timescaleUnitsToNextSample: view.getFloat64(32),
       mediaOffset: view.getFloat64(40),
-      type: type ? FRAGMENT_SAMPLE_TYPE.key : FRAGMENT_SAMPLE_TYPE.delta,
+      type: type ? PACKET_TYPE.key : PACKET_TYPE.delta,
     }
 
     assertValidSample(sample)
@@ -488,7 +488,7 @@ export function createDiskFragmentSamples(
     view.setFloat64(24, sample.size)
     view.setFloat64(32, sample.timescaleUnitsToNextSample)
     view.setFloat64(40, sample.mediaOffset)
-    view.setUint8(48, sample.type === FRAGMENT_SAMPLE_TYPE.key ? 1 : 0)
+    view.setUint8(48, sample.type === PACKET_TYPE.key ? 1 : 0)
     page.dirty = true
   }
 

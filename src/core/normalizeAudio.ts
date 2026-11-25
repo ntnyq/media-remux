@@ -2,20 +2,20 @@
 
 import { isUndefined } from '@ntnyq/utils'
 import {
-  FRAGMENT_SAMPLE_TYPE,
+  PACKET_TYPE,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   AAC_CHANNELS,
   AAC_FRAME_SIZE,
   AAC_SAMPLE_RATE,
-  AUDIO_SPOOL_ID,
+  NORMALIZED_AUDIO_SPOOL_TRACK_ID,
   RESAMPLE_RADIUS,
   RESAMPLE_PHASES,
 } from '../constants'
 import type {
   RemuxStorage,
   AudioSegment,
-  PacketTrack,
+  AudioPacketTrack,
   PcmBlock,
 } from '../types'
 import { checkAbort, createRemuxError } from '../utils'
@@ -67,14 +67,10 @@ function resamplingKernels(sampleRate: number) {
  * @throws If decoding fails or the track configuration or channel count is invalid.
  */
 async function* decodeSegment(
-  track: PacketTrack,
+  track: AudioPacketTrack,
   shift: number,
   signal?: AbortSignal,
 ): AsyncGenerator<PcmBlock, void, unknown> {
-  if (!('sampleRate' in track.config)) {
-    throw new Error('Expected an audio decoder configuration.')
-  }
-
   let lastEnd = -Infinity
   let pending: PcmBlock | undefined
 
@@ -220,27 +216,27 @@ async function* pcmInputs(
     }
   }
 
-  for await (const { tracks, info } of segments) {
+  for await (const { tracks, plan } of segments) {
     const audioIndex = tracks.findIndex(
       candidate => candidate.kind === MEDIA_TRACK_KIND.audio,
     )
     const track = tracks[audioIndex]
-    const origin = info.trackOrigins?.[audioIndex] ?? info.start
+    const origin = plan.trackOrigins?.[audioIndex] ?? plan.start
     const shift = (elapsed - origin) * AAC_SAMPLE_RATE + preroll
     const segmentStart = Math.round(elapsed * AAC_SAMPLE_RATE) + preroll
 
-    elapsed += info.duration
+    elapsed += plan.duration
 
     const segmentEnd = Math.round(elapsed * AAC_SAMPLE_RATE) + preroll
 
-    if (track && info.audioRange) {
+    if (track?.kind === MEDIA_TRACK_KIND.audio && plan.audioRange) {
       const first = Math.max(
         segmentStart,
-        Math.round(info.audioRange.start * AAC_SAMPLE_RATE + shift),
+        Math.round(plan.audioRange.start * AAC_SAMPLE_RATE + shift),
       )
       const last = Math.min(
         segmentEnd,
-        Math.round(info.audioRange.end * AAC_SAMPLE_RATE + shift),
+        Math.round(plan.audioRange.end * AAC_SAMPLE_RATE + shift),
       )
 
       for await (const block of decodeSegment(track, shift, signal)) {
@@ -322,12 +318,12 @@ export async function normalizeAudio(
 
     result.chunk.copyTo(data)
     const id = await store.append(
-      AUDIO_SPOOL_ID,
+      NORMALIZED_AUDIO_SPOOL_TRACK_ID,
       {
         timestamp,
         decodeTimestamp: timestamp,
         duration: packetDuration,
-        type: FRAGMENT_SAMPLE_TYPE.key,
+        type: PACKET_TYPE.key,
         size: data.length,
         timescaleUnitsToNextSample: length,
       },
@@ -364,9 +360,9 @@ export async function normalizeAudio(
     async *packets() {
       for (let id = startId; id < startId + count; id++) {
         checkAbort(signal)
-        const row = await store.get(AUDIO_SPOOL_ID, id)
+        const row = await store.get(NORMALIZED_AUDIO_SPOOL_TRACK_ID, id)
         const data = await store.readMedia(
-          AUDIO_SPOOL_ID,
+          NORMALIZED_AUDIO_SPOOL_TRACK_ID,
           row.mediaOffset,
           row.size,
         )

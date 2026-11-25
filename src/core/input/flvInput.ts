@@ -1,7 +1,7 @@
 /* oxlint-disable no-await-in-loop -- FLV tags are read in file order with bounded memory. */
 
 import {
-  FRAGMENT_SAMPLE_TYPE,
+  PACKET_TYPE,
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
@@ -15,12 +15,12 @@ import type {
   PacketTrack,
 } from '../../types'
 import {
-  aacFrameSamples,
-  aacLcDecoderConfig,
   avcDecoderConfig,
   checkAbort,
   createRemuxError,
   parseMp3FrameHeader,
+  readAacLcConfig,
+  areBytesSame,
 } from '../../utils'
 import { readBlobBytes } from '../../utils/remuxInput'
 import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
@@ -215,8 +215,9 @@ async function* readTags(
 
       const prefix = await readBytes(blob, payloadOffset, prefixSize, signal)
       const soundFormat = (prefix[0] ?? 0) >> 4
+      // The extension supplies the signed high byte of the FLV timestamp.
       const timestamp =
-        (uint24(tagHeader, 4) + (tagHeader[7] ?? 0) * 16_777_216) / 1000
+        (((tagHeader[7] ?? 0) << 24) | uint24(tagHeader, 4)) / 1000
 
       // Legacy MP3 has no packet-type byte after the audio tag header.
       if (type === 8 && (soundFormat === 2 || soundFormat === 14)) {
@@ -283,20 +284,6 @@ async function* readTags(
 }
 
 /**
- * Compares decoder descriptions by length and byte contents.
- *
- * @param left - First decoder description.
- * @param right - Second decoder description.
- * @returns Whether both buffers contain identical bytes.
- */
-function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
-  return (
-    left.length === right.length &&
-    left.every((byte, index) => byte === right[index])
-  )
-}
-
-/**
  * Scans FLV tag structure and selected decoder configurations before exposing
  * H.264 video and AAC-LC or MP3 audio tracks. Unselected payloads stay on disk.
  * Each packet iterator rereads its track, derives durations from decode timing
@@ -358,7 +345,7 @@ export async function openFlvInput(
     } else if (
       previous &&
       (previous.codec === MEDIA_CODEC.mp3 ||
-        (tag.packetType === 0 && !sameBytes(previous.description, tag.data)))
+        (tag.packetType === 0 && !areBytesSame(previous.description, tag.data)))
     ) {
       throw createRemuxError(
         REMUX_ERROR_CODE.unsupportedMediaFeature,
@@ -384,111 +371,123 @@ export async function openFlvInput(
 
   for (const [kind, format] of formats) {
     const { codec } = format
-    let config: PacketTrack['config']
-    let defaultDuration = 1 / 30
 
     if (codec === MEDIA_CODEC.mp3) {
-      config = {
+      tracks.push({
+        kind: MEDIA_TRACK_KIND.audio,
         codec,
-        sampleRate: format.sampleRate,
-        numberOfChannels: format.numberOfChannels,
-      }
+        config: {
+          codec,
+          sampleRate: format.sampleRate,
+          numberOfChannels: format.numberOfChannels,
+        },
+        packets: readPackets.bind(undefined, 1 / 30),
+      })
     } else if (codec === MEDIA_CODEC.aac) {
-      const aac = aacLcDecoderConfig(format.description, 'FLV')
+      const aac = readAacLcConfig(format.description, 'FLV')
 
-      config = aac
-      defaultDuration = aacFrameSamples(format.description) / aac.sampleRate
+      tracks.push({
+        kind: MEDIA_TRACK_KIND.audio,
+        codec,
+        config: aac.config,
+        packets: readPackets.bind(undefined, aac.frameDuration),
+      })
     } else {
-      config = avcDecoderConfig(format.description, 'FLV')
+      tracks.push({
+        kind: MEDIA_TRACK_KIND.video,
+        codec,
+        config: avcDecoderConfig(format.description, 'FLV'),
+        packets: readPackets.bind(undefined, 1 / 30),
+      })
     }
 
-    tracks.push({
-      kind,
-      codec,
-      config,
+    /**
+     * Rereads this FLV track, deriving packet durations from codec or tag timing.
+     *
+     * @param defaultDuration - Initial fallback frame duration in seconds.
+     * @param metadataOnly - Whether to omit encoded payloads; defaults to false.
+     * @param skipPackets - Number of leading packets to skip in decode order.
+     * @returns An asynchronous generator that completes without a return value.
+     * @yields {EncodedPacket} Packets with presentation timing and decode sequence numbers.
+     * @throws If tag parsing, decode timestamp ordering, or cancellation fails.
+     */
+    async function* readPackets(
+      defaultDuration: number,
+      metadataOnly = false,
+      skipPackets = 0,
+    ) {
+      let pending: FlvTag | undefined
+      let sequence = 0
+      let lastDuration = defaultDuration
+      let lastTimestamp = -Infinity
+      let lastMediaTimestamp = -Infinity
 
       /**
-       * Rereads this FLV track, deriving packet durations from codec or tag timing.
+       * Converts a media tag to a packet at the current sequence number.
        *
-       * @param metadataOnly - Whether to omit encoded payloads; defaults to false.
-       * @param skipPackets - Number of leading packets to skip in decode order.
-       * @returns An asynchronous generator that completes without a return value.
-       * @yields {EncodedPacket} Packets with presentation timing and decode sequence numbers.
-       * @throws If tag parsing, decode timestamp ordering, or cancellation fails.
+       * @param tag - Media tag whose payload and composition offset to preserve.
+       * @param duration - Decode duration in seconds, also used as a presentation estimate.
+       * @returns An encoded packet with its source decode sequence number.
        */
-      async *packets(metadataOnly = false, skipPackets = 0) {
-        let pending: FlvTag | undefined
-        let sequence = 0
-        let lastDuration = defaultDuration
-        let lastTimestamp = -Infinity
-        let lastMediaTimestamp = -Infinity
+      function packet(tag: FlvTag, duration: number) {
+        return new EncodedPacket(
+          tag.data,
+          tag.isKey ? PACKET_TYPE.key : PACKET_TYPE.delta,
+          tag.timestamp + tag.compositionTime,
+          duration,
+          sequence,
+          tag.size,
+          { decodeDuration: duration, decodeTimestamp: tag.timestamp },
+        )
+      }
 
-        /**
-         * Converts a media tag to a packet at the current sequence number.
-         *
-         * @param tag - Media tag whose payload and composition offset to preserve.
-         * @param duration - Decode duration in seconds, also used as a presentation estimate.
-         * @returns An encoded packet with its source decode sequence number.
-         */
-        function packet(tag: FlvTag, duration: number) {
-          return new EncodedPacket(
-            tag.data,
-            tag.isKey ? FRAGMENT_SAMPLE_TYPE.key : FRAGMENT_SAMPLE_TYPE.delta,
-            tag.timestamp + tag.compositionTime,
-            duration,
-            sequence,
-            tag.size,
-            { decodeDuration: duration },
-          )
-        }
-
-        // Hold one media tag so the next tag can establish its video duration.
-        // Audio uses its codec duration; final video reuses the last duration.
-        for await (const tag of readTags(blob, kind, metadataOnly, signal)) {
-          if (tag.packetType !== 0) {
-            if (
-              tag.timestamp < lastTimestamp ||
-              (tag.packetType === 1 && tag.timestamp <= lastMediaTimestamp)
-            ) {
-              throw createRemuxError(
-                REMUX_ERROR_CODE.invalidInput,
-                'FLV decode timestamps must increase within each track.',
-              )
-            }
-
-            lastTimestamp = tag.timestamp
-
-            if (tag.packetType === 1) {
-              lastMediaTimestamp = tag.timestamp
-            }
-
-            if (pending) {
-              const delta = tag.timestamp - pending.timestamp
-
-              if (kind === MEDIA_TRACK_KIND.video && delta > 0) {
-                lastDuration = delta
-              }
-
-              if (sequence >= skipPackets) {
-                yield packet(pending, pending.mp3?.duration ?? lastDuration)
-              }
-
-              sequence++
-            }
-
-            pending = tag.packetType === 1 ? tag : undefined
+      // Hold one media tag so the next tag can establish its video duration.
+      // Audio uses its codec duration; final video reuses the last duration.
+      for await (const tag of readTags(blob, kind, metadataOnly, signal)) {
+        if (tag.packetType !== 0) {
+          if (
+            tag.timestamp < lastTimestamp ||
+            (tag.packetType === 1 && tag.timestamp <= lastMediaTimestamp)
+          ) {
+            throw createRemuxError(
+              REMUX_ERROR_CODE.invalidInput,
+              'FLV decode timestamps must increase within each track.',
+            )
           }
-        }
 
-        if (pending && sequence >= skipPackets) {
-          yield packet(pending, pending.mp3?.duration ?? lastDuration)
+          lastTimestamp = tag.timestamp
+
+          if (tag.packetType === 1) {
+            lastMediaTimestamp = tag.timestamp
+          }
+
+          if (pending) {
+            const delta = tag.timestamp - pending.timestamp
+
+            if (kind === MEDIA_TRACK_KIND.video && delta > 0) {
+              lastDuration = delta
+            }
+
+            if (sequence >= skipPackets) {
+              yield packet(pending, pending.mp3?.duration ?? lastDuration)
+            }
+
+            sequence++
+          }
+
+          pending = tag.packetType === 1 ? tag : undefined
         }
-      },
-    })
+      }
+
+      if (pending && sequence >= skipPackets) {
+        yield packet(pending, pending.mp3?.duration ?? lastDuration)
+      }
+    }
   }
 
   return {
     tracks,
+    canReuseAfterDispose: true,
 
     /**
      * Satisfies the input cleanup contract; Blob-backed FLV owns no handles.

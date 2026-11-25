@@ -15,6 +15,9 @@ import { FileSlice, readBytes, type Reader } from '../reader';
 export const TS_PACKET_SIZE = 188;
 export const MPEG_TS_TIMESCALE = 90_000;
 const TIMESTAMP_MODULUS = 2 ** 33;
+// Limit elementary-stream framing independently of the transport packet cache.
+const MAX_ELEMENTARY_BUFFER_SIZE = 32 * 1024 * 1024;
+const MAX_BUFFERED_PES_TIMINGS = 65_536;
 
 // The upstream normalization maps a wrapped timestamp into a window anchored
 // on a reference. Use a rolling DTS-centered window for sequential reads.
@@ -508,11 +511,18 @@ class PacketReadingContext {
                 break;
             }
             const { data, timing } = next.value;
+            const end = this.end + data.length;
+            if (end > MAX_ELEMENTARY_BUFFER_SIZE) {
+                throw new UnsupportedMpegTsError('MPEG-TS elementary stream exceeds the 32 MiB framing buffer limit.');
+            }
             if (timing) {
+                if (this.timings.length >= MAX_BUFFERED_PES_TIMINGS) {
+                    throw new UnsupportedMpegTsError('MPEG-TS elementary stream has too many pending PES timestamps.');
+                }
                 this.timings.push({ offset: this.end, timing });
             }
-            if (this.end + data.length > this.scratch.length) {
-                const scratch = new Uint8Array(2 * this.scratch.length);
+            if (end > this.scratch.length) {
+                const scratch = new Uint8Array(Math.min(MAX_ELEMENTARY_BUFFER_SIZE, Math.max(end, 2 * this.scratch.length)));
                 scratch.set(this.scratch.subarray(0, this.end));
                 this.scratch = scratch;
             }

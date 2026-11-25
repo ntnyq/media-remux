@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
-import { inspectTracks, trackSignature } from '../../src/core/mediaTracks'
-import type { PacketTrack } from '../../src/types'
+import { areTracksCompatible, inspectTracks } from '../../src/core/mediaTracks'
+import type { VideoPacketTrack } from '../../src/types'
 import { EncodedPacket } from '../../src/vendor/mediabunny/src/packet'
 
 /**
@@ -13,7 +13,7 @@ import { EncodedPacket } from '../../src/vendor/mediabunny/src/packet'
 function videoTrack(
   timestamps: readonly (readonly [number, 'key' | 'delta'])[] = [],
   colorSpace?: VideoColorSpaceInit,
-): PacketTrack {
+): VideoPacketTrack {
   return {
     kind: 'video',
     codec: 'avc',
@@ -32,20 +32,17 @@ function videoTrack(
 }
 
 test('compares color metadata by fields regardless of property order or absent null fields', () => {
-  expect(trackSignature(videoTrack([], { primaries: null }))).toBe(
-    trackSignature(videoTrack()),
-  )
   expect(
-    trackSignature(
+    areTracksCompatible(videoTrack([], { primaries: null }), videoTrack()),
+  ).toBe(true)
+  expect(
+    areTracksCompatible(
       videoTrack([], {
         fullRange: false,
         matrix: 'bt709',
         transfer: 'bt709',
         primaries: 'bt709',
       }),
-    ),
-  ).toBe(
-    trackSignature(
       videoTrack([], {
         primaries: 'bt709',
         transfer: 'bt709',
@@ -53,7 +50,7 @@ test('compares color metadata by fields regardless of property order or absent n
         fullRange: false,
       }),
     ),
-  )
+  ).toBe(true)
 })
 
 test.each([
@@ -72,8 +69,11 @@ test.each([
     } satisfies VideoColorSpaceInit
 
     expect(
-      trackSignature(videoTrack([], { ...baseline, ...difference })),
-    ).not.toBe(trackSignature(videoTrack([], baseline)))
+      areTracksCompatible(
+        videoTrack([], { ...baseline, ...difference }),
+        videoTrack([], baseline),
+      ),
+    ).toBe(false)
   },
 )
 
@@ -105,18 +105,24 @@ test('compares proportional display dimensions by their exact aspect ratio', () 
     displayAspectHeight: 128,
   }
 
-  expect(trackSignature({ ...track, config })).toBe(
-    trackSignature({
-      ...track,
-      config: { ...config, displayAspectWidth: 96, displayAspectHeight: 64 },
-    }),
-  )
-  expect(trackSignature({ ...track, config })).not.toBe(
-    trackSignature({
-      ...track,
-      config: { ...config, displayAspectWidth: 85, displayAspectHeight: 64 },
-    }),
-  )
+  expect(
+    areTracksCompatible(
+      { ...track, config },
+      {
+        ...track,
+        config: { ...config, displayAspectWidth: 96, displayAspectHeight: 64 },
+      },
+    ),
+  ).toBe(true)
+  expect(
+    areTracksCompatible(
+      { ...track, config },
+      {
+        ...track,
+        config: { ...config, displayAspectWidth: 85, displayAspectHeight: 64 },
+      },
+    ),
+  ).toBe(false)
 })
 
 test('rejects a delta packet crossing the preceding GOP timeline', async () => {
@@ -130,4 +136,29 @@ test('rejects a delta packet crossing the preceding GOP timeline', async () => {
   ])
 
   await expect(inspectTracks([track])).rejects.toThrow('previous GOP')
+})
+
+test('compares only the bytes in a decoder description view', () => {
+  const track = videoTrack()
+  const withDescription = (description: VideoDecoderConfig['description']) => ({
+    ...track,
+    config: { ...track.config, ...(description ? { description } : {}) },
+  })
+  const bytes = Uint8Array.of(0, 1, 2, 3)
+
+  expect(
+    areTracksCompatible(
+      withDescription(new DataView(bytes.buffer, 1, 2)),
+      withDescription(Uint8Array.of(1, 2).buffer),
+    ),
+  ).toBe(true)
+  expect(
+    areTracksCompatible(
+      withDescription(bytes.subarray(1, 3)),
+      withDescription(bytes.subarray(2, 4)),
+    ),
+  ).toBe(false)
+  expect(areTracksCompatible(track, withDescription(new ArrayBuffer(0)))).toBe(
+    true,
+  )
 })

@@ -14,14 +14,15 @@ export function invalidMkv(message: string) {
 }
 
 /**
- * Reads the EBML variable-length integer and its encoded width. The same
- * bits mean an unknown size only when used in an element size field.
+ * Reads an EBML variable-length integer and its encoded width. All value bits
+ * being set denotes an unknown size only when reading an element size.
  *
  * @param slice - Input slice positioned at the first byte of the integer.
- * @returns The marker-stripped value, byte width, and whether all value bits are set.
+ * @param signed - Whether to apply the signed EBML lacing bias.
+ * @returns The decoded value, byte width, and whether all value bits are set.
  * @throws If the integer is truncated or has an invalid encoded width.
  */
-export function readVint(slice: FileSlice) {
+export function readVint(slice: FileSlice, signed = false) {
   if (!slice.remainingLength) {
     throw invalidMkv('Truncated MKV variable-length integer.')
   }
@@ -37,6 +38,12 @@ export function readVint(slice: FileSlice) {
   let value = first & mask
   let allOnes = value === mask
 
+  if (signed) {
+    // Subtract the bias's power-of-two part before accumulating the remaining
+    // bytes so small lace differences stay exact even with an eight-byte VINT.
+    value -= 2 ** (7 - width)
+  }
+
   for (let i = 1; i < width; i++) {
     const byte = readU8(slice)
 
@@ -44,5 +51,5 @@ export function readVint(slice: FileSlice) {
     allOnes &&= byte === 0xff
   }
 
-  return { value, width, allOnes }
+  return { value: signed ? value + 1 : value, width, allOnes }
 }

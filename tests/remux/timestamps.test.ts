@@ -75,6 +75,20 @@ test.each([
   },
 )
 
+test('rejects a combine offset outside the exact MP4 movie clock before writing', async () => {
+  const target = memoryTarget()
+
+  await expect(
+    combineTracks(await fixture('video.mp4'), await fixture('audio.m4a'), {
+      storage: await diskStorage(),
+      writable: target.writable,
+      timeline: { audioOffset: 2 ** 50 },
+    }),
+  ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  expect(target.state.writes).toStrictEqual([])
+  expect(target.writable.locked).toBe(false)
+})
+
 test('shifts audio PTS and inferred DTS together in the MP4 written by combine', async context => {
   const exec = promisify(execFile)
 
@@ -119,6 +133,58 @@ test('shifts audio PTS and inferred DTS together in the MP4 written by combine',
 
     expect(pts).toBeCloseTo(expected, 5)
     expect(dts).toBeCloseTo(expected, 5)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('aligns fragmented MP4 video with TS AAC without dropping decoded audio frames', async context => {
+  const exec = promisify(execFile)
+
+  try {
+    await exec('ffprobe', ['-version'])
+  } catch {
+    context.skip()
+
+    return
+  }
+
+  const video = await fixture('hybrid.mp4')
+  const audio = await fixture('continuous-av.mpegts')
+  const source = await packets(audio, 'audio')
+  const target = memoryTarget()
+
+  await combineTracks(video, audio, {
+    storage: await diskStorage(),
+    writable: target.writable,
+    timeline: 'align-starts',
+  })
+  const directory = await mkdtemp(join(tmpdir(), 'media-remux-combine-ts-aac-'))
+
+  try {
+    const path = join(directory, 'output.mp4')
+
+    await writeFile(path, new Uint8Array(await target.blob().arrayBuffer()))
+    const { stdout } = await exec('ffprobe', [
+      '-v',
+      'error',
+      '-select_streams',
+      'a:0',
+      '-show_packets',
+      '-count_frames',
+      '-show_entries',
+      'packet=pts_time,dts_time:stream=nb_read_frames',
+      '-of',
+      'json',
+      path,
+    ])
+
+    const { packets: audioPackets, streams } = JSON.parse(stdout)
+
+    expect({ firstPacket: audioPackets[0], streams }).toMatchObject({
+      firstPacket: { pts_time: '0.000000', dts_time: '0.000000' },
+      streams: [{ nb_read_frames: String(source.length) }],
+    })
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -193,72 +259,83 @@ test.each(['remux', 'concat', 'combine'] as const)(
   },
 )
 
-test('preserves VFR decode deltas and absolute PTS independently read by FFprobe', async context => {
-  const exec = promisify(execFile)
+test.for(['vfr-bframes.mp4', 'vfr-bframes.flv'])(
+  'preserves absolute VFR PTS and DTS from %s across repeated remuxes',
+  async (name, context) => {
+    const exec = promisify(execFile)
 
-  try {
-    await exec('ffprobe', ['-version'])
-  } catch {
-    context.skip()
+    try {
+      await exec('ffprobe', ['-version'])
+    } catch {
+      context.skip()
 
-    return
-  }
-
-  const directory = await mkdtemp(join(tmpdir(), 'media-remux-timing-'))
-
-  try {
-    const input = await fixture('vfr-bframes.mp4')
-    const target = memoryTarget()
-
-    await remuxMedia(input, {
-      storage: await diskStorage(),
-      writable: target.writable,
-    })
-    const timings: number[][][] = []
-
-    for (const [index, blob] of [input, target.blob()].entries()) {
-      const path = join(directory, `${index}.mp4`)
-
-      await writeFile(path, new Uint8Array(await blob.arrayBuffer()))
-      const { stdout } = await exec('ffprobe', [
-        '-v',
-        'error',
-        '-select_streams',
-        'v:0',
-        '-show_entries',
-        'packet=pts_time,dts_time',
-        '-of',
-        'csv=p=0',
-        path,
-      ])
-
-      timings.push(
-        stdout
-          .trim()
-          .split('\n')
-          .map(line => line.split(',').map(Number)),
-      )
+      return
     }
 
-    const [source, output] = timings
+    const directory = await mkdtemp(join(tmpdir(), 'media-remux-timing-'))
 
-    expect(source).toHaveLength(7)
-    expect(output).toHaveLength(source!.length)
-    const sourceStart = Math.min(...source!.map(row => row[0]!))
+    try {
+      const input = await fixture(name)
+      const target = memoryTarget()
 
-    // FFprobe can report presentation intervals for MP4 and decode durations
-    // for fMP4. Compare the decode timestamps directly.
-    for (const [index, row] of output!.entries()) {
-      expect(row[0]).toBeCloseTo(source![index]![0]! - sourceStart, 5)
-      expect(row[1]! - output![0]![1]!).toBeCloseTo(
-        source![index]![1]! - source![0]![1]!,
-        5,
-      )
+      await remuxMedia(input, {
+        storage: await diskStorage(),
+        writable: target.writable,
+      })
+      const repeated = memoryTarget()
+
+      await remuxMedia(target.blob(), {
+        storage: await diskStorage(),
+        writable: repeated.writable,
+      })
+      const timings: number[][][] = []
+
+      for (const [index, blob] of [
+        input,
+        target.blob(),
+        repeated.blob(),
+      ].entries()) {
+        const path = join(directory, index === 0 ? name : `${index}.mp4`)
+
+        await writeFile(path, new Uint8Array(await blob.arrayBuffer()))
+        const { stdout } = await exec('ffprobe', [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'packet=pts_time,dts_time',
+          '-of',
+          'csv=p=0',
+          path,
+        ])
+
+        timings.push(
+          stdout
+            .trim()
+            .split('\n')
+            .map(line => line.split(',').map(Number)),
+        )
+      }
+
+      const [source, ...outputs] = timings
+
+      expect(source).toHaveLength(7)
+      const sourceStart = Math.min(...source!.map(row => row[0]!))
+
+      for (const output of outputs) {
+        expect(output).toHaveLength(source!.length)
+
+        for (const [index, row] of output.entries()) {
+          expect(row[0]).toBeCloseTo(source![index]![0]! - sourceStart, 5)
+          expect(row[1]).toBeCloseTo(source![index]![1]! - sourceStart, 5)
+        }
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true })
     }
-  } finally {
-    await rm(directory, { recursive: true, force: true })
-  }
-})
+  },
+)
 
 test.for(['video.mp4', 'vfr-bframes.mp4', 'vfr-bframes.flv'])(
   'preserves absolute A/V timestamps from %s as read by FFprobe',

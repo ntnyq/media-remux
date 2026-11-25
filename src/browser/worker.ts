@@ -60,20 +60,20 @@ async function openJobFiles(path: readonly string[]) {
 export function installMediaWorker(
   scope: MediaWorkerScope = globalThis,
 ): () => void {
-  let isRunning = false
+  let hasAcceptedRequest = false
 
   /**
    * Accepts the first parent message and ignores every subsequent request.
    *
    * @param event - Parent message containing an untrusted job request.
-   * @returns A promise resolving after request handling, or immediately if busy.
+   * @returns A promise resolving after request handling, or immediately for a subsequent request.
    */
   const listener = async (event: MessageEvent<unknown>) => {
-    if (isRunning) {
+    if (hasAcceptedRequest) {
       return
     }
 
-    isRunning = true
+    hasAcceptedRequest = true
     await run(event.data)
   }
 

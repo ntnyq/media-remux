@@ -26,7 +26,7 @@ export type EncodedPacketSideData = {
      * for reordered samples; remuxing must not substitute it for the stts/trun delta.
      */
     decodeDuration?: number | undefined;
-    /** Source decode timestamp in seconds, when available from MPEG-TS PES. */
+    /** Source decode timestamp in seconds, when supplied by the container. */
     decodeTimestamp?: number | undefined;
     /**
      * An encoded alpha frame, encoded with the same codec as the packet. Typically used for transparent videos, where

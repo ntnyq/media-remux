@@ -143,6 +143,11 @@ export interface MkvTrack {
   isDefault: boolean
 
   /**
+   * Whether the track allows multiple frames in one block.
+   */
+  allowsLacing: boolean
+
+  /**
    * Optional CodecPrivate element holding decoder initialization data.
    */
   privateData?: MkvElement

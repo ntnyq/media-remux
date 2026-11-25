@@ -1,5 +1,13 @@
 import { expect, test, vi } from 'vitest'
 import { concatMedia, remuxMedia } from '../../src'
+import { createDecodeTimeline } from '../../src/core/decodeTimeline'
+import { inspectTracks } from '../../src/core/mediaTracks'
+import type { OutputSegment, VideoPacketTrack } from '../../src/types'
+import {
+  GLOBAL_TIMESCALE,
+  MAX_MP4_UINT32,
+} from '../../src/vendor/mediabunny/src/isobmff/isobmff-muxer'
+import { EncodedPacket } from '../../src/vendor/mediabunny/src/packet'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 import { indexedMp4 } from '../helpers/mp4Index'
 
@@ -103,6 +111,9 @@ test('keeps fractional decode ticks aligned across fragments and segment boundar
   })
   const actual = await packets(target.blob(), 'audio')
 
+  expect(Buffer.from(await target.blob().arrayBuffer()).includes('elst')).toBe(
+    false,
+  )
   expect(actual).toHaveLength(count * 3)
 
   for (const [index, packet] of actual.entries()) {
@@ -145,7 +156,7 @@ test.each([
   { duration: 0x80_00_00_00, timescale: 28_800 },
   { duration: 2_000_000_000, timescale: 16_384 },
 ])(
-  'rejects video duration $duration at timescale $timescale instead of wrapping uint32',
+  'rejects video duration $duration at timescale $timescale before writing instead of wrapping uint32',
   async ({ duration, timescale }) => {
     const input = await singleFrame(duration, timescale)
     const source = await packets(input, 'video')
@@ -160,8 +171,11 @@ test.each([
         storage: await diskStorage(),
       }),
     ).rejects.toThrow(/sample duration.*32-bit/iu)
-    expect(target.state.isAborted).toBe(true)
-    expect(target.state.isClosed).toBe(false)
+    expect(target.state).toStrictEqual({
+      isAborted: false,
+      isClosed: false,
+      writes: [],
+    })
     expect(target.writable.locked).toBe(false)
   },
 )
@@ -191,7 +205,7 @@ test.each([
   { name: 'positive', offsets: [2 ** 31 - 1, 0, -2048] },
   { name: 'negative', offsets: [2 ** 30 - 1, 2 ** 31 - 2 - 1024, -2048] },
 ])(
-  'rejects $name source composition offsets that overflow unsigned output trun fields',
+  'rejects $name source composition offsets that overflow unsigned output trun fields before writing',
   async ({ offsets }) => {
     const indexed = await indexedMp4({
       samples: 3,
@@ -213,8 +227,11 @@ test.each([
         storage: await diskStorage(),
       }),
     ).rejects.toThrow(/composition offset.*32-bit/iu)
-    expect(target.state.isAborted).toBe(true)
-    expect(target.state.isClosed).toBe(false)
+    expect(target.state).toStrictEqual({
+      isAborted: false,
+      isClosed: false,
+      writes: [],
+    })
     expect(target.writable.locked).toBe(false)
   },
 )
@@ -253,5 +270,102 @@ test.each([
       expect(packet.timestamp).toBeCloseTo(source[index]!.timestamp - start, 5)
       expect(packet.data).toStrictEqual(source[index]!.data)
     }
+  },
+)
+
+/**
+ * Creates a repeatable video track with presentation and decode timing in output ticks.
+ *
+ * @param codec - Output codec family.
+ * @param samples - Presentation timestamp, presentation duration, and decode duration.
+ * @returns A track for timeline preflight.
+ */
+function timedVideoTrack(
+  codec: 'avc' | 'av1',
+  samples: readonly (readonly [number, number, number])[],
+): VideoPacketTrack {
+  return {
+    kind: 'video',
+    codec,
+    config: { codec },
+    async *packets() {
+      for (const [timestamp, duration, decodeDuration] of samples) {
+        yield new EncodedPacket(
+          Uint8Array.of(1),
+          'key',
+          timestamp / GLOBAL_TIMESCALE,
+          duration / GLOBAL_TIMESCALE,
+          undefined,
+          undefined,
+          { decodeDuration: decodeDuration / GLOBAL_TIMESCALE },
+        )
+      }
+    },
+  }
+}
+
+test('checks the composition offset of earlier packets against the final decode origin', async () => {
+  const first = timedVideoTrack('avc', [
+    [0, 1, 1],
+    [MAX_MP4_UINT32 + 1, 1, MAX_MP4_UINT32],
+    [MAX_MP4_UINT32 + 2, 1, 3],
+  ])
+  const second = timedVideoTrack('avc', [[0, 1, 1]])
+  const timeline = createDecodeTimeline([first])
+  const firstPlan = await inspectTracks([first], undefined, timeline)
+  const firstSegment = { tracks: [first], plan: firstPlan, isLast: true }
+
+  await expect(
+    timeline.validateSampleTiming(async function* () {
+      yield firstSegment
+    }),
+  ).resolves.toBeUndefined()
+
+  const secondPlan = await inspectTracks([second], undefined, timeline)
+
+  // The second segment moves the decode origin one tick earlier.
+  await expect(
+    timeline.validateSampleTiming(async function* () {
+      yield { ...firstSegment, isLast: false }
+      yield { tracks: [second], plan: secondPlan, isLast: true }
+    }),
+  ).rejects.toThrow(/composition offset.*32-bit/iu)
+})
+
+test.each([
+  { startTicks: 0.375, overflows: true },
+  { startTicks: 0.75, overflows: false },
+])(
+  'checks AV1 sample duration with both endpoints rounded at a start of $startTicks ticks',
+  async ({ startTicks, overflows }) => {
+    const durationTicks = MAX_MP4_UINT32 + 0.25
+    const track = timedVideoTrack('av1', [
+      [startTicks, durationTicks, durationTicks],
+    ])
+    const timeline = createDecodeTimeline([track])
+    const packet = (await track.packets(true).next()).value!
+
+    timeline.addPacket(0, packet)
+
+    const plan = {
+      start: 0,
+      duration: (startTicks + durationTicks) / GLOBAL_TIMESCALE,
+    }
+
+    timeline.finishSegment(plan, 0)
+
+    const validation = timeline.validateSampleTiming(
+      async function* (): AsyncGenerator<OutputSegment, void> {
+        yield { tracks: [track], plan, isLast: true }
+      },
+    )
+
+    await expect(validation.catch((error: unknown) => error)).resolves.toEqual(
+      overflows
+        ? new RangeError(
+            'MP4 sample duration exceeds the unsigned 32-bit field range.',
+          )
+        : undefined,
+    )
   },
 )

@@ -2,7 +2,7 @@
 
 import { isEmptyArray, isUndefined } from '@ntnyq/utils'
 import {
-  FRAGMENT_SAMPLE_TYPE,
+  PACKET_TYPE,
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
@@ -14,9 +14,14 @@ import type {
   DecodeTimeline,
   MediaInput,
   PacketTrack,
-  SegmentInfo,
+  SegmentPlan,
 } from '../types'
-import { checkAbort, createRemuxError, isIndependentMp3Frame } from '../utils'
+import {
+  checkAbort,
+  createRemuxError,
+  isIndependentMp3Frame,
+  areBytesSame,
+} from '../utils'
 import { resolveIsobmffColorInformation } from '../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { simplifyRational } from '../vendor/mediabunny/src/misc'
 import type { Rational } from '../vendor/mediabunny/src/misc'
@@ -109,36 +114,65 @@ function getDisplayAspectRatio(config: VideoDecoderConfig): Rational | null {
 }
 
 /**
- * Serializes the track properties used to check segment compatibility.
- * Includes kind, normalized codec, decoder description, audio or video format,
- * and video transformation matrix, with defaults for absent display metadata.
- *
- * @param track - Track whose decoder configuration and display metadata to compare.
- * @returns A JSON signature for comparison with another track in the same position.
+ * Default display transform for video tracks without an explicit matrix.
  */
-export function trackSignature(track: PacketTrack): string {
-  const { config } = track
+const identityMatrix = [1, 0, 0, 0, 1, 0, 0, 0, 1] as const
 
-  return JSON.stringify({
-    kind: track.kind,
-    codec: config.codec.toLowerCase(),
-    description: [...descriptionBytes(config)],
-    ...('sampleRate' in config
-      ? { sampleRate: config.sampleRate, channels: config.numberOfChannels }
-      : {
-          width: config.codedWidth,
-          height: config.codedHeight,
-          aspectRatio: getDisplayAspectRatio(config),
-          colorInformation: resolveIsobmffColorInformation(
-            config.colorSpace,
-            track.containerColorInformation,
-          ),
-        }),
-    matrix:
-      track.kind === MEDIA_TRACK_KIND.video
-        ? (track.matrix ?? [1, 0, 0, 0, 1, 0, 0, 0, 1])
-        : null,
-  })
+/**
+ * Compares the decoder and display properties of tracks at the same output position.
+ *
+ * @param left - Track defining the output format.
+ * @param right - Track to copy into the output.
+ * @returns Whether both tracks can share an output sample description.
+ */
+export function areTracksCompatible(
+  left: PacketTrack,
+  right: PacketTrack,
+): boolean {
+  if (
+    left.kind !== right.kind ||
+    left.config.codec.toLowerCase() !== right.config.codec.toLowerCase() ||
+    !areBytesSame(descriptionBytes(left.config), descriptionBytes(right.config))
+  ) {
+    return false
+  }
+
+  if (left.kind === MEDIA_TRACK_KIND.audio) {
+    return (
+      right.kind === MEDIA_TRACK_KIND.audio &&
+      left.config.sampleRate === right.config.sampleRate &&
+      left.config.numberOfChannels === right.config.numberOfChannels
+    )
+  }
+
+  if (right.kind !== MEDIA_TRACK_KIND.video) {
+    return false
+  }
+
+  const leftRatio = getDisplayAspectRatio(left.config)
+  const rightRatio = getDisplayAspectRatio(right.config)
+  const leftColor = resolveIsobmffColorInformation(
+    left.config.colorSpace,
+    left.containerColorInformation,
+  )
+  const rightColor = resolveIsobmffColorInformation(
+    right.config.colorSpace,
+    right.containerColorInformation,
+  )
+  const leftMatrix = left.matrix ?? identityMatrix
+  const rightMatrix = right.matrix ?? identityMatrix
+
+  return (
+    left.config.codedWidth === right.config.codedWidth &&
+    left.config.codedHeight === right.config.codedHeight &&
+    leftRatio?.num === rightRatio?.num &&
+    leftRatio?.den === rightRatio?.den &&
+    leftColor.primaries === rightColor.primaries &&
+    leftColor.transfer === rightColor.transfer &&
+    leftColor.matrix === rightColor.matrix &&
+    leftColor.fullRange === rightColor.fullRange &&
+    leftMatrix.every((value, index) => value === rightMatrix[index])
+  )
 }
 
 /**
@@ -167,12 +201,12 @@ export async function inspectTracks(
   normalizeAudio = false,
   isFirstSegment = true,
   timeline?: CombineTimeline,
-): Promise<SegmentInfo> {
+): Promise<SegmentPlan> {
   let start = Infinity
   let unshiftedStart = Infinity
   let end = -Infinity
   let trimBefore: number | undefined
-  let audioRange: SegmentInfo['audioRange']
+  let audioRange: SegmentPlan['audioRange']
   const skippedPackets: number[] = []
   const trackOffsets: number[] = []
   const alignStarts = timeline === 'align-starts'
@@ -187,7 +221,6 @@ export async function inspectTracks(
     const isVideo = track.kind === MEDIA_TRACK_KIND.video
     const processesAudio =
       normalizeAudio && track.kind === MEDIA_TRACK_KIND.audio
-    const { audioEditStart } = track
     const manualOffset = (isVideo ? videoOffset : audioOffset) - commonOffset
     let count = 0
     let skipped = 0
@@ -216,7 +249,7 @@ export async function inspectTracks(
         count === 0 &&
         skipped === 0 &&
         isVideo &&
-        packet.type !== FRAGMENT_SAMPLE_TYPE.key
+        packet.type !== PACKET_TYPE.key
       ) {
         if (!track.findNextRandomAccessPacket) {
           throw createRemuxError(
@@ -259,6 +292,8 @@ export async function inspectTracks(
       let presentationStart = packet.timestamp
 
       if (count === 0 && track.kind === MEDIA_TRACK_KIND.audio) {
+        const { audioEditStart } = track
+
         if (!isUndefined(audioEditStart) && packet.timestamp < audioEditStart) {
           const duration = Math.min(
             packet.duration,
@@ -300,7 +335,7 @@ export async function inspectTracks(
 
       // Match the muxer's GOP timing constraint before acquiring the output.
       // Reordered B-frame PTS within the current GOP remains valid.
-      if (packet.type === FRAGMENT_SAMPLE_TYPE.key) {
+      if (packet.type === PACKET_TYPE.key) {
         maxTimestampBeforeLastKeyPacket = maxTimestamp
       }
 
@@ -356,7 +391,7 @@ export async function inspectTracks(
     )
   }
 
-  const info = {
+  const plan = {
     start,
     duration,
     ...(isUndefined(timeline)
@@ -366,7 +401,7 @@ export async function inspectTracks(
     ...(isUndefined(audioRange) ? {} : { audioRange }),
   }
 
-  decodeTimeline?.finishSegment(info, unshiftedStart)
+  decodeTimeline?.finishSegment(plan, unshiftedStart)
 
-  return info
+  return plan
 }

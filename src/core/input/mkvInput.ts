@@ -2,7 +2,7 @@
 
 import { isNonEmptyObject, isUndefined } from '@ntnyq/utils'
 import {
-  FRAGMENT_SAMPLE_TYPE,
+  PACKET_TYPE,
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
@@ -17,18 +17,17 @@ import type {
   PacketTrack,
 } from '../../types'
 import {
-  aacFrameSamples,
-  aacLcDecoderConfig,
   avcDecoderConfig,
   createRemuxError,
   invalidMkv,
+  readAacLcConfig,
 } from '../../utils'
 import { resolveIsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 import { readBytes } from '../../vendor/mediabunny/src/reader'
-import { readMkvBlocks, readMkvFrames } from './mkvBlocks'
-import { MkvReader } from './mkvElements'
+import { readMkvBlocks, readMkvFrameLayout } from './mkvBlocks'
+import { MkvReader } from './MkvReader'
 
 /**
  * Reads the EBML document header and the one Matroska segment in the input.
@@ -120,6 +119,7 @@ async function readTracks(reader: MkvReader, tracksElement: MkvElement) {
       hasTrackOffset: false,
       isEnabled: true,
       isDefault: true,
+      allowsLacing: true,
     }
 
     for await (const element of reader.children(entry)) {
@@ -156,6 +156,9 @@ async function readTracks(reader: MkvReader, tracksElement: MkvElement) {
           break
         case MKV_ID.flagDefault:
           track.isDefault = (await reader.uint(element, 1)) !== 0
+          break
+        case MKV_ID.flagLacing:
+          track.allowsLacing = (await reader.uint(element, 1)) !== 0
           break
         case MKV_ID.video:
           track.video = element
@@ -363,7 +366,6 @@ async function createPacketTrack(
   tick: number,
 ): Promise<PacketTrack> {
   const isVideo = track.type === 1
-  const codec = isVideo ? MEDIA_CODEC.avc : MEDIA_CODEC.aac
 
   if (track.codecId !== (isVideo ? 'V_MPEG4/ISO/AVC' : 'A_AAC')) {
     throw createRemuxError(
@@ -401,92 +403,99 @@ async function createPacketTrack(
     await reader.slice(data.data, size),
     size,
   ).slice()
-  let config: PacketTrack['config']
-  let nominalDuration: number
-  let containerColorInformation: IsobmffColorInformation | undefined
 
   if (isVideo) {
-    const video = avcDecoderConfig(description, 'MKV')
-
-    if (track.video) {
-      containerColorInformation = await readVideoMetadata(
-        reader,
-        track.video,
-        video,
-      )
-    }
-
-    config = video
-    nominalDuration =
+    const config = avcDecoderConfig(description, 'MKV')
+    const containerColorInformation = track.video
+      ? await readVideoMetadata(reader, track.video, config)
+      : undefined
+    const nominalDuration =
       track.defaultDuration ||
       (await inferVideoDuration(reader, segment, track, tick))
-  } else {
-    const audio = aacLcDecoderConfig(description, 'MKV')
 
-    config = audio
-    nominalDuration = aacFrameSamples(description) / audio.sampleRate
+    return {
+      kind: MEDIA_TRACK_KIND.video,
+      codec: MEDIA_CODEC.avc,
+      config,
+      ...(containerColorInformation && { containerColorInformation }),
+      packets: readPackets.bind(undefined, nominalDuration),
+    }
   }
 
+  const aac = readAacLcConfig(description, 'MKV')
+
   return {
-    kind: isVideo ? MEDIA_TRACK_KIND.video : MEDIA_TRACK_KIND.audio,
-    codec,
-    config,
-    ...(containerColorInformation && { containerColorInformation }),
+    kind: MEDIA_TRACK_KIND.audio,
+    codec: MEDIA_CODEC.aac,
+    config: aac.config,
+    packets: readPackets.bind(undefined, aac.frameDuration),
+  }
 
-    /**
-     * Streams source frame bytes in decode order. MKV stores PTS, so the MP4
-     * writer constructs a decode clock from the supplied frame durations.
-     *
-     * @param metadataOnly - Whether to omit encoded bytes while retaining packet metadata.
-     * @param skipPackets - Number of leading packets to skip in decode order.
-     * @yields {EncodedPacket} Encoded frames or packet metadata alone.
-     * @throws If block parsing or frame reads fail, video uses lacing, or reading is aborted.
-     */
-    async *packets(metadataOnly = false, skipPackets = 0) {
-      let sequence = 0
+  /**
+   * Streams source frame bytes in decode order. MKV stores PTS, so the MP4
+   * writer constructs a decode clock from the supplied frame durations.
+   *
+   * @param nominalDuration - Default frame duration in seconds.
+   * @param metadataOnly - Whether to omit encoded bytes while retaining packet metadata.
+   * @param skipPackets - Number of leading packets to skip in decode order.
+   * @yields {EncodedPacket} Encoded frames or packet metadata alone.
+   * @throws If block parsing or frame reads fail, video uses lacing, or reading is aborted.
+   */
+  async function* readPackets(
+    nominalDuration: number,
+    metadataOnly = false,
+    skipPackets = 0,
+  ) {
+    let sequence = 0
 
-      for await (const block of readMkvBlocks(reader, segment, track, tick)) {
-        if (isVideo && block.lacing !== 0) {
+    for await (const block of readMkvBlocks(reader, segment, track, tick)) {
+      if (block.lacing !== 0) {
+        if (!track.allowsLacing) {
+          throw invalidMkv('MKV track forbids laced blocks.')
+        }
+
+        if (isVideo) {
           throw createRemuxError(
             REMUX_ERROR_CODE.unsupportedMediaFeature,
             'Laced MKV video is unsupported.',
           )
         }
-
-        const { offset, sizes } = await readMkvFrames(reader, block)
-        const duration = isUndefined(block.duration)
-          ? nominalDuration
-          : block.duration / sizes.length
-        const decodeDuration =
-          isVideo && duration > 0 ? duration : nominalDuration
-        let position = offset
-
-        for (const [index, byteLength] of sizes.entries()) {
-          if (sequence < skipPackets) {
-            sequence++
-            position += byteLength
-            continue
-          }
-
-          const bytes = metadataOnly
-            ? new Uint8Array(0)
-            : readBytes(await reader.slice(position, byteLength), byteLength)
-
-          yield new EncodedPacket(
-            bytes,
-            !isVideo || block.isKey
-              ? FRAGMENT_SAMPLE_TYPE.key
-              : FRAGMENT_SAMPLE_TYPE.delta,
-            block.timestamp + index * duration,
-            duration,
-            sequence++,
-            byteLength,
-            { decodeDuration },
-          )
-          position += byteLength
-        }
       }
-    },
+
+      const { firstFrameOffset, sizes } = await readMkvFrameLayout(
+        reader,
+        block,
+      )
+      const duration = isUndefined(block.duration)
+        ? nominalDuration
+        : block.duration / sizes.length
+      const decodeDuration =
+        isVideo && duration > 0 ? duration : nominalDuration
+      let position = firstFrameOffset
+
+      for (const [index, byteLength] of sizes.entries()) {
+        if (sequence < skipPackets) {
+          sequence++
+          position += byteLength
+          continue
+        }
+
+        const bytes = metadataOnly
+          ? new Uint8Array(0)
+          : readBytes(await reader.slice(position, byteLength), byteLength)
+
+        yield new EncodedPacket(
+          bytes,
+          !isVideo || block.isKey ? PACKET_TYPE.key : PACKET_TYPE.delta,
+          block.timestamp + index * duration,
+          duration,
+          sequence++,
+          byteLength,
+          { decodeDuration },
+        )
+        position += byteLength
+      }
+    }
   }
 }
 

@@ -1,13 +1,54 @@
 import assert from 'node:assert/strict'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { concatMedia, remuxMedia } from '../../src'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { Input } from '../../src/vendor/mediabunny/src/input'
 import { MP4 } from '../../src/vendor/mediabunny/src/input-format'
 import { BlobSource } from '../../src/vendor/mediabunny/src/source'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 import { boxPayloads } from '../helpers/mp4Boxes'
 import { fragmentedMp4 } from '../helpers/mp4Fragments'
+import { indexedMp4 } from '../helpers/mp4Index'
+
+test('remuxes MP4 without reading optional movie metadata payloads', async () => {
+  // This fixture places moov after mdat, so adding metadata leaves chunk offsets intact.
+  const original = await fixture('fractional-av.mp4')
+  const bytes = Buffer.from(await original.arrayBuffer())
+  const [movie] = boxPayloads(bytes, 'moov')
+
+  assert.ok(movie)
+  const header = movie.byteOffset - bytes.byteOffset - 8
+  const end = header + 8 + movie.length
+  const metadata = Buffer.alloc(128 * 1024)
+
+  metadata.writeUInt32BE(metadata.length)
+  metadata.write('udta', 4)
+  metadata.writeUInt32BE(metadata.length - 8, 8)
+  metadata.write('free', 12)
+  bytes.writeUInt32BE(movie.length + 8 + metadata.length, header)
+  const input = new Blob([
+    bytes.subarray(0, end),
+    metadata,
+    bytes.subarray(end),
+  ])
+  const target = memoryTarget()
+  const storage = await diskStorage()
+  const read = vi.spyOn(BlobSource.prototype, '_read')
+
+  try {
+    await remuxMedia(input, { storage, writable: target.writable })
+    expect(read.mock.calls.length).toBeGreaterThan(0)
+    expect(
+      Math.max(...read.mock.calls.map(([start, stop]) => stop - start)),
+    ).toBeLessThanOrEqual(64 * 1024)
+  } finally {
+    read.mockRestore()
+  }
+
+  expect(
+    (await packets(target.blob(), 'video')).map(packet => packet.data),
+  ).toEqual((await packets(original, 'video')).map(packet => packet.data))
+})
 
 test('rejects external MP4 sample data only when its track is selected', async () => {
   // The movie metadata follows mdat so changing the data reference keeps all
@@ -151,7 +192,9 @@ test('keeps the movie transformation when the movie header follows the track', a
   const output = await openMediaInput(target.blob())
 
   try {
-    expect(output.tracks[0]?.matrix).toStrictEqual(matrix)
+    expect(
+      output.tracks.find(track => track.kind === 'video')?.matrix,
+    ).toStrictEqual(matrix)
   } finally {
     output.dispose()
   }
@@ -242,6 +285,63 @@ test('checks multiple MP4 sample descriptions only on selected tracks', async ()
   ).rejects.toThrow(/Multiple MP4 sample descriptions/u)
   expect(videoTarget.state.writes).toHaveLength(0)
 })
+
+test.each([0, 2])(
+  'rejects an MP4 composition table covering %s samples in its final one-sample run',
+  async count => {
+    const source = await fixture('vfr-bframes.mp4')
+    const bytes = Buffer.from(await source.arrayBuffer())
+    const ctts = bytes.indexOf('ctts')
+    const lastRun = ctts + 12 + (bytes.readUInt32BE(ctts + 8) - 1) * 8
+    const target = memoryTarget()
+
+    expect(bytes.readUInt32BE(lastRun)).toBe(1)
+    bytes.writeUInt32BE(count, lastRun)
+
+    await expect(
+      remuxMedia(new Blob([bytes]), {
+        storage: await diskStorage(),
+        writable: target.writable,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('ctts'),
+    })
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
+  },
+)
+
+test.each([
+  [0, 25],
+  [1, 49],
+  [1, 1],
+  [25, 1],
+])(
+  'rejects invalid MP4 sync sample indices %s and %s',
+  async (first, second) => {
+    const source = await fixture('video.mp4')
+    const bytes = Buffer.from(await source.arrayBuffer())
+    const stss = bytes.indexOf('stss')
+    const target = memoryTarget()
+
+    expect(bytes.readUInt32BE(stss + 8)).toBe(2)
+    bytes.writeUInt32BE(first, stss + 12)
+    bytes.writeUInt32BE(second, stss + 16)
+
+    await expect(
+      remuxMedia(new Blob([bytes]), {
+        storage: await diskStorage(),
+        writable: target.writable,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('stss'),
+    })
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
+  },
+)
 
 test.each([0, 2])(
   'rejects an invalid MP4 stsc description index %s on the selected track',
@@ -499,6 +599,31 @@ test.each(['stts-short', 'stts-long', 'stsc-short', 'stsc-long'])(
     expect(target.writable.locked).toBe(false)
   },
 )
+
+test('rejects an MP4 chunk mapping that references a nonexistent chunk', async () => {
+  const source = await indexedMp4({ samples: 2 })
+  const bytes = Buffer.from(await source.blob().arrayBuffer())
+  const stsc = bytes.indexOf('stsc')
+
+  expect(stsc).toBeGreaterThan(0)
+  expect(bytes.readUInt32BE(stsc + 24)).toBe(2)
+  // The first run now covers both available chunks, leaving the total sample
+  // count correct even though the second run has no corresponding offset.
+  bytes.writeUInt32BE(3, stsc + 24)
+  const target = memoryTarget()
+
+  await expect(
+    remuxMedia(new Blob([bytes]), {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({
+    code: 'INVALID_INPUT',
+    message: expect.stringContaining('stsc'),
+  })
+  expect(target.state.writes).toStrictEqual([])
+  expect(target.writable.locked).toBe(false)
+})
 
 test.each(['regular', 'fragmented'] as const)(
   'rejects truncated %s MP4 payloads before touching output',

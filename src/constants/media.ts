@@ -106,3 +106,18 @@ export const MEDIA_CODEC = {
    */
   ac3: 'ac3',
 } as const
+
+/**
+ * Encoded packet kinds used by readers, preflight, and fragment storage.
+ */
+export const PACKET_TYPE = {
+  /**
+   * A sample marked as a sync sample in the encoded packet stream.
+   */
+  key: 'key',
+
+  /**
+   * A sample that depends on other samples for decoding.
+   */
+  delta: 'delta',
+} as const

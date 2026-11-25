@@ -170,6 +170,34 @@ export const intoTimescale = (timeInSeconds: number, timescale: number, round = 
     const value = timeInSeconds * timescale;
     return round ? Math.round(value) : value;
 };
+export const MAX_MP4_UINT32 = 0xffffffff;
+
+export const quantizeDecodeDuration = (duration: number, timescale: number, remainder: number) => {
+    const preciseTicks = intoTimescale(duration, timescale, false) + remainder;
+    const ticks = Math.round(preciseTicks);
+    return { ticks, remainder: preciseTicks - ticks };
+};
+
+export const quantizeAv1SampleTiming = (timestamp: number, duration: number, timescale: number) => {
+    const startTicks = intoTimescale(timestamp, timescale);
+    const durationTicks = intoTimescale(timestamp + duration, timescale) - startTicks;
+    return { startTicks, durationTicks };
+};
+
+export const validateMp4SampleDuration = (ticks: number) => {
+    if (!Number.isSafeInteger(ticks) || ticks < 0 || ticks > MAX_MP4_UINT32) {
+        throw new RangeError('MP4 sample duration exceeds the unsigned 32-bit field range.');
+    }
+};
+
+export const validateMp4CompositionOffset = (ticks: number, unsigned: boolean) => {
+    if (!Number.isSafeInteger(ticks)
+        || ticks < (unsigned ? 0 : -(2 ** 31))
+        || ticks > (unsigned ? MAX_MP4_UINT32 : 2 ** 31 - 1)) {
+        throw new RangeError(`MP4 composition offset exceeds the ${unsigned ? 'unsigned' : 'signed'} 32-bit field range.`);
+    }
+};
+
 export const presentationSpan = (trackData: IsobmffTrackData) => {
     const timing = trackData.muxer.formatOptions._fragmentTrackTimings?.get(trackData.track.id);
     if (timing) {
@@ -802,17 +830,16 @@ export class IsobmffMuxer extends Muxer {
         if (this.usesPlannedAv1Clock(trackData)) {
             // AV1 uses the same decode and presentation timestamps. Round the
             // two endpoints together so starts and durations share one clock.
-            const start = intoTimescale(timestamp, trackData.timescale);
-            decodeUnits = intoTimescale(timestamp + (decodeDuration ?? duration), trackData.timescale) - start;
-            timestamp = start / trackData.timescale;
+            const timing = quantizeAv1SampleTiming(timestamp, decodeDuration ?? duration, trackData.timescale);
+            decodeUnits = timing.durationTicks;
+            timestamp = timing.startTicks / trackData.timescale;
         }
         else if (decodeDuration !== undefined) {
             // Carry sub-tick precision across samples instead of rounding every
             // source delta independently (e.g. 30000/1001 fps into 57600 Hz).
-            const preciseUnits = intoTimescale(decodeDuration, trackData.timescale, false)
-                + (trackData.decodeDurationRemainder ?? 0);
-            decodeUnits = Math.round(preciseUnits);
-            trackData.decodeDurationRemainder = preciseUnits - decodeUnits;
+            const quantized = quantizeDecodeDuration(decodeDuration, trackData.timescale, trackData.decodeDurationRemainder ?? 0);
+            decodeUnits = quantized.ticks;
+            trackData.decodeDurationRemainder = quantized.remainder;
         }
         const sample: Sample = {
             timestamp,
@@ -909,10 +936,7 @@ export class IsobmffMuxer extends Muxer {
             let syncIndex = -1, syncTimestamp = 0;
             for (let at = 0; at < count; at++) {
                 const sample = await sampleAt(at);
-                if (!Number.isSafeInteger(sample.timescaleUnitsToNextSample)
-                    || sample.timescaleUnitsToNextSample < 0 || sample.timescaleUnitsToNextSample > 0xffffffff) {
-                    throw new RangeError('MP4 sample duration exceeds the unsigned 32-bit field range.');
-                }
+                validateMp4SampleDuration(sample.timescaleUnitsToNextSample);
                 differentDurations ||= sample.timescaleUnitsToNextSample !== first.timescaleUnitsToNextSample;
                 differentSizes ||= sample.size !== first.size;
                 const flags = sampleFlags(sample);
@@ -920,11 +944,7 @@ export class IsobmffMuxer extends Muxer {
                 if (at > 0)
                     sameFollowingFlags &&= flags === referenceFlags;
                 const composition = intoTimescale(sample.timestamp - sample.decodeTimestamp, track.timescale);
-                if (!Number.isSafeInteger(composition)
-                    || composition < (unsignedComposition ? 0 : -(2 ** 31))
-                    || composition > (unsignedComposition ? 0xffffffff : 2 ** 31 - 1)) {
-                    throw new RangeError(`MP4 composition offset exceeds the ${unsignedComposition ? 'unsigned' : 'signed'} 32-bit field range.`);
-                }
+                validateMp4CompositionOffset(composition, unsignedComposition);
                 compositionPresent ||= composition !== firstComposition;
                 const presentationTime = decodeTime + composition;
                 decodeTime += sample.timescaleUnitsToNextSample;

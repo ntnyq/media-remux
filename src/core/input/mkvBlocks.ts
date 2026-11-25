@@ -5,7 +5,7 @@ import { REMUX_ERROR_CODE, MKV_ID } from '../../constants'
 import type { BlockGroup, MkvBlock, MkvElement } from '../../types'
 import { createRemuxError, invalidMkv, readVint } from '../../utils'
 import { readI16Be, readU8 } from '../../vendor/mediabunny/src/reader'
-import type { MkvReader } from './mkvElements'
+import type { MkvReader } from './MkvReader'
 
 /**
  * Reads block-group metadata by range, leaving the Block payload untouched.
@@ -173,16 +173,21 @@ export async function* readMkvBlocks(
  * @returns A promise resolving to the first frame's byte offset and all frame sizes.
  * @throws If the block is empty or its lace metadata is invalid.
  */
-export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
+export async function readMkvFrameLayout(reader: MkvReader, block: MkvBlock) {
   if (block.offset >= block.end) {
     throw invalidMkv('Empty MKV block.')
   }
 
   if (block.lacing === 0) {
-    return { offset: block.offset, sizes: [block.end - block.offset] }
+    return { firstFrameOffset: block.offset, sizes: [block.end - block.offset] }
   }
 
   const count = readU8(await reader.slice(block.offset, 1)) + 1
+
+  if (count === 1) {
+    throw invalidMkv('MKV lacing requires at least two frames.')
+  }
+
   let offset = block.offset + 1
   const sizes: number[] = []
   let used = 0
@@ -195,7 +200,7 @@ export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
       throw invalidMkv('Invalid fixed-size MKV lace.')
     }
 
-    return { offset, sizes: Array<number>(count).fill(size) }
+    return { firstFrameOffset: offset, sizes: Array<number>(count).fill(size) }
   }
 
   for (let index = 0; index < count - 1; index++) {
@@ -214,10 +219,15 @@ export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
       } while (byte === 255)
     } else {
       const slice = await reader.slice(offset, Math.min(8, block.end - offset))
-      const { value, width } = readVint(slice)
+      const { value } = readVint(slice, index !== 0)
 
       offset = slice.filePos
-      size = index === 0 ? value : previous + value - (2 ** (7 * width - 1) - 1)
+
+      if (!Number.isSafeInteger(value)) {
+        throw invalidMkv('Invalid MKV lace size or difference.')
+      }
+
+      size = index === 0 ? value : previous + value
     }
 
     if (
@@ -241,5 +251,5 @@ export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
 
   sizes.push(remainder)
 
-  return { offset, sizes }
+  return { firstFrameOffset: offset, sizes }
 }

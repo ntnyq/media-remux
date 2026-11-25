@@ -13,16 +13,17 @@ import type {
   RemuxOptions,
   RemuxResult,
   MediaInput,
+  OutputSegment,
   PacketTrack,
-  SegmentInfo,
+  SegmentPlan,
 } from '../types'
 import { checkAbort, createRemuxError } from '../utils'
 import { captureCombineTimeline } from '../utils/combineTimeline'
 import { captureRemuxInput } from '../utils/remuxInput'
 import { checkAudioDecoder } from './audioCodecs'
 import { createDecodeTimeline } from './decodeTimeline'
-import { openMediaInput } from './input/mediaInput'
-import { selectTracks, trackSignature, inspectTracks } from './mediaTracks'
+import { openMediaInput } from './input/openMediaInput'
+import { areTracksCompatible, inspectTracks, selectTracks } from './mediaTracks'
 import { writeSegments } from './writeSegments'
 
 /**
@@ -133,9 +134,10 @@ async function remuxInputs(
     throw new TypeError('At least one media segment is required.')
   }
 
-  const infos: SegmentInfo[] = []
-  let baseline: PacketTrack[] = []
-  let signature = ''
+  const segmentPlans: SegmentPlan[] = []
+  const reusableTracks = new Map<number, PacketTrack[]>()
+  let outputTrackTemplates: PacketTrack[] = []
+  let copiedTrackTemplates: PacketTrack[] = []
   let decodeTimeline: ReturnType<typeof createDecodeTimeline> | undefined
 
   // Validate every segment before opening the output, so a later incompatible
@@ -155,20 +157,26 @@ async function remuxInputs(
       const copiedTracks = settings.normalizeAudio
         ? tracks.filter(track => track.kind !== MEDIA_TRACK_KIND.audio)
         : tracks
-      const current = JSON.stringify(copiedTracks.map(trackSignature))
 
       if (index === 0) {
-        baseline = tracks
-        signature = current
+        outputTrackTemplates = copiedTracks.slice()
+        copiedTrackTemplates = copiedTracks
         decodeTimeline = createDecodeTimeline(copiedTracks)
-      } else if (current !== signature) {
+      } else if (
+        copiedTrackTemplates.length !== copiedTracks.length ||
+        copiedTracks.some((track, trackIndex) => {
+          const template = copiedTrackTemplates[trackIndex]
+
+          return !template || !areTracksCompatible(template, track)
+        })
+      ) {
         throw createRemuxError(
           REMUX_ERROR_CODE.incompatibleSegments,
           `Incompatible track layout or decoder configuration in segment ${index}.`,
         )
       }
 
-      const info = await inspectTracks(
+      const plan = await inspectTracks(
         tracks,
         settings.signal,
         decodeTimeline,
@@ -176,49 +184,58 @@ async function remuxInputs(
         index === 0,
       )
 
-      if (settings.normalizeAudio && info.audioRange) {
+      if (settings.normalizeAudio && plan.audioRange) {
         const audio = tracks.find(
           track => track.kind === MEDIA_TRACK_KIND.audio,
         )
 
-        if (audio && 'sampleRate' in audio.config) {
+        if (audio) {
           await checkAudioDecoder(audio.config, settings.signal)
 
-          if (baseline.length === copiedTracks.length) {
-            baseline.push(audio)
+          if (outputTrackTemplates.length === copiedTracks.length) {
+            outputTrackTemplates.push(audio)
           }
         }
       }
 
-      infos.push(info)
+      segmentPlans.push(plan)
+
+      if (input.canReuseAfterDispose) {
+        reusableTracks.set(index, tracks)
+      }
     } finally {
       input.dispose()
     }
   }
 
   /**
-   * Reopens inspected inputs one at a time and releases each after consumption.
+   * Reads one inspected input at a time, reusing resource-free FLV tracks.
    *
    * @returns An asynchronous generator that completes without a return value.
-   * @yields {{ tracks: PacketTrack[], info: SegmentInfo, isLast: boolean }} The selected tracks and timeline.
+   * @yields {OutputSegment} Selected tracks and their validated timeline.
    * @throws If reopening, track selection, timeline lookup, or cancellation fails.
    */
-  async function* segments() {
+  async function* segments(): AsyncGenerator<OutputSegment, void, unknown> {
     for (const [index, source] of sources.entries()) {
+      checkAbort(settings.signal)
+      const plan = segmentPlans[index]
+
+      if (!plan) {
+        throw new Error('Missing segment timeline.')
+      }
+
+      const isLast = index + 1 === sources.length
+      const tracks = reusableTracks.get(index)
+
+      if (tracks) {
+        yield { tracks, plan, isLast }
+        continue
+      }
+
       const input = await openMediaInput(source, settings.signal, selection)
 
       try {
-        const info = infos[index]
-
-        if (!info) {
-          throw new Error('Missing segment timeline.')
-        }
-
-        yield {
-          tracks: selectTracks(input, settings.tracks),
-          info,
-          isLast: index + 1 === sources.length,
-        }
+        yield { tracks: selectTracks(input, selection), plan, isLast }
       } finally {
         input.dispose()
       }
@@ -229,12 +246,14 @@ async function remuxInputs(
     throw new Error('Missing output decode timeline.')
   }
 
+  await decodeTimeline.validateSampleTiming(segments, settings.signal)
+
   return writeSegments(
-    baseline,
+    outputTrackTemplates,
     segments,
     settings,
     decodeTimeline.trackTimings(),
-    infos.reduce((duration, info) => duration + info.duration, 0),
+    segmentPlans.reduce((duration, plan) => duration + plan.duration, 0),
   )
 }
 
@@ -312,7 +331,7 @@ export async function combineTracks(
     const decodeTimeline = createDecodeTimeline(
       settings.normalizeAudio ? [videoTrack] : tracks,
     )
-    const info = await inspectTracks(
+    const plan = await inspectTracks(
       tracks,
       settings.signal,
       decodeTimeline,
@@ -321,20 +340,20 @@ export async function combineTracks(
       timeline,
     )
 
-    if (
-      settings.normalizeAudio &&
-      info.audioRange &&
-      'sampleRate' in audioTrack.config
-    ) {
+    if (settings.normalizeAudio && plan.audioRange) {
       await checkAudioDecoder(audioTrack.config, settings.signal)
     }
 
+    const segments = () => singleSegment(tracks, plan)
+
+    await decodeTimeline.validateSampleTiming(segments, settings.signal)
+
     return await writeSegments(
-      tracks,
-      () => singleSegment(tracks, info),
+      settings.normalizeAudio && !plan.audioRange ? [videoTrack] : tracks,
+      segments,
       settings,
       decodeTimeline.trackTimings(),
-      info.duration,
+      plan.duration,
     )
   } finally {
     for (const input of inputs) {
@@ -347,10 +366,10 @@ export async function combineTracks(
  * Adapts combined tracks to the segment stream consumed by writeSegments().
  *
  * @param tracks - Ordered video and audio tracks to emit together.
- * @param info - Validated shared presentation timeline in seconds.
+ * @param plan - Validated shared presentation timeline in seconds.
  * @returns An asynchronous generator that completes without a return value.
- * @yields {{ tracks: PacketTrack[], info: SegmentInfo, isLast: boolean }} The single output segment.
+ * @yields {OutputSegment} The single output segment.
  */
-async function* singleSegment(tracks: PacketTrack[], info: SegmentInfo) {
-  yield { tracks, info, isLast: true }
+async function* singleSegment(tracks: PacketTrack[], plan: SegmentPlan) {
+  yield { tracks, plan, isLast: true }
 }

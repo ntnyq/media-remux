@@ -6,7 +6,7 @@ import { promisify } from 'node:util'
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, isRemuxError, remuxMedia } from '../../src'
 import type { RemuxOptions, RemuxProgress } from '../../src'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 test('keeps the submitted segment list when the caller clears its selection during progress', async () => {

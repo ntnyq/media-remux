@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
 import { combineTracks, concatMedia, remuxMedia } from '../../src'
 import type { RemuxResult } from '../../src'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 import { indexedMp4 } from '../helpers/mp4Index'
 

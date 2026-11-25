@@ -1,6 +1,20 @@
 import { expect, test } from 'vitest'
 import { isWorkerRequest, isWorkerResponse } from '../../src/browser/protocol'
 
+test('rejects a sparse concatenation list before starting a Worker job', () => {
+  const inputs = Array<Blob>(2)
+
+  inputs[1] = new Blob(['media'])
+
+  expect(
+    isWorkerRequest({
+      type: 'run',
+      job: { operation: 'concat', inputs },
+      path: ['job'],
+    }),
+  ).toBe(false)
+})
+
 test.each([
   { mimeType: 'audio/mp4', isValid: true },
   { mimeType: ['audio/mp4'], isValid: false },
@@ -27,6 +41,26 @@ test.each([
     }),
   ).toBe(isValid)
 })
+
+test.each([0, 42, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+  'validates byte counts in progress and completion messages: %s',
+  bytesProcessed => {
+    const valid = Number.isSafeInteger(bytesProcessed)
+
+    expect(
+      isWorkerResponse({
+        type: 'progress',
+        progress: { phase: 'remux', bytesProcessed, segmentIndex: 0 },
+      }),
+    ).toBe(valid)
+    expect(
+      isWorkerResponse({
+        type: 'complete',
+        result: { mimeType: 'audio/mp4', duration: 0.5, bytesProcessed },
+      }),
+    ).toBe(valid)
+  },
+)
 
 test.each([
   { tracks: 'audio', isValid: true },

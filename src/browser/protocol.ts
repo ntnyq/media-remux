@@ -1,7 +1,6 @@
 import {
   isBoolean,
   isFunction,
-  isInteger,
   isNonEmptyArray,
   isNonEmptyString,
   isNull,
@@ -33,19 +32,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Checks numeric counters and durations for finite, nonnegative values.
+ * Checks durations for finite, nonnegative values.
  *
  * @param value - Unknown protocol field.
  * @returns Whether the value is a finite number greater than or equal to zero.
  */
-function isFiniteNumber(value: unknown): value is number {
+function isNonnegativeFiniteNumber(value: unknown): value is number {
   return isNumber(value) && Number.isFinite(value) && value >= 0
 }
 
 /**
+ * Checks that a byte count or segment index is a nonnegative safe integer.
+ *
+ * @param value - Unknown protocol field.
+ * @returns Whether the value is an exactly representable nonnegative integer.
+ */
+function isCounter(value: unknown): value is number {
+  return isNonnegativeFiniteNumber(value) && Number.isSafeInteger(value)
+}
+
+/**
  * Checks the shape and numeric bounds of a Worker progress, completion, or error
- * response. Byte counts and durations must be finite and nonnegative; progress
- * segment indices must also be integers.
+ * response. Durations must be finite and nonnegative. Byte counts and segment
+ * indices must be nonnegative safe integers.
  *
  * @param value - Untrusted data received from a media Worker.
  * @returns Whether the value matches a supported response variant, narrowing it
@@ -69,8 +78,8 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
 
     return (
       isRecord(result) &&
-      isFiniteNumber(result['bytesProcessed']) &&
-      isFiniteNumber(result['duration']) &&
+      isCounter(result['bytesProcessed']) &&
+      isNonnegativeFiniteNumber(result['duration']) &&
       Object.values<unknown>(REMUX_MIME_TYPE).includes(result['mimeType'])
     )
   }
@@ -81,9 +90,8 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
     value['type'] === WORKER_MESSAGE_TYPE.progress &&
     isRecord(progress) &&
     Object.values<unknown>(REMUX_PROGRESS_PHASE).includes(progress['phase']) &&
-    isFiniteNumber(progress['bytesProcessed']) &&
-    isInteger(progress['segmentIndex']) &&
-    isFiniteNumber(progress['segmentIndex'])
+    isCounter(progress['bytesProcessed']) &&
+    isCounter(progress['segmentIndex'])
   )
 }
 
@@ -147,6 +155,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
   return (
     job['operation'] === MEDIA_JOB_OPERATION.concat &&
     isNonEmptyArray(job['inputs']) &&
+    !job['inputs'].includes(undefined) &&
     job['inputs'].every(input => input instanceof Blob)
   )
 }

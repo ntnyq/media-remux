@@ -1,17 +1,9 @@
-/**
- * Encoded sample kinds used by packet readers and fragment storage.
- */
-export const FRAGMENT_SAMPLE_TYPE = {
-  /**
-   * A sample marked as a sync sample in the encoded packet stream.
-   */
-  key: 'key',
+import { PACKET_TYPE } from './media'
 
-  /**
-   * A sample that depends on other samples for decoding.
-   */
-  delta: 'delta',
-} as const
+/**
+ * Encoded sample kinds accepted by the public fragment storage API.
+ */
+export const FRAGMENT_SAMPLE_TYPE = PACKET_TYPE
 
 /**
  * Per-track files opened by disk-backed fragment sample storage.

@@ -464,7 +464,7 @@ Input tables/indexes are paged and padding is skipped by range. Output uses two 
 
 These are bounds on specific structures, not constant total memory or a process-peak guarantee. Individual packets, codec/metadata boxes, source caches, track count, caller inputs, and runtime overhead have separate costs. Long GOPs use temporary disk/sorting I/O. OPFS must accommodate inputs, output, and spools; actual quota/I/O errors are authoritative. There is no arbitrary maximum file size or disk-space reservation.
 
-Copy-mode throughput depends on payload size, packet count, metadata scans, GOP shape, and storage. Audio normalization adds a decode, resample, and encode pass and uses an additional temporary audio spool. Use `tests/browser/benchmark.html` to measure real OPFS/Worker timing for selected local files; input loading is excluded and startup, inspection, copying, and finalization are included. Results are machine/browser-specific. See the [measured baseline](./docs/performance.md).
+Copy-mode throughput depends on payload size, packet count, metadata scans, GOP shape, and storage. Audio normalization adds a decode, resample, and encode pass and uses an additional temporary audio spool. Use `tests/browser/benchmark.html` to measure real OPFS/Worker timing for selected local files; input loading is excluded and startup, inspection, copying, and finalization are included. Results are machine/browser-specific. See the [measured baseline](https://github.com/ntnyq/media-remux/blob/main/docs/performance.md).
 
 </details>
 

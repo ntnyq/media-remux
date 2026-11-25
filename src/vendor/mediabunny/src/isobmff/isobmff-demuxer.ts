@@ -211,6 +211,13 @@ type SampleEncryptionAuxInfo = {
 // Anything beyond this is malicious
 const MAX_BOX_NESTING_DEPTH = 64;
 const MOVIE_LEAF_BOXES = new Set(['mdia', 'minf', 'dinf', 'mfra', 'edts', 'sinf', 'schi', 'mvhd', 'trak', 'tkhd', 'elst', 'mdhd', 'hdlr', 'stbl', 'frma', 'schm', 'tenc', 'avcC', 'hvcC', 'vpcC', 'av1C', 'colr', 'pasp', 'btrt', 'wave', 'esds', 'enda', 'pcmC', 'dOps', 'dfLa', 'dac3', 'dec3', 'ddts', 'stts', 'ctts', 'stsz', 'stz2', 'stss', 'stsc', 'stco', 'co64', 'mvex', 'mehd', 'trex', 'tfra', 'moof', 'traf', 'pssh', 'tfhd', 'tfdt', 'trun', 'saiz', 'saio', 'senc', 'udta', 'meta', 'keys', 'ilst']);
+const METADATA_TAG_BOXES = new Set(['udta', 'meta', 'keys', 'ilst']);
+const MOVIE_HEADER_READ_LENGTHS = new Map([
+    ['mvhd', 84], ['tkhd', 88], ['mdhd', 34], ['hdlr', 12], ['mehd', 12], ['trex', 24],
+]);
+const FRAGMENT_HEADER_READ_LENGTHS = new Map([
+    ['tfhd', 32], ['tfdt', 12], ['trun', 16], ['saiz', 17], ['saio', 24], ['senc', 8],
+]);
 const MAX_FRAGMENT_CACHE_ENTRIES = 128;
 const FRAGMENT_INDEX_PAGE_SIZE = 16 * 1024;
 const MAX_FRAGMENT_INDEX_PAGES = 4;
@@ -739,6 +746,12 @@ export class IsobmffDemuxer extends Demuxer {
         if (!Number.isSafeInteger(boxEndPos) || boxEndPos > containerSlice.end) {
             throw new InvalidIsobmffInputError('Movie box extends beyond its container.');
         }
+        const inputOptions = this.input._formatOptions.isobmff;
+        if ((inputOptions?._suppressMetadataTags && METADATA_TAG_BOXES.has(boxInfo.name))
+            || (inputOptions?._suppressPsshParsing && boxInfo.name === 'pssh')) {
+            containerSlice.filePos = boxEndPos;
+            return true;
+        }
         if (fromFile) {
             const containers = ['mdia', 'minf', 'dinf', 'mfra', 'edts', 'sinf', 'schi', 'trak', 'stbl', 'mvex', 'moof', 'traf'];
             const tables = ['stts', 'ctts', 'stsz', 'stz2', 'stss', 'stsc', 'stco', 'co64'];
@@ -788,7 +801,11 @@ export class IsobmffDemuxer extends Demuxer {
                 return true;
             }
             else if (MOVIE_LEAF_BOXES.has(boxInfo.name)) {
-                slice = await this.readMovieSlice(contentStartPos, boxEndPos, this.currentFragment ? ({ tfhd: 32, tfdt: 12, trun: 16, saiz: 17, saio: 24, senc: 8 }[boxInfo.name] ?? boxInfo.contentSize) : boxInfo.contentSize);
+                // Fixed-width headers need only their parsed fields, even if
+                // the declared box has trailing bytes.
+                const headerLength = MOVIE_HEADER_READ_LENGTHS.get(boxInfo.name)
+                    ?? (this.currentFragment ? FRAGMENT_HEADER_READ_LENGTHS.get(boxInfo.name) : undefined);
+                slice = await this.readMovieSlice(contentStartPos, boxEndPos, headerLength ?? boxInfo.contentSize);
                 fromFile = false; // Nested codec/metadata boxes are already buffered.
             }
             else {
@@ -1948,9 +1965,6 @@ export class IsobmffDemuxer extends Demuxer {
                 break;
             case 'pssh':
                 {
-                    if (this.input._formatOptions.isobmff?._suppressPsshParsing) {
-                        break;
-                    }
                     const psshBox = parsePsshBoxContents(readBytes(slice, boxInfo.contentSize));
                     if (this.currentFragment) {
                         this.currentFragment.psshBoxes.push(psshBox);
@@ -2838,8 +2852,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         // A trun stores one duration per sample. For a clipped sample, use its edited
         // duration and let composition offsets retain subsequent presentation times.
         const decodeDuration = duration === sampleInfo.duration ? sampleInfo.decodeDuration : duration;
+        const decodeTimestamp = (sampleInfo.decodeTimestamp - this.internalTrack.editListOffset)
+            / this.internalTrack.timescale;
         const packet = new EncodedPacket(data, sampleInfo.isKeyFrame ? 'key' : 'delta', timestamp, duration / this.internalTrack.timescale, sampleIndex, sampleInfo.sampleSize,
-            { decodeDuration: decodeDuration / this.internalTrack.timescale });
+            { decodeDuration: decodeDuration / this.internalTrack.timescale, decodeTimestamp });
         this.packetToSampleIndex.set(packet, sampleIndex);
         return packet;
     }
@@ -2879,8 +2895,10 @@ abstract class IsobmffTrackBacking implements InputTrackBacking {
         const timestamp = (fragmentSample.presentationTimestamp - this.internalTrack.editListOffset)
             / this.internalTrack.timescale;
         const decodeDuration = duration === fragmentSample.duration ? fragmentSample.decodeDuration : duration;
+        const decodeTimestamp = (fragmentSample.decodeTimestamp - this.internalTrack.editListOffset)
+            / this.internalTrack.timescale;
         const packet = new EncodedPacket(data, fragmentSample.isKeyFrame ? 'key' : 'delta', timestamp, duration / this.internalTrack.timescale, fragment.moofOffset + sampleIndex, fragmentSample.byteSize,
-            { decodeDuration: decodeDuration / this.internalTrack.timescale });
+            { decodeDuration: decodeDuration / this.internalTrack.timescale, decodeTimestamp });
         this.packetToFragmentLocation.set(packet, { fragment, sampleIndex });
         return packet;
     }
@@ -3517,6 +3535,16 @@ type SampleTableRun = {
     time: number;
     value: number;
     chunk: number;
+};
+type SampleTableCompositionRange = {
+    start: number;
+    end: number;
+    minOffset: number;
+    maxOffset: number;
+};
+type SampleTableTimedCompositionRange = SampleTableCompositionRange & {
+    firstTime: number;
+    lastTime: number;
 };
 type SampleTableRuns = {
     box: SampleTableBox;
@@ -4255,6 +4283,7 @@ class FragmentSampleTable {
             const raw = await this.readRaw(index);
             return {
                 ...raw,
+                decodeTimestamp: raw.decodeTimestamp + this.timestampOffset,
                 presentationTimestamp: raw.presentationTimestamp + this.timestampOffset,
                 decodeDuration: raw.duration,
                 duration: await this.duration(index, raw),
@@ -4271,11 +4300,13 @@ class SampleTable {
     private pages = new Map<number, DataView>();
     private timing: SampleTableRuns | null = null;
     private composition: SampleTableRuns | null = null;
+    private compositionRanges: Promise<SampleTableTimedCompositionRange[]> | null = null;
+    private minOffsetEntry = -1;
+    private maxOffsetEntry = -1;
     private chunks: SampleTableRuns | null = null;
     private hasInvalidSampleDescriptionIndex = false;
     private minOffset = 0;
     private maxOffset = 0;
-    private firstChunk = 0;
     private pcm = false;
     private keyCursor: {
         key: number;
@@ -4378,12 +4409,13 @@ class SampleTable {
         let chunk = 0;
         if (box.name === 'stsc') {
             chunk = row[0]! - 1;
-            const next = entry + 1 < box.count ? (await this.row(box, entry + 1))[0]! - 1 : Infinity;
-            if (chunk < 0 || next <= chunk || value === 0) {
+            const chunkCount = this.boxes.get('stco')?.count ?? 0;
+            const next = entry + 1 < box.count ? (await this.row(box, entry + 1))[0]! - 1 : chunkCount;
+            if (chunk < 0 || (entry === 0 && chunk !== 0) || next <= chunk || next > chunkCount || value === 0) {
                 throw new InvalidIsobmffInputError('Invalid stsc sample table.');
             }
-            count = Math.max(0, Math.min(next, this.boxes.get('stco')?.count ?? 0) - chunk) * value;
-            this.hasInvalidSampleDescriptionIndex ||= count > 0 && row[2] !== 1;
+            count = (next - chunk) * value;
+            this.hasInvalidSampleDescriptionIndex ||= row[2] !== 1;
         }
         if (!Number.isSafeInteger(start + count) || !Number.isSafeInteger(box.name === 'stts' ? time + count * value : time)) {
             throw new InvalidIsobmffInputError(`Unsafe ${box.name} sample table prefix.`);
@@ -4402,9 +4434,15 @@ class SampleTable {
             start += run.count;
             if (box.name === 'stts')
                 time += run.count * run.value;
-            if (box.name === 'ctts' && run.count > 0 && run.start < this.rawSampleCount) {
-                this.minOffset = Math.min(this.minOffset, run.value);
-                this.maxOffset = Math.max(this.maxOffset, run.value);
+            if (box.name === 'ctts' && run.count > 0) {
+                if (run.value < this.minOffset) {
+                    this.minOffset = run.value;
+                    this.minOffsetEntry = entry;
+                }
+                if (run.value > this.maxOffset) {
+                    this.maxOffset = run.value;
+                    this.maxOffsetEntry = entry;
+                }
             }
         }
         return { box, checkpoints, window: [], total: start, duration: time };
@@ -4425,19 +4463,33 @@ class SampleTable {
         this.sampleCount = this.rawSampleCount;
         this.decodeDuration = this.timing?.duration ?? 0;
         const composition = this.boxes.get('ctts');
-        if (composition?.count && this.rawSampleCount > 0) {
-            this.minOffset = Infinity;
-            this.maxOffset = -Infinity;
-            this.composition = await this.summarize(composition);
-            if (this.composition.total < this.rawSampleCount) {
-                this.minOffset = Math.min(this.minOffset, 0);
-                this.maxOffset = Math.max(this.maxOffset, 0);
+        if (composition) {
+            if (this.rawSampleCount > 0) {
+                this.minOffset = Infinity;
+                this.maxOffset = -Infinity;
+            }
+            const runs = await this.summarize(composition);
+            if (runs.total !== this.rawSampleCount) {
+                throw new InvalidIsobmffInputError('Inconsistent MP4 sample count in ctts sample table.');
+            }
+            if (runs.total > 0) {
+                this.composition = runs;
             }
         }
-        this.firstChunk = this.chunks?.checkpoints[0]?.chunk ?? 0;
+        const keys = this.boxes.get('stss');
+        if (keys) {
+            let previous = 0;
+            for (let entry = 0; entry < keys.count; entry++) {
+                const sample = (await this.row(keys, entry))[0]!;
+                if (sample <= previous || sample > this.rawSampleCount) {
+                    throw new InvalidIsobmffInputError('Invalid MP4 sync sample number in stss sample table.');
+                }
+                previous = sample;
+            }
+        }
         this.pcm = this.pcmFrameSize !== null && !this.composition && this.rawSampleCount > 0;
         if (this.pcm)
-            this.sampleCount = Math.max(0, (this.boxes.get('stco')?.count ?? 0) - this.firstChunk);
+            this.sampleCount = this.boxes.get('stco')?.count ?? 0;
     }
     private async locate(runs: SampleTableRuns, target: number, coordinate: 'start' | 'time' | 'chunk' = 'start') {
         let low = 0;
@@ -4494,7 +4546,7 @@ class SampleTable {
         return run.time + (index - run.start) * run.value;
     }
     private async offset(index: number) {
-        if (!this.composition || index >= this.composition.total)
+        if (!this.composition)
             return 0;
         return (await this.locate(this.composition, index)).value;
     }
@@ -4573,7 +4625,7 @@ class SampleTable {
             index = await this.keyIndex(index);
         if (this.pcm && index >= 0) {
             const run = await this.locate(this.chunks!, index);
-            index = run.chunk + Math.floor((index - run.start) / run.value) - this.firstChunk;
+            index = run.chunk + Math.floor((index - run.start) / run.value);
         }
         return index;
     }
@@ -4581,6 +4633,10 @@ class SampleTable {
         const beyond = await this.decodeIndex(timestamp - this.minOffset) + 1;
         let best = beyond < this.rawSampleCount ? await this.presentationTime(beyond) : Infinity;
         let candidate = Math.max(0, await this.decodeIndex(timestamp - this.maxOffset - 1) + 1);
+        // Small reorder windows are cheaper to scan directly. Use local bounds
+        // when a track-wide offset would otherwise force long, repeated scans.
+        if (beyond - candidate > 128)
+            return this.nextPresentationTimeInRanges(candidate, index, timestamp, best);
         while (candidate < this.rawSampleCount) {
             const decode = await this.decodeTime(candidate);
             if (decode + this.minOffset > best)
@@ -4592,6 +4648,94 @@ class SampleTable {
         }
         return best === Infinity ? null : best;
     }
+    private async buildCompositionRanges() {
+        const { box, checkpoints } = this.composition!;
+        const boundaries = new Set(checkpoints.map(run => run.entry));
+        // Isolate extreme runs so a single outlier cannot widen the bounds of
+        // a whole checkpoint interval. This adds at most four boundaries.
+        for (const entry of [this.minOffsetEntry, this.maxOffsetEntry]) {
+            boundaries.add(entry);
+            boundaries.add(entry + 1);
+        }
+        const ranges: SampleTableCompositionRange[] = [];
+        let start = 0;
+        let range: SampleTableCompositionRange | undefined;
+        for (let entry = 0; entry < box.count; entry++) {
+            if (boundaries.has(entry))
+                range = undefined;
+            const run = await this.run(box, entry, start, 0);
+            start += run.count;
+            if (!run.count)
+                continue;
+            if (!range) {
+                range = { start: run.start, end: start, minOffset: run.value, maxOffset: run.value };
+                ranges.push(range);
+            }
+            range.end = start;
+            range.minOffset = Math.min(range.minOffset, run.value);
+            range.maxOffset = Math.max(range.maxOffset, run.value);
+        }
+        const timedRanges: SampleTableTimedCompositionRange[] = [];
+        for (const range of ranges) {
+            timedRanges.push({
+                ...range,
+                firstTime: await this.decodeTime(range.start),
+                lastTime: await this.decodeTime(range.end - 1),
+            });
+        }
+        return timedRanges;
+    }
+    private async nextPresentationTimeInRanges(candidate: number, index: number, timestamp: number, best: number) {
+        this.compositionRanges ??= this.buildCompositionRanges();
+        for (const range of await this.compositionRanges) {
+            if (range.end <= candidate)
+                continue;
+            if (range.firstTime + this.minOffset >= best)
+                break;
+            if (range.firstTime + range.minOffset >= best || range.lastTime + range.maxOffset < timestamp)
+                continue;
+            const start = Math.max(candidate, range.start);
+            if (range.minOffset === range.maxOffset) {
+                const time = await this.decodeTime(start) + range.minOffset;
+                best = Math.min(best, await this.nextTimeWithOffset(start, range.end, range.minOffset, time, index, timestamp));
+            }
+            else {
+                const first = range.maxOffset === this.maxOffset
+                    ? start : Math.max(start, await this.decodeIndex(timestamp - range.maxOffset - 1) + 1);
+                for (let at = first; at < range.end;) {
+                    const decode = await this.decodeTime(at);
+                    if (decode + range.minOffset >= best)
+                        break;
+                    const run = await this.locate(this.composition!, at);
+                    const end = Math.min(range.end, run.start + run.count);
+                    best = Math.min(best, await this.nextTimeWithOffset(at, end, run.value, decode + run.value, index, timestamp));
+                    at = end;
+                }
+            }
+            if (best === timestamp)
+                return best;
+        }
+        return best === Infinity ? null : best;
+    }
+    private async nextTimeWithOffset(start: number, end: number, offset: number, time: number, index: number, timestamp: number) {
+        // Within a constant-offset run, presentation times follow the
+        // nondecreasing decode clock. Jump to the first eligible sample.
+        let at = start;
+        if (time < timestamp && at + 1 < end) {
+            at = await this.decodeIndex(timestamp - offset - 1) + 1;
+            if (at >= end)
+                return Infinity;
+            time = await this.decodeTime(at) + offset;
+        }
+        if (time === timestamp && at <= index && at + 1 < end) {
+            // An equal PTS counts only for a later sample in decode order.
+            at = Math.min(index + 1, await this.decodeIndex(timestamp - offset) + 1);
+            if (at >= end)
+                return Infinity;
+            time = await this.decodeTime(at) + offset;
+        }
+        return time > timestamp || (time === timestamp && at > index) ? time : Infinity;
+    }
     async getSampleInfo(index: number) {
         if (index < 0 || index >= this.sampleCount)
             return null;
@@ -4602,7 +4746,7 @@ class SampleTable {
         let run: SampleTableRun;
         let chunk: number;
         if (this.pcm) {
-            chunk = index + this.firstChunk;
+            chunk = index;
             run = await this.locate(this.chunks!, chunk, 'chunk');
             rawIndex = run.start + (chunk - run.chunk) * run.value;
         }
@@ -4612,7 +4756,8 @@ class SampleTable {
         }
         const chunkOffset = (await this.row(this.boxes.get('stco')!, chunk))[0]!;
         const timing = await this.locate(this.timing!, rawIndex);
-        const presentationTimestamp = await this.presentationTime(rawIndex);
+        const decodeTimestamp = timing.time + (rawIndex - timing.start) * timing.value;
+        const presentationTimestamp = decodeTimestamp + await this.offset(rawIndex);
         let duration = timing.value;
         const sizes = this.boxes.get('size')!;
         const sampleSize = this.pcm ? run.value * this.pcmFrameSize! : (await this.row(sizes, index))[0]!;
@@ -4641,7 +4786,7 @@ class SampleTable {
         if (!Number.isSafeInteger(sampleOffset) || !Number.isSafeInteger(sampleOffset + sampleSize)) {
             throw new InvalidIsobmffInputError('Unsafe sample byte offset.');
         }
-        return { presentationTimestamp, duration, decodeDuration: this.pcm ? duration : timing.value, sampleOffset, sampleSize, chunkOffset,
+        return { decodeTimestamp, presentationTimestamp, duration, decodeDuration: this.pcm ? duration : timing.value, sampleOffset, sampleSize, chunkOffset,
             isKeyFrame: await this.keyIndex(index) === index };
     }
 }

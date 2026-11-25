@@ -1,44 +1,12 @@
-import type { ValueOf } from '@ntnyq/utils'
 import type { MEDIA_CODEC, MEDIA_TRACK_KIND } from '../constants'
 import type { IsobmffColorInformation } from '../vendor/mediabunny/src/isobmff/isobmff-misc'
 import type { TransformationMatrix } from '../vendor/mediabunny/src/misc'
 import type { EncodedPacket } from '../vendor/mediabunny/src/packet'
 
 /**
- * Supported encoded track with its decoder configuration and repeatable packet reader.
+ * Packet iterator shared by audio and video tracks.
  */
-export interface PacketTrack {
-  /**
-   * Media kind of the selected track.
-   */
-  kind: ValueOf<typeof MEDIA_TRACK_KIND>
-
-  /**
-   * Validated codec family used by the encoded packet source.
-   */
-  codec: ValueOf<typeof MEDIA_CODEC>
-
-  /**
-   * Decoder configuration matching kind, including codec initialization bytes.
-   */
-  config: VideoDecoderConfig | AudioDecoderConfig
-
-  /**
-   * Optional video display transformation preserved in the output. An absent
-   * matrix is treated as identity for compatibility checks; audio omits it.
-   */
-  matrix?: TransformationMatrix
-
-  /**
-   * Numeric container color identifiers used when writing the MP4 video track.
-   */
-  containerColorInformation?: IsobmffColorInformation
-
-  /**
-   * First playable position in an MP4 audio edit, in packet timeline seconds.
-   */
-  audioEditStart?: number
-
+interface PacketTrackReader {
   /**
    * Creates a fresh packet iterator in decode order.
    *
@@ -52,6 +20,68 @@ export interface PacketTrack {
     metadataOnly?: boolean,
     skipPackets?: number,
   ) => AsyncGenerator<EncodedPacket, void, unknown>
+}
+
+/**
+ * Supported audio track with its decoder configuration and optional media edit.
+ */
+export interface AudioPacketTrack extends PacketTrackReader {
+  /**
+   * Discriminator for audio codecs and decoder configurations.
+   */
+  kind: typeof MEDIA_TRACK_KIND.audio
+
+  /**
+   * Validated audio codec family.
+   */
+  codec:
+    | typeof MEDIA_CODEC.aac
+    | typeof MEDIA_CODEC.mp3
+    | typeof MEDIA_CODEC.ac3
+
+  /**
+   * Audio format and codec initialization bytes.
+   */
+  config: AudioDecoderConfig
+
+  /**
+   * First playable position in an MP4 audio edit, in packet timeline seconds.
+   */
+  audioEditStart?: number
+}
+
+/**
+ * Supported video track with its decoder configuration and display metadata.
+ */
+export interface VideoPacketTrack extends PacketTrackReader {
+  /**
+   * Discriminator for video codecs and decoder configurations.
+   */
+  kind: typeof MEDIA_TRACK_KIND.video
+
+  /**
+   * Validated video codec family.
+   */
+  codec:
+    | typeof MEDIA_CODEC.avc
+    | typeof MEDIA_CODEC.hevc
+    | typeof MEDIA_CODEC.av1
+
+  /**
+   * Video format and codec initialization bytes.
+   */
+  config: VideoDecoderConfig
+
+  /**
+   * Optional video display transformation preserved in the output. An absent
+   * matrix is treated as identity for compatibility checks.
+   */
+  matrix?: TransformationMatrix
+
+  /**
+   * Numeric container color identifiers used when writing the MP4 video track.
+   */
+  containerColorInformation?: IsobmffColorInformation
 
   /**
    * Finds an independently decodable sync sample after an initial delta packet.
@@ -67,6 +97,11 @@ export interface PacketTrack {
 }
 
 /**
+ * Encoded audio or video track with its matching configuration and packet reader.
+ */
+export type PacketTrack = AudioPacketTrack | VideoPacketTrack
+
+/**
  * Open media input with selected tracks and owned parser resources.
  */
 export interface MediaInput {
@@ -74,6 +109,12 @@ export interface MediaInput {
    * Available selected tracks. The list can be empty if the requested kind is absent.
    */
   tracks: PacketTrack[]
+
+  /**
+   * Indicates that validated tracks remain usable after disposal without
+   * reopening the input. Blob-backed FLV tracks acquire no parser resources.
+   */
+  canReuseAfterDispose?: true
 
   /**
    * Releases parser resources and abort listeners after packet readers finish.
@@ -87,7 +128,7 @@ export interface MediaInput {
 /**
  * Validated presentation timeline shared by all selected tracks in a segment.
  */
-export interface SegmentInfo {
+export interface SegmentPlan {
   /**
    * Earliest playable timestamp in seconds, possibly negative.
    */
@@ -136,7 +177,7 @@ export interface DecodeTimeline {
    * @param packet - Packet retaining the source decode duration.
    * @param presentationStart - Visible start after any track-level audio edit.
    * @returns Nothing.
-   * @throws {Error} If source decode timing is missing.
+   * @throws If source decode timing is missing, invalid, or exceeds the MP4 sample duration field.
    */
   addPacket(
     index: number,
@@ -147,11 +188,24 @@ export interface DecodeTimeline {
   /**
    * Applies the segment's presentation shifts to its decode constraints.
    *
-   * @param info - Validated shared presentation origin and span, in seconds.
+   * @param plan - Validated shared presentation origin and span, in seconds.
    * @param unshiftedStart - Earliest playable timestamp before track alignment.
    * @returns Nothing.
    */
-  finishSegment(info: SegmentInfo, unshiftedStart: number): void
+  finishSegment(plan: SegmentPlan, unshiftedStart: number): void
+
+  /**
+   * Checks MP4 sample fields whose quantization depends on the final timeline.
+   *
+   * @param segments - Opens the inspected segments for metadata-only replay when needed.
+   * @param signal - Optional cancellation signal checked during replay.
+   * @returns A promise resolving when all copied tracks fit the MP4 fields.
+   * @throws If a quantized field exceeds its MP4 range, packet reading fails, or reading is aborted.
+   */
+  validateSampleTiming(
+    segments: () => AsyncIterable<OutputSegment>,
+    signal?: AbortSignal,
+  ): Promise<void>
 
   /**
    * Snapshots decode origins and presentation bounds for one-based track IDs.
@@ -197,7 +251,7 @@ export interface OutputSegment {
   /**
    * Validated presentation timing and trim information for the segment.
    */
-  info: SegmentInfo
+  plan: SegmentPlan
 
   /**
    * Whether packet readers can close their writers when this segment ends.

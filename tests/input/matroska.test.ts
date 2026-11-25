@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { concatMedia, remuxMedia } from '../../src'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 test('copies MKV H.264 B frames and AAC with their shared presentation timeline', async () => {
@@ -74,6 +74,30 @@ function element(id: string, ...payload: Uint8Array[]) {
   return Buffer.concat([Buffer.from(id, 'hex'), size, data])
 }
 
+function aacMatroska(
+  trackFields: Uint8Array[],
+  ...clusters: Uint8Array<ArrayBuffer>[]
+) {
+  return new Blob([
+    element('1a45dfa3', element('4282', Buffer.from('matroska'))),
+    // Unknown-size Segment, extending to the end of the file.
+    Buffer.from('18538067ff', 'hex'),
+    element('1549a966'),
+    element(
+      '1654ae6b',
+      element(
+        'ae',
+        element('d7', Buffer.of(1)),
+        element('83', Buffer.of(2)),
+        element('86', Buffer.from('A_AAC')),
+        element('63a2', Buffer.of(0x11, 0x88, 0x56, 0xe5, 0x00)),
+        ...trackFields,
+      ),
+    ),
+    ...clusters,
+  ])
+}
+
 test('copies MKV container colour into nclx and rejects incompatible ranges', async () => {
   const input = await fixture('bt709-full-range.mkv')
   const output = memoryTarget()
@@ -85,7 +109,10 @@ test('copies MKV container colour into nclx and rejects incompatible ranges', as
   const media = await openMediaInput(output.blob())
 
   try {
-    expect(media.tracks[0]?.containerColorInformation).toStrictEqual({
+    expect(
+      media.tracks.find(track => track.kind === 'video')
+        ?.containerColorInformation,
+    ).toStrictEqual({
       primaries: 1,
       transfer: 1,
       matrix: 1,
@@ -115,43 +142,41 @@ test.each([
   { name: 'Xiph', flags: 0x02 },
   { name: 'fixed', flags: 0x04 },
   { name: 'EBML', flags: 0x06 },
+  { name: 'EBML with an eight-byte difference', flags: 0x06, wide: true },
 ])(
   'splits $name AAC laces in an unknown-size MKV cluster',
-  async ({ flags }) => {
+  async ({ flags, wide }) => {
     const source = await fixture('progressive.mkv')
     const original = (await packets(source, 'audio'))
       .slice(0, 3)
       .map(packet => packet.data)
     const frames =
-      flags === 0x04 ? Array<Uint8Array>(3).fill(original[0]!) : original
+      flags === 0x04
+        ? Array<Uint8Array>(3).fill(original[0]!)
+        : wide
+          ? [original[1]!, original[2]!, original[0]!]
+          : original
     let sizes = Buffer.alloc(0)
 
     if (flags === 0x02) {
       sizes = Buffer.from([frames[0]!.length, 255, frames[1]!.length - 255])
     } else if (flags === 0x06) {
       const firstSize = 0x4000 | frames[0]!.length
-      const difference = 0x4000 | (8191 + frames[1]!.length - frames[0]!.length)
+      const difference = frames[1]!.length - frames[0]!.length
 
-      sizes = Buffer.of(
-        firstSize >> 8,
-        firstSize & 0xff,
-        difference >> 8,
-        difference & 0xff,
-      )
+      sizes = Buffer.alloc(wide ? 10 : 4)
+      sizes.writeUInt16BE(firstSize)
+
+      if (wide) {
+        const marker = 1n << 56n
+        const bias = (1n << 55n) - 1n
+
+        sizes.writeBigUInt64BE(marker + bias + BigInt(difference), 2)
+      } else {
+        sizes.writeUInt16BE(0x4000 | (8191 + difference), 2)
+      }
     }
 
-    const header = element('1a45dfa3', element('4282', Buffer.from('matroska')))
-    const info = element('1549a966')
-    const tracks = element(
-      '1654ae6b',
-      element(
-        'ae',
-        element('d7', Buffer.of(1)),
-        element('83', Buffer.of(2)),
-        element('86', Buffer.from('A_AAC')),
-        element('63a2', Buffer.of(0x11, 0x88, 0x56, 0xe5, 0x00)),
-      ),
-    )
     const cluster = Buffer.concat([
       // Eight-byte unknown size, terminated by the following Cluster ID.
       Buffer.from('1f43b67501ffffffffffffff', 'hex'),
@@ -167,15 +192,7 @@ test.each([
       element('e7', Buffer.of(64)),
       element('a3', Buffer.of(0x81, 0, 0, 0x80), original[0]!),
     )
-    const input = new Blob([
-      header,
-      // Unknown-size Segment, extending to the end of the file.
-      Buffer.from('18538067ff', 'hex'),
-      info,
-      tracks,
-      cluster,
-      nextCluster,
-    ])
+    const input = aacMatroska([], cluster, nextCluster)
     const target = memoryTarget()
 
     await remuxMedia(input, {
@@ -193,6 +210,41 @@ test.each([
     for (const [index, packet] of output.entries()) {
       expect(packet.timestamp).toBeCloseTo((index * 1024) / 48_000, 5)
     }
+  },
+)
+
+test.each([
+  { name: 'with only one frame', count: 1, allowLacing: true },
+  { name: 'on an unlaced track', count: 2, allowLacing: false },
+])(
+  'rejects an MKV lace $name before writing output',
+  async ({ count, allowLacing }) => {
+    const [sample] = await packets(await fixture('progressive.mkv'), 'audio')
+    const input = aacMatroska(
+      allowLacing ? [] : [element('9c', Buffer.of(0))],
+      element(
+        '1f43b675',
+        element('e7', Buffer.of(0)),
+        element(
+          'a3',
+          Buffer.of(0x81, 0, 0, 0x84, count - 1),
+          ...Array<Uint8Array>(count).fill(sample!.data),
+        ),
+      ),
+    )
+    const target = memoryTarget()
+
+    await expect(
+      remuxMedia(input, {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringMatching(/lac/iu),
+    })
+    expect(target.state.writes).toStrictEqual([])
+    expect(target.writable.locked).toBe(false)
   },
 )
 

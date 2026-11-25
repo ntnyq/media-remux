@@ -1,8 +1,5 @@
 import type { ValueOf } from '@ntnyq/utils'
-import type {
-  FRAGMENT_SAMPLE_FILE_KIND,
-  FRAGMENT_SAMPLE_TYPE,
-} from '../constants'
+import type { FRAGMENT_SAMPLE_FILE_KIND, PACKET_TYPE } from '../constants'
 
 /**
  * Backing file for one track of temporary fragment bytes.
@@ -141,7 +138,7 @@ export interface FragmentSample {
   /**
    * Whether the sample is independently decodable or depends on other samples.
    */
-  type: ValueOf<typeof FRAGMENT_SAMPLE_TYPE>
+  type: ValueOf<typeof PACKET_TYPE>
 
   /**
    * Sample duration in the track's integer timescale units, refined as subsequent

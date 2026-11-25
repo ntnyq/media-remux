@@ -1,9 +1,72 @@
+import assert from 'node:assert/strict'
 import { afterEach, expect, test, vi } from 'vitest'
-import { remuxMedia } from '../../src'
+import { combineTracks, concatMedia, remuxMedia } from '../../src'
 import { encodeAac } from '../../src/core/audioCodecs'
-import { diskStorage, fixture, memoryTarget } from '../helpers/media'
+import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
+import { boxPayloads } from '../helpers/mp4Boxes'
 
 afterEach(() => vi.unstubAllGlobals())
+
+test('combines without an encoder when trimming removes all audio', async () => {
+  vi.stubGlobal('AudioEncoder', undefined)
+  const target = memoryTarget()
+
+  await combineTracks(
+    await fixture('leading-delta.mp4'),
+    await fixture('audio-edited-head.m4a'),
+    {
+      normalizeAudio: true,
+      timeline: { audioOffset: -2 },
+      writable: target.writable,
+      storage: await diskStorage(),
+    },
+  )
+
+  expect(await packets(target.blob(), 'video')).not.toHaveLength(0)
+  expect(await packets(target.blob(), 'audio')).toEqual([])
+})
+
+test.each(['remux', 'concat'] as const)(
+  '%s skips encoding when no segment retains audio',
+  async operation => {
+    vi.stubGlobal('AudioEncoder', undefined)
+    const original = await fixture('leading-delta-av.mp4')
+    const bytes = Buffer.from(await original.arrayBuffer())
+    const [movie] = boxPayloads(bytes, 'moov')
+
+    assert.ok(movie)
+    const [header] = boxPayloads(movie, 'mvhd')
+    const [, audio] = boxPayloads(movie, 'trak')
+
+    assert.ok(header && audio)
+    const [edits] = boxPayloads(audio, 'edts')
+
+    assert.ok(edits)
+    const [edit] = boxPayloads(edits, 'elst')
+
+    assert.ok(edit && edit[0] === 0 && header[0] === 0)
+    const timescale = header.readUInt32BE(12)
+
+    // End audio before the first usable video keyframe.
+    edit.writeUInt32BE(Math.floor(timescale / 2), 8)
+    const input = new Blob([bytes])
+    const target = memoryTarget()
+    const options = {
+      normalizeAudio: true,
+      writable: target.writable,
+      storage: await diskStorage(),
+    }
+
+    if (operation === 'remux') {
+      await remuxMedia(input, options)
+    } else {
+      await concatMedia([input, input], options)
+    }
+
+    expect(await packets(target.blob(), 'video')).not.toHaveLength(0)
+    expect(await packets(target.blob(), 'audio')).toEqual([])
+  },
+)
 
 test.each(['AudioDecoder', 'AudioEncoder'])(
   'cancels remux while waiting for %s capability detection',

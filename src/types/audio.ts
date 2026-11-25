@@ -1,4 +1,4 @@
-import type { PacketTrack, SegmentInfo } from './media'
+import type { PacketTrack, SegmentPlan } from './media'
 
 /**
  * WebCodecs lifecycle and events shared by audio encoders and decoders.
@@ -93,7 +93,7 @@ export interface AudioSegment {
   /**
    * Shared segment span and retained audio bounds.
    */
-  info: SegmentInfo
+  plan: SegmentPlan
 }
 
 /**

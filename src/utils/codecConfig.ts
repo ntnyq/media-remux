@@ -4,7 +4,6 @@ import {
   InvalidAacDescriptionError,
   parseAacAudioSpecificConfig,
 } from '../vendor/mediabunny/shared/aac-misc'
-import { Bitstream } from '../vendor/mediabunny/shared/bitstream'
 import { extractColorSpace } from '../vendor/mediabunny/src/codec'
 import {
   deserializeAvcDecoderConfigurationRecord,
@@ -65,17 +64,17 @@ export function avcDecoderConfig(
 }
 
 /**
- * Builds an AAC-LC decoder configuration from an AudioSpecificConfig.
+ * Reads an AAC-LC AudioSpecificConfig for packet copying.
  *
  * @param description - AudioSpecificConfig bytes.
  * @param container - Input container for diagnostics.
- * @returns Codec identifier, channel count, sample rate, and initialization bytes.
+ * @returns The decoder configuration and nominal frame duration in seconds.
  * @throws {Error} If AAC-LC, a channel count, or a positive sample rate are absent.
  */
-export function aacLcDecoderConfig(
+export function readAacLcConfig(
   description: Uint8Array<ArrayBuffer>,
   container: 'FLV' | 'MKV' | 'MPEG-TS',
-): AudioDecoderConfig {
+) {
   let info
 
   try {
@@ -102,31 +101,12 @@ export function aacLcDecoderConfig(
   }
 
   return {
-    codec: 'mp4a.40.2',
-    numberOfChannels: info.outputNumberOfChannels,
-    sampleRate: info.outputSampleRate,
-    description,
+    config: {
+      codec: 'mp4a.40.2',
+      numberOfChannels: info.outputNumberOfChannels,
+      sampleRate: info.outputSampleRate,
+      description,
+    } satisfies AudioDecoderConfig,
+    frameDuration: info.frameLength / info.outputSampleRate,
   }
-}
-
-/**
- * Reads the AAC frame-length flag used to derive each audio packet's duration.
- *
- * @param description - AAC AudioSpecificConfig containing the frame-length flag.
- * @returns Samples per frame: 960 when the flag is set, otherwise 1024.
- */
-export function aacFrameSamples(description: Uint8Array): number {
-  const bits = new Bitstream(description)
-
-  // Skip the object type and sample-rate field, whose escape value introduces
-  // an explicit 24-bit frequency, then skip channels to reach frameLengthFlag.
-  bits.skipBits(5)
-
-  if (bits.readBits(4) === 15) {
-    bits.skipBits(24)
-  }
-
-  bits.skipBits(4)
-
-  return bits.readBits(1) === 1 ? 960 : 1024
 }

@@ -31,7 +31,7 @@ export const AAC_ENCODER_CONFIG = {
 /**
  * Temporary track ID reserved for spooled AAC samples, beyond the two output tracks.
  */
-export const AUDIO_SPOOL_ID = 3
+export const NORMALIZED_AUDIO_SPOOL_TRACK_ID = 3
 
 /**
  * Half-width of each interpolation kernel, in source samples.

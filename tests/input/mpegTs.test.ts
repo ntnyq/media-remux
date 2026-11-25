@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import {
   combineTracks,
   remuxMedia,
@@ -7,7 +7,13 @@ import {
   type RemuxTrackSelection,
 } from '../../src'
 import { REMUX_ERROR_CODE } from '../../src/constants'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
+import {
+  MpegTsDemuxer,
+  UnsupportedMpegTsError,
+} from '../../src/vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
+import { Reader } from '../../src/vendor/mediabunny/src/reader'
+import { BlobSource } from '../../src/vendor/mediabunny/src/source'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 
 const packetSize = 188
@@ -547,6 +553,45 @@ test.each([25000, 10000])(
     expect(await packets(audioOnly.output, 'audio')).toStrictEqual(audio)
   },
 )
+
+test('rejects an oversized AVC framing buffer before copying the payload', async () => {
+  const source = new BlobSource(new Blob())
+
+  using ref = source.ref()
+  const demuxer = new MpegTsDemuxer(new Reader(ref.source), 0, () => {})
+  const payloads = vi.spyOn(demuxer, 'pesPayloads')
+
+  payloads.mockImplementation(async function* () {
+    yield { data: new Uint8Array(32 * 1024 * 1024 + 1), timing: null }
+  })
+
+  await expect(demuxer.readAvc(videoPid).next()).rejects.toBeInstanceOf(
+    UnsupportedMpegTsError,
+  )
+})
+
+test('bounds pending PES timestamps while framing AVC across payloads', async () => {
+  const source = new BlobSource(new Blob())
+
+  using ref = source.ref()
+  const demuxer = new MpegTsDemuxer(new Reader(ref.source), 0, () => {})
+  const timing = { pts: 0, dts: 0 }
+  const byte = Uint8Array.of(0xff)
+
+  vi.spyOn(demuxer, 'pesPayloads').mockImplementation(async function* () {
+    yield { data: Uint8Array.of(0, 0, 1, 0x09, 0xf0), timing }
+
+    for (let index = 0; index < 65_536; index++) {
+      yield { data: byte, timing }
+    }
+  })
+
+  await expect(demuxer.readAvc(videoPid).next()).rejects.toThrow(
+    new UnsupportedMpegTsError(
+      'MPEG-TS elementary stream has too many pending PES timestamps.',
+    ),
+  )
+})
 
 test('keeps AVC and AAC frame timing and payload across PES and a split Annex B start code', async () => {
   const source = await fixture('continuous-av.mpegts')

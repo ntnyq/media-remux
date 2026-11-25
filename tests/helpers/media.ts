@@ -2,7 +2,7 @@ import { mkdtemp, open, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { onTestFinished } from 'vitest'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { createDiskFragmentIndex } from '../../src/storage/fragmentIndex'
 import type { MediaOutputChunk, RemuxStorage } from '../../src/types'
 import { temporaryFragmentSamples } from './fragmentSamples'
@@ -179,7 +179,10 @@ export async function packets(
     }
 
     const encoded = []
-    const editStart = options?.applyAudioEdit ? track.audioEditStart : undefined
+    const editStart =
+      options?.applyAudioEdit && track.kind === 'audio'
+        ? track.audioEditStart
+        : undefined
 
     for await (const packet of track.packets()) {
       if (

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { expect, test } from 'vitest'
 import { remuxMedia } from '../../src'
-import { openMediaInput } from '../../src/core/input/mediaInput'
+import { openMediaInput } from '../../src/core/input/openMediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from '../helpers/media'
 import { boxPayloads } from '../helpers/mp4Boxes'
 

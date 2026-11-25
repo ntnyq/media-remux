@@ -439,8 +439,11 @@ export const edts = (trackData: IsobmffTrackData) => {
     if (offset > 0) {
         // Positive offset: empty segment at the start, then the full media afterwards
         const startOffset = intoTimescale(offset, GLOBAL_TIMESCALE);
-        const mediaDuration = intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE);
-        const needs64Bits = !isU32(startOffset) || !isU32(mediaDuration);
+        // A delayed decode clock can still start before the first presentation
+        // timestamp. Keep that interval in the media edit so its end stays fixed.
+        const mediaDuration = timing ? movieTrackDuration(trackData) - startOffset
+            : intoTimescale(presentationSpan(trackData), GLOBAL_TIMESCALE);
+        const needs64Bits = timing !== undefined || !isU32(startOffset) || !isU32(mediaDuration);
         const u32OrU64 = needs64Bits ? u64 : u32;
         const i32OrI64 = needs64Bits ? i64 : i32;
         return box('edts', undefined, [

@@ -7,16 +7,18 @@ import {
   REMUX_TRACK_SELECTION,
 } from '../../constants'
 import type {
+  AudioPacketTrack,
+  VideoPacketTrack,
   MediaInput,
   MpegTsInput,
   PacketTrack,
   RemuxTrackSelection,
 } from '../../types'
 import {
-  aacLcDecoderConfig,
   avcDecoderConfig,
   checkAbort,
   createRemuxError,
+  readAacLcConfig,
   withRemuxErrorCode,
 } from '../../utils'
 import {
@@ -165,7 +167,7 @@ async function openAudioTrack(
   demuxer: MpegTsDemuxer,
   pid: number,
   reference: number,
-): Promise<PacketTrack> {
+): Promise<AudioPacketTrack> {
   const probe = demuxer.readAdts(pid)
   const first = await probe.next()
 
@@ -177,8 +179,7 @@ async function openAudioTrack(
 
   const header = first.value.header
   const description = audioDescription(first.value)
-  const config = aacLcDecoderConfig(description, 'MPEG-TS')
-  const frameDuration = 1024 / config.sampleRate
+  const { config, frameDuration } = readAacLcConfig(description, 'MPEG-TS')
 
   return {
     kind: MEDIA_TRACK_KIND.audio,
@@ -256,14 +257,16 @@ async function openAudioTrack(
         previous = pts
 
         if (sequenceNumber >= skipPackets) {
+          const timestamp = pts / MPEG_TS_TIMESCALE
+
           yield new EncodedPacket(
             metadataOnly ? PLACEHOLDER_DATA : data,
             'key',
-            pts / MPEG_TS_TIMESCALE,
+            timestamp,
             frameDuration,
             sequenceNumber,
             data.length,
-            { decodeDuration: frameDuration },
+            { decodeDuration: frameDuration, decodeTimestamp: timestamp },
           )
         }
 
@@ -336,7 +339,7 @@ async function openVideoTrack(
   demuxer: MpegTsDemuxer,
   pid: number,
   reference: number,
-): Promise<PacketTrack> {
+): Promise<VideoPacketTrack> {
   const probe = demuxer.readAvc(pid)
   const first = await probe.next()
 
