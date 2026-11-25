@@ -110,6 +110,12 @@ export function createDiskFragmentStore(
   let disposed = false
   let disposal: Promise<void> | undefined
 
+  function assertTrackId(trackId: number) {
+    if (!Number.isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
+      throw new RangeError('Invalid fragment track id.')
+    }
+  }
+
   /**
    * Serializes storage work and records the first failure for later operations.
    *
@@ -159,9 +165,7 @@ export function createDiskFragmentStore(
    * @throws If opening the backing file fails.
    */
   async function getTrack(trackId: number) {
-    if (!Number.isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
-      throw new RangeError('Invalid fragment track id.')
-    }
+    assertTrackId(trackId)
 
     let track = tracks.get(trackId)
 
@@ -316,6 +320,7 @@ export function createDiskFragmentStore(
      */
     reset(trackId: number) {
       return enqueueOperation(async () => {
+        assertTrackId(trackId)
         const track = tracks.get(trackId)
 
         if (track) {

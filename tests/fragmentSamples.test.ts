@@ -63,6 +63,25 @@ test('updates paged records after eviction and compacts released prefixes with q
   }
 })
 
+test.each([{ mediaOffset: 1 }, { size: 2 }])(
+  'rejects a descriptor update that moves or resizes its payload (%j)',
+  async update => {
+    const temporary = await temporaryFragmentSamples()
+    const { store } = temporary
+
+    try {
+      const id = await store.append(1, sample(0), Uint8Array.of(10))
+
+      await store.append(1, sample(1), Uint8Array.of(20))
+      const row = await store.get(1, id)
+
+      await assert.rejects(store.set(1, id, { ...row, ...update }), RangeError)
+    } finally {
+      await temporary.dispose()
+    }
+  },
+)
+
 test.each([1, 4096, 4097, 10_003])(
   'sorts %s GOP timestamps using bounded runs with ties and fractional times',
   async count => {
@@ -323,6 +342,37 @@ test('rejects oversized media reads and invalid record fields', async () => {
     } finally {
       await backing.store.dispose()
     }
+  }
+})
+
+test.each([-1, -0.5, -Infinity])(
+  'rejects invalid sample update ID %s',
+  async id => {
+    const { store } = memoryFiles()
+
+    try {
+      await assert.rejects(
+        store.set(1, id, { ...sample(0), mediaOffset: 0 }),
+        RangeError,
+      )
+    } finally {
+      await store.dispose()
+    }
+  },
+)
+
+test('rejects an invalid sort start before opening scratch files', async () => {
+  const { store, files } = memoryFiles()
+
+  try {
+    await store.append(1, sample(0), Uint8Array.of(1))
+    await assert.rejects(
+      store.sort(1, Number.NaN, 4097),
+      /Invalid gop storage range/u,
+    )
+    assert.equal(files.length, 2)
+  } finally {
+    await store.dispose()
   }
 })
 

@@ -11,6 +11,78 @@ import { openMediaInput } from '../src/core/input/mediaInput'
 import { fixture, diskStorage, memoryTarget, packets } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
+test('keeps the movie transformation when the movie header follows the track', async () => {
+  const original = await fixture('video.mp4')
+  const bytes = Buffer.from(await original.arrayBuffer())
+  const mvhd = bytes.indexOf('mvhd') - 4
+  const headerEnd = mvhd + bytes.readUInt32BE(mvhd)
+  const moov = bytes.indexOf('moov') - 4
+  const moovEnd = moov + bytes.readUInt32BE(moov)
+  const matrix = [0, 1, 0, -1, 0, 0, 0, 0, 1]
+  const target = memoryTarget()
+
+  expect(bytes[mvhd + 8]).toBe(0)
+  expect(bytes.indexOf('trak')).toBeGreaterThan(headerEnd)
+
+  for (const [index, value] of matrix.entries()) {
+    bytes.writeInt32BE(
+      value * 2 ** (index % 3 === 2 ? 30 : 16),
+      mvhd + 44 + 4 * index,
+    )
+  }
+
+  await remuxMedia(
+    new Blob([
+      bytes.subarray(0, mvhd),
+      bytes.subarray(headerEnd, moovEnd),
+      bytes.subarray(mvhd, headerEnd),
+      bytes.subarray(moovEnd),
+    ]),
+    {
+      writable: target.writable,
+      storage: await diskStorage(),
+    },
+  )
+  const output = await openMediaInput(target.blob())
+
+  try {
+    expect(output.tracks[0]?.matrix).toStrictEqual(matrix)
+  } finally {
+    output.dispose()
+  }
+})
+
+test('finds a track whose media handler follows the sample table', async () => {
+  const original = await fixture('audio.m4a')
+  const bytes = Buffer.from(await original.arrayBuffer())
+  const mdia = bytes.indexOf('mdia') - 4
+  const hdlr = bytes.indexOf('hdlr', mdia) - 4
+  const handlerEnd = hdlr + bytes.readUInt32BE(hdlr)
+  const mediaEnd = mdia + bytes.readUInt32BE(mdia)
+  const target = memoryTarget()
+
+  expect(bytes.indexOf('stbl', mdia)).toBeGreaterThan(handlerEnd)
+  await remuxMedia(
+    new Blob([
+      bytes.subarray(0, hdlr),
+      bytes.subarray(handlerEnd, mediaEnd),
+      bytes.subarray(hdlr, handlerEnd),
+      bytes.subarray(mediaEnd),
+    ]),
+    {
+      writable: target.writable,
+      storage: await diskStorage(),
+    },
+  )
+  expect(
+    (await packets(target.blob(), 'audio')).map(packet => packet.data),
+  ).toStrictEqual(
+    (await packets(original, 'audio', { applyAudioEdit: true })).map(
+      packet => packet.data,
+    ),
+  )
+})
+
 test('checks multiple MP4 sample descriptions only on selected tracks', async () => {
   const input = await fixture('progressive.mp4')
   const original = Buffer.from(await input.arrayBuffer())
@@ -65,6 +137,42 @@ test('checks multiple MP4 sample descriptions only on selected tracks', async ()
   ).rejects.toThrow(/Multiple MP4 sample descriptions/u)
   expect(videoTarget.state.writes).toHaveLength(0)
 })
+
+test.each([0, 2])(
+  'rejects an invalid MP4 stsc description index %s on the selected track',
+  async index => {
+    const original = await fixture('progressive.mp4')
+    const bytes = Buffer.from(await original.arrayBuffer())
+    const stsc = bytes.indexOf('stsc')
+    const video = memoryTarget()
+    const audio = memoryTarget()
+
+    expect(bytes.readUInt32BE(stsc + 20)).toBe(1)
+    bytes.writeUInt32BE(index, stsc + 20)
+    const input = new Blob([bytes])
+
+    await expect(
+      remuxMedia(input, {
+        tracks: 'video',
+        storage: await diskStorage(),
+        writable: video.writable,
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('chunk sample description'),
+    })
+    expect(video.state.writes).toHaveLength(0)
+
+    await remuxMedia(input, {
+      tracks: 'audio',
+      storage: await diskStorage(),
+      writable: audio.writable,
+    })
+    expect(await packets(audio.blob(), 'audio')).toStrictEqual(
+      await packets(original, 'audio', { applyAudioEdit: true }),
+    )
+  },
+)
 
 test('keeps the submitted segment list when the caller clears its selection during progress', async () => {
   const video = await fixture('video.mp4')
@@ -959,6 +1067,13 @@ test('rejects empty/truncated FLV and invalid track selection', async () => {
   ).rejects.toThrow('nonempty Blob')
   const flv = await fixture('progressive.flv')
 
+  await expect(
+    remuxMedia(flv, {
+      tracks: '' as 'all',
+      storage,
+      writable: memoryTarget().writable,
+    }),
+  ).rejects.toThrow('Unsupported media track selection')
   await expect(
     remuxMedia(flv.slice(0, flv.size - 1), {
       storage,

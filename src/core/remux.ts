@@ -31,6 +31,13 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
     throw new TypeError('normalizeAudio must be a boolean.')
   }
 
+  if (
+    tracks !== undefined &&
+    !Object.values(REMUX_TRACK_SELECTION).includes(tracks)
+  ) {
+    throw new TypeError('Unsupported media track selection.')
+  }
+
   return {
     writable,
     storage,
@@ -108,6 +115,7 @@ export async function concatMedia(
   // Validate every segment before opening the output, so a later incompatible
   // segment cannot leave a partially written concatenation behind.
   for (const [index, blob] of blobs.entries()) {
+    checkAbort(settings.signal)
     settings.onProgress?.({
       phase: REMUX_PROGRESS_PHASE.inspect,
       bytesProcessed: 0,
@@ -148,7 +156,7 @@ export async function concatMedia(
         )
 
         if (audio && 'sampleRate' in audio.config) {
-          await checkAudioDecoder(audio.config)
+          await checkAudioDecoder(audio.config, settings.signal)
 
           if (baseline.length === copiedTracks.length) {
             baseline.push(audio)
@@ -229,6 +237,8 @@ export async function combineTracks(
   options: Omit<RemuxOptions, 'tracks'>,
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
+
+  checkAbort(settings.signal)
   const inputs: MediaInput[] = []
 
   try {
@@ -284,7 +294,7 @@ export async function combineTracks(
       info.audioRange &&
       'sampleRate' in audioTrack.config
     ) {
-      await checkAudioDecoder(audioTrack.config)
+      await checkAudioDecoder(audioTrack.config, settings.signal)
     }
 
     return await writeSegments(

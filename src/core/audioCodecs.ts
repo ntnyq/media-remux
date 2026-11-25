@@ -28,8 +28,10 @@ type AudioCodec = EventTarget & {
 
 interface AudioCodecSession<Source> {
   codec: AudioCodec
+  configure: () => void
   queueSize: () => number
   submit: (source: Source) => void
+  releaseInput?: (source: Source) => void
 }
 
 interface AacChunk {
@@ -37,11 +39,18 @@ interface AacChunk {
   config?: AudioDecoderConfig | undefined
 }
 
-export async function checkAacEncoder(): Promise<void> {
+export async function checkAacEncoder(signal?: AbortSignal): Promise<void> {
+  checkAbort(signal)
+
   if (
     typeof AudioEncoder === 'undefined' ||
     typeof AudioData === 'undefined' ||
-    !(await AudioEncoder.isConfigSupported(AAC_ENCODER_CONFIG)).supported
+    !(
+      await waitForCodec(
+        () => AudioEncoder.isConfigSupported(AAC_ENCODER_CONFIG),
+        signal,
+      )
+    ).supported
   ) {
     throw createRemuxError(
       REMUX_ERROR_CODE.unsupportedMediaFeature,
@@ -52,13 +61,17 @@ export async function checkAacEncoder(): Promise<void> {
 
 export async function checkAudioDecoder(
   config: AudioDecoderConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
+  checkAbort(signal)
+
   if (
     config.numberOfChannels < 1 ||
     config.numberOfChannels > AAC_CHANNELS ||
     typeof AudioDecoder === 'undefined' ||
     typeof EncodedAudioChunk === 'undefined' ||
-    !(await AudioDecoder.isConfigSupported(config)).supported
+    !(await waitForCodec(() => AudioDecoder.isConfigSupported(config), signal))
+      .supported
   ) {
     throw createRemuxError(
       REMUX_ERROR_CODE.unsupportedMediaFeature,
@@ -69,17 +82,26 @@ export async function checkAudioDecoder(
 
 /** Races a codec wait against cancellation and cleans up its listener. */
 async function waitForCodec<Result>(
-  result: Promise<Result>,
-  signal: AbortSignal,
+  wait: () => Promise<Result>,
+  signal?: AbortSignal,
 ) {
   checkAbort(signal)
+
+  if (!signal) {
+    return await wait()
+  }
+
   const abort = Promise.withResolvers<never>()
   const reject = () => abort.reject(signal.reason)
 
   signal.addEventListener('abort', reject, { once: true })
 
   try {
-    return await Promise.race([result, abort.promise])
+    const result = await Promise.race([wait(), abort.promise])
+
+    checkAbort(signal)
+
+    return result
   } finally {
     signal.removeEventListener('abort', reject)
   }
@@ -96,7 +118,7 @@ async function* runAudioCodec<Source, Result>(
     error: (reason: DOMException) => void,
   ) => AudioCodecSession<Source>,
   signal?: AbortSignal,
-  release?: (result: Result) => void,
+  releaseOutput?: (result: Result) => void,
 ): AsyncGenerator<Result, void, unknown> {
   const failure = new AbortController()
   const activeSignal = signal
@@ -105,14 +127,22 @@ async function* runAudioCodec<Source, Result>(
   const outputs: Result[] = []
 
   checkAbort(activeSignal)
-  const { codec, queueSize, submit } = open(
+  const { codec, configure, queueSize, submit, releaseInput } = open(
     result => outputs.push(result),
     reason => failure.abort(reason),
   )
 
   try {
+    configure()
+
     for await (const input of inputs) {
-      submit(input)
+      try {
+        checkAbort(activeSignal)
+        submit(input)
+      } finally {
+        releaseInput?.(input)
+      }
+
       checkAbort(activeSignal)
 
       if (queueSize() >= MAX_CODEC_QUEUE) {
@@ -122,28 +152,34 @@ async function* runAudioCodec<Source, Result>(
         codec.addEventListener('dequeue', onDequeue, { once: true })
 
         try {
-          await waitForCodec(dequeue.promise, activeSignal)
+          await waitForCodec(() => dequeue.promise, activeSignal)
         } finally {
           codec.removeEventListener('dequeue', onDequeue)
         }
       }
 
       while (outputs.length > 0) {
+        checkAbort(activeSignal)
         yield outputs.shift()!
       }
     }
 
-    await waitForCodec(codec.flush(), activeSignal)
+    await waitForCodec(() => codec.flush(), activeSignal)
 
     while (outputs.length > 0) {
+      checkAbort(activeSignal)
       yield outputs.shift()!
     }
+  } catch (error) {
+    checkAbort(activeSignal)
+
+    throw error
   } finally {
     if (codec.state !== 'closed') {
       codec.close()
     }
 
-    outputs.forEach(output => release?.(output))
+    outputs.forEach(output => releaseOutput?.(output))
   }
 }
 
@@ -212,18 +248,12 @@ export async function* encodeAac(
         error,
       })
 
-      codec.configure(AAC_ENCODER_CONFIG)
-
       return {
         codec,
+        configure: () => codec.configure(AAC_ENCODER_CONFIG),
         queueSize: () => codec.encodeQueueSize,
-        submit(input) {
-          try {
-            codec.encode(input)
-          } finally {
-            input.close()
-          }
-        },
+        submit: input => codec.encode(input),
+        releaseInput: input => input.close(),
       }
     },
     signal,
@@ -244,10 +274,9 @@ export function decodeAudio(
     (output, error) => {
       const codec = new AudioDecoder({ output, error })
 
-      codec.configure(config)
-
       return {
         codec,
+        configure: () => codec.configure(config),
         queueSize: () => codec.decodeQueueSize,
         submit: chunk => codec.decode(chunk),
       }

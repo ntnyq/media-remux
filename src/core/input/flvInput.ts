@@ -436,6 +436,8 @@ export async function openFlvInput(
         let pending: FlvTag | undefined
         let sequence = 0
         let lastDuration = defaultDuration
+        let lastTimestamp = -Infinity
+        let lastMediaTimestamp = -Infinity
 
         /**
          * Converts a media tag to a packet at the current sequence number.
@@ -460,15 +462,24 @@ export async function openFlvInput(
         // Audio uses its codec duration; final video reuses the last duration.
         for await (const tag of readTags(blob, kind, metadataOnly, signal)) {
           if (tag.packetType !== 0) {
+            if (
+              tag.timestamp < lastTimestamp ||
+              (tag.packetType === 1 && tag.timestamp <= lastMediaTimestamp)
+            ) {
+              throw createRemuxError(
+                REMUX_ERROR_CODE.invalidInput,
+                'FLV decode timestamps must increase within each track.',
+              )
+            }
+
+            lastTimestamp = tag.timestamp
+
+            if (tag.packetType === 1) {
+              lastMediaTimestamp = tag.timestamp
+            }
+
             if (pending) {
               const delta = tag.timestamp - pending.timestamp
-
-              if (delta < 0 || (delta === 0 && tag.packetType === 1)) {
-                throw createRemuxError(
-                  REMUX_ERROR_CODE.invalidInput,
-                  'FLV decode timestamps must increase within each track.',
-                )
-              }
 
               if (kind === MEDIA_TRACK_KIND.video && delta > 0) {
                 lastDuration = delta

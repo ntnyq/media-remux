@@ -1,5 +1,24 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import { runMediaJob } from '../src'
 import { isWorkerRequest, isWorkerResponse } from '../src/browser/protocol'
+
+test('reports OPFS as unavailable when navigator has no directory method', async () => {
+  vi.stubGlobal('navigator', { storage: {} })
+
+  try {
+    const createWorker = vi.fn<() => Worker>()
+
+    await expect(
+      runMediaJob(
+        { operation: 'remux', input: new Blob(['media']) },
+        { createWorker },
+      ),
+    ).rejects.toThrow(/OPFS is unavailable/u)
+    expect(createWorker).not.toHaveBeenCalled()
+  } finally {
+    vi.unstubAllGlobals()
+  }
+})
 
 test.each([
   { mimeType: 'audio/mp4', isValid: true },

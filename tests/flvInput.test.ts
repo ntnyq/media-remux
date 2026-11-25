@@ -141,6 +141,28 @@ function tags(bytes: Uint8Array) {
   return entries
 }
 
+test('checks FLV DTS across an AVC end-of-sequence tag', async () => {
+  const source = await fixture('vfr-bframes.flv')
+  const bytes = Buffer.from(await source.arrayBuffer())
+  const entries = tags(bytes)
+  const end = entries.find(tag => tag.type === 9 && tag.packetType === 2)!
+  const first = entries.find(tag => tag.type === 9 && tag.packetType === 1)!
+  const input = new Blob([
+    bytes,
+    bytes.subarray(first.offset, first.offset + 11 + first.size + 4),
+  ])
+  const target = memoryTarget()
+
+  expect(end.offset + 11 + end.size + 4).toBe(bytes.length)
+  await expect(
+    remuxMedia(input, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  expect(target.state.writes).toEqual([])
+})
+
 test('copies MP3 frames and H.264 B frames with their shared FLV timing', async () => {
   const flv = await fixture('progressive-mp3.flv')
   const bytes = Buffer.from(await flv.arrayBuffer())

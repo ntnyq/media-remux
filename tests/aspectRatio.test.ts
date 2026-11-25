@@ -2,6 +2,32 @@ import { expect, test } from 'vitest'
 import { concatMedia, remuxMedia } from '../src'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
 
+test('preserves a 32-bit pixel aspect ratio with large coprime coded dimensions', async () => {
+  const original = await fixture('video.mp4')
+  const bytes = Buffer.from(await original.arrayBuffer())
+  const sampleEntry = bytes.indexOf('avc1', bytes.indexOf('stsd'))
+  const pasp = bytes.indexOf('pasp', sampleEntry)
+  const target = memoryTarget()
+  const numerator = 4_294_967_291
+  const denominator = 4_294_967_279
+
+  expect(sampleEntry).toBeGreaterThan(0)
+  expect(pasp).toBeGreaterThan(sampleEntry)
+  bytes.writeUInt16BE(4095, sampleEntry + 28)
+  bytes.writeUInt16BE(2047, sampleEntry + 30)
+  bytes.writeUInt32BE(numerator, pasp + 4)
+  bytes.writeUInt32BE(denominator, pasp + 8)
+
+  await remuxMedia(new Blob([bytes]), {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+  await expect(readPixelAspectRatio(target.blob())).resolves.toStrictEqual([
+    numerator,
+    denominator,
+  ])
+})
+
 /**
  * Reads the exact pixel aspect ratio signaled by an MP4 pasp box.
  *

@@ -14,3 +14,7 @@ The included sources are a declaration-level dependency subset for MP4 encoded-p
 Original code outside the vendor directory is licensed under the repository's MIT license. Distribution includes both licenses; package metadata states `MIT AND MPL-2.0`.
 
 The FLV reader is an original implementation following the [Adobe Flash Video File Format Specification 10.1](https://rtmp.veriskope.com/pdf/video_file_format_spec_v10_1.pdf). No mpegts.js or FFmpeg implementation code or binaries are included. FFmpeg is an optional, independently installed test verifier.
+
+## @ntnyq/utils
+
+The distribution bundles the `isFunction`, `isNumber`, and `isString` guards from [@ntnyq/utils](https://github.com/ntnyq/utils). Copyright (c) 2024-PRESENT ntnyq <https://github.com/ntnyq>. The guards are distributed under the MIT license printed in `LICENSE`.

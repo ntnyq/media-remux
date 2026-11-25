@@ -271,13 +271,20 @@ test('limits read allocations and validates track IDs before opening files', asy
     await store.dispose()
   }
 
-  for (const track of [0, -1, 2 ** 32, 1.5]) {
-    const backing = files()
-    const store = createDiskFragmentIndex(backing.open)
+  for (const action of ['append', 'reset'] as const) {
+    for (const track of [0, -1, 2 ** 32, 1.5]) {
+      const backing = files()
+      const store = createDiskFragmentIndex(backing.open)
 
-    await assert.rejects(store.append(track, Uint8Array.of(1)), RangeError)
-    assert.equal(backing.records.size, 0)
-    await store.dispose()
+      await assert.rejects(
+        action === 'append'
+          ? store.append(track, Uint8Array.of(1))
+          : store.reset(track),
+        RangeError,
+      )
+      assert.equal(backing.records.size, 0)
+      await store.dispose()
+    }
   }
 })
 

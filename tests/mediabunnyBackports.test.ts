@@ -41,6 +41,67 @@ function boxPayloads(bytes: Buffer, type: string) {
   return payloads
 }
 
+test('rejects external MP4 sample data only when its track is selected', async () => {
+  // The movie metadata follows mdat so changing the data reference keeps all
+  // local chunk offsets intact. The first track in this fixture is video.
+  const source = await fixture('fractional-av.mp4')
+  const bytes = Buffer.from(await source.arrayBuffer())
+  const location = Buffer.from('separate-media.mp4\0')
+  const ancestors: Buffer[] = []
+  let parent: Buffer = bytes
+
+  for (const type of ['moov', 'trak', 'mdia', 'minf', 'dinf', 'dref']) {
+    const [payload] = boxPayloads(parent, type)
+
+    assert.ok(payload)
+    ancestors.push(payload)
+    parent = payload
+  }
+
+  const entry = parent.subarray(8)
+
+  expect(entry.length).toBe(12)
+  expect(entry.toString('ascii', 4, 8)).toBe('url ')
+  entry.writeUInt32BE(entry.length + location.length, 0)
+  entry.writeUInt32BE(0, 8) // URL refers to a separate file.
+
+  for (const payload of ancestors) {
+    bytes.writeUInt32BE(
+      payload.length + 8 + location.length,
+      payload.byteOffset - bytes.byteOffset - 8,
+    )
+  }
+
+  const end = entry.byteOffset - bytes.byteOffset + entry.length
+  const input = new Blob([
+    bytes.subarray(0, end),
+    location,
+    bytes.subarray(end),
+  ])
+  const target = memoryTarget()
+
+  await expect(
+    remuxMedia(input, {
+      storage: await diskStorage(),
+      writable: target.writable,
+    }),
+  ).rejects.toMatchObject({ code: 'UNSUPPORTED_MEDIA_FEATURE' })
+  expect(target.state.writes).toEqual([])
+
+  await remuxMedia(input, {
+    tracks: 'audio',
+    storage: await diskStorage(),
+    writable: target.writable,
+  })
+  expect(
+    (await packets(target.blob(), 'audio')).map(packet => packet.data),
+  ).toEqual(
+    (await packets(source, 'audio', { applyAudioEdit: true })).map(
+      packet => packet.data,
+    ),
+  )
+})
+
 test.each(['free', 'skip', 'wide'])(
   'remuxes MP4 with %s padding and no ftyp without moving sample offsets',
   async padding => {

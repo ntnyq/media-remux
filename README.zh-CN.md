@@ -340,7 +340,7 @@ function createDiskFragmentSamples(
 ): FragmentSampleStore & { dispose: () => Promise<void> }
 ```
 
-`open` 必填，必须为每个 `(trackId, kind)` 组合返回独立的按位置读写文件。轨道 ID 为 `1…0xffffffff` 范围内的整数。每条轨道按需打开四类文件，适配器会将它们截断为零：`records` 存放描述符，`media` 存放编码媒体数据，`sort-a` / `sort-b` 用于外部排序。
+`open` 必填，必须为每个 `(trackId, kind)` 组合返回独立的按位置读写文件。轨道 ID 为 `1…0xffffffff` 范围内的整数。轨道首次使用时打开 `records` 和 `media`，需要外部排序时才打开 `sort-a` 和 `sort-b`。适配器在打开每个文件时将其截断为零。
 
 | `FragmentSampleFile` 方法 | 返回类型                    | 约定                                                                 |
 | ------------------------- | --------------------------- | -------------------------------------------------------------------- |
@@ -367,7 +367,7 @@ function createDiskFragmentSamples(
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `append(trackId, sample, data)`      | `sample` 不含 `mediaOffset`，`data` 为 `Uint8Array`。返回从零开始的轨道内采样 ID，持续递增，释放后不复用。                                              |
 | `get(trackId, id)`                   | 返回尚未释放采样的 `FragmentSample` 描述符。                                                                                                            |
-| `set(trackId, id, sample)`           | 更新描述符，不重写媒体数据；必须保留有效的媒体大小和偏移引用。磁盘存储会忽略已释放的 ID。                                                               |
+| `set(trackId, id, sample)`           | 更新描述符，不重写媒体数据；必须保留原始载荷大小和偏移。磁盘存储会忽略已释放的 ID。                                                                     |
 | `sort(trackId, start, count)`        | 为保留范围准备升序 PTS，`count` 为正整数。替换上次排序结果，不改变采样 ID 或解码顺序。                                                                  |
 | `sorted(trackId, index)`             | 按从零开始的位置读取最近排序结果中的时间戳，单位为秒。                                                                                                  |
 | `readMedia(trackId, offset, length)` | 按逻辑字节偏移读取尚未释放的媒体数据，`length` 为 `0…65536`，返回恰好该长度的字节。                                                                     |
@@ -400,7 +400,7 @@ I/O、配额、取消、回调和 Worker 运行故障保留原有的错误处理
 <summary>轨道限制、片段兼容性和时间戳处理规则</summary>
 
 - 重新封装和拼接默认使用主轨道，也可以通过 `tracks` 按文件顺序选轨。合并操作从第一个输入中选择主视频，从第二个输入中选择主音轨。
-- MP4 支持 H.264、HEVC（`hvc1` 和 `hev1`）、AV1（`av01`）、AAC、MP3 和 AC-3（`ac-3`）。FLV 支持标准 AVC、每帧 960/1024 个采样的 AAC-LC，以及帧完整且码率由帧头声明的 MP3。HE-AAC/SBR（含隐式声明）、不支持或已加密的 FLV 标签以及轨道解码配置发生变化的 FLV 都会被拒绝。所选 MP4 轨道必须只有一个采样描述。
+- MP4 支持 H.264、HEVC（`hvc1` 和 `hev1`）、AV1（`av01`）、AAC、MP3 和 AC-3（`ac-3`）。FLV 支持标准 AVC、每帧 960/1024 个采样的 AAC-LC，以及帧完整且码率由帧头声明的 MP3。HE-AAC/SBR（含隐式声明）、不支持或已加密的 FLV 标签以及轨道解码配置发生变化的 FLV 都会被拒绝。所选 MP4 轨道必须只有一个采样描述，且对应的媒体数据必须位于输入文件中。
 - MKV 支持单个 Matroska Segment，所选轨道为 H.264 和／或 AAC-LC，且包含标准 `CodecPrivate`。支持 AAC lacing。所选轨道的内容编码、旧式轨道偏移、视频 lacing、容器级裁剪、块附加数据、解码配置变化及非零 `DiscardPadding` 会在预检时被拒绝。
 - AC-3 音轨需要有效的 `dac3` box，其内容会原样写入输出。浏览器需要支持 AC-3 解码。5.1 声道样本已在 macOS 的 Safari 27.0.1 中实测有声播放。
 - Chrome 可以通过 `<video src>` 直接播放 H.264/MP3 MP4 文件。MP4 中 MP3 音轨的支持取决于浏览器和播放 API。

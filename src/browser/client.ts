@@ -139,7 +139,8 @@ export async function runMediaJob(
   const submittedJob = captureJob(job)
 
   const directory =
-    settings.directory ?? (await globalThis.navigator?.storage?.getDirectory())
+    settings.directory ??
+    (await globalThis.navigator?.storage?.getDirectory?.())
 
   if (!directory) {
     throw new Error(
@@ -317,7 +318,7 @@ export async function runMediaJob(
         void (async () => {
           const path = settings.directory
             ? await (
-                await globalThis.navigator?.storage?.getDirectory()
+                await globalThis.navigator?.storage?.getDirectory?.()
               )?.resolve(temporary)
             : [name]
 

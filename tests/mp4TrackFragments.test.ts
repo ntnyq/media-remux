@@ -8,6 +8,59 @@ import { CustomSource } from './helpers/CustomSource'
 import { diskStorage, fixture, memoryTarget } from './helpers/media'
 import { fragmentedMp4 } from './helpers/mp4Fragments'
 
+test('rejects a partial child box header at the end of a moof', async () => {
+  const fragmented = await fragmentedMp4({ fragments: 3, indexed: false })
+  const bytes = Buffer.from(await fragmented.blob().arrayBuffer())
+  const moof = fragmented.fragmentOffset(1, 2)
+  const size = bytes.readUInt32BE(moof)
+  const end = moof + size
+  const trun = bytes.indexOf('trun', moof)
+  const target = memoryTarget()
+
+  bytes.writeUInt32BE(size + 4, moof)
+  bytes.writeInt32BE(bytes.readInt32BE(trun + 12) + 4, trun + 12)
+  const malformed = new Blob([
+    bytes.subarray(0, end),
+    Uint8Array.of(0, 0, 0, 8),
+    bytes.subarray(end),
+  ])
+
+  await expect(
+    remuxMedia(malformed, {
+      writable: target.writable,
+      storage: await diskStorage(),
+    }),
+  ).rejects.toMatchObject({
+    code: 'INVALID_INPUT',
+    message: 'Truncated nested MP4 box header.',
+  })
+  expect(target.state.writes).toHaveLength(0)
+})
+
+test.each([0, 2])(
+  'rejects an invalid MP4 fragment description index %s before writing output',
+  async index => {
+    const fragmented = await fragmentedMp4({ fragments: 3 })
+    const bytes = Buffer.from(await fragmented.blob().arrayBuffer())
+    const trex = bytes.indexOf('trex')
+    const target = memoryTarget()
+
+    expect(bytes.readUInt32BE(trex + 12)).toBe(1)
+    bytes.writeUInt32BE(index, trex + 12)
+
+    await expect(
+      remuxMedia(new Blob([bytes]), {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_INPUT',
+      message: expect.stringContaining('fragment sample description'),
+    })
+    expect(target.state.writes).toHaveLength(0)
+  },
+)
+
 test.each([true, false])(
   'rejects repeated track fragments in a later moof before writing output (tfdt: %s)',
   async tfdt => {

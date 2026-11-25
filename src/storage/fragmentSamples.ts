@@ -81,8 +81,7 @@ export interface FragmentSampleStore {
    *
    * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
    * @param id - Track-local logical sample ID to update.
-   * @param sample - Updated descriptor; payload offsets and sizes must still
-   * refer to the existing encoded media.
+   * @param sample - Updated descriptor with the original payload offset and size.
    * @returns Nothing, or a promise resolving when the descriptor update completes.
    */
   set: (
@@ -673,11 +672,21 @@ export function createDiskFragmentSamples(
    * @param track - Track owning the descriptor cache.
    * @param id - Logical sample ID to update.
    * @param sample - Valid replacement descriptor; payload bytes are not rewritten.
+   * @param isNew - Whether this descriptor belongs to a newly appended sample.
    * @returns A promise resolving after the page is updated and marked dirty, or
    * immediately when the ID was already released.
    * @throws If the retained reference, sample fields, or page I/O are invalid.
    */
-  async function set(track: Track, id: number, sample: FragmentSample) {
+  async function set(
+    track: Track,
+    id: number,
+    sample: FragmentSample,
+    isNew = false,
+  ) {
+    if (!isNonnegativeSafeInteger(id)) {
+      throw new RangeError('Invalid sample storage reference.')
+    }
+
     // A later GOP can refine the previous last duration after its fragment was
     // already emitted. That old mutation must not resurrect a released record.
     if (id < track.base) {
@@ -687,6 +696,14 @@ export function createDiskFragmentSamples(
     assertValidSample(sample)
     const page = await getSamplePage(track, id)
     const view = getSampleView(track, page, id)
+
+    if (
+      !isNew &&
+      (sample.size !== view.getFloat64(24) ||
+        sample.mediaOffset !== view.getFloat64(40))
+    ) {
+      throw new RangeError('Cannot change the stored sample payload range.')
+    }
 
     view.setFloat64(0, sample.timestamp)
     view.setFloat64(8, sample.decodeTimestamp)
@@ -800,7 +817,7 @@ export function createDiskFragmentSamples(
         track.mediaEnd += data.length
         const id = track.end++
 
-        await set(track, id, record)
+        await set(track, id, record, true)
 
         return id
       })
@@ -848,6 +865,7 @@ export function createDiskFragmentSamples(
         const track = await getTrack(trackId)
 
         if (
+          !Number.isSafeInteger(start) ||
           !Number.isSafeInteger(count) ||
           count < 1 ||
           start < track.base ||

@@ -42,6 +42,8 @@ type InternalTrack = {
     name: string | null;
     languageCode: string;
     sampleTableByteOffset: number | null; // null when the track's sample table is another file (ominous ik 👀)
+    sampleDescriptionRange: { start: number; end: number } | null;
+    dataReferenceRange: { start: number; end: number } | null;
     sampleTable: SampleTable | null;
     fragmentLookupTable: FragmentLookupTable | null;
     currentFragmentState: FragmentTrackState | null;
@@ -208,7 +210,7 @@ type SampleEncryptionAuxInfo = {
 };
 // Anything beyond this is malicious
 const MAX_BOX_NESTING_DEPTH = 64;
-const MOVIE_LEAF_BOXES = new Set(['mdia', 'minf', 'dinf', 'mfra', 'edts', 'sinf', 'schi', 'mvhd', 'trak', 'tkhd', 'elst', 'mdhd', 'hdlr', 'stbl', 'stsd', 'frma', 'schm', 'tenc', 'avcC', 'hvcC', 'vpcC', 'av1C', 'colr', 'pasp', 'btrt', 'wave', 'esds', 'enda', 'pcmC', 'dOps', 'dfLa', 'dac3', 'dec3', 'ddts', 'stts', 'ctts', 'stsz', 'stz2', 'stss', 'stsc', 'stco', 'co64', 'mvex', 'mehd', 'trex', 'tfra', 'moof', 'traf', 'pssh', 'tfhd', 'tfdt', 'trun', 'saiz', 'saio', 'senc', 'udta', 'meta', 'keys', 'ilst']);
+const MOVIE_LEAF_BOXES = new Set(['mdia', 'minf', 'dinf', 'mfra', 'edts', 'sinf', 'schi', 'mvhd', 'trak', 'tkhd', 'elst', 'mdhd', 'hdlr', 'stbl', 'frma', 'schm', 'tenc', 'avcC', 'hvcC', 'vpcC', 'av1C', 'colr', 'pasp', 'btrt', 'wave', 'esds', 'enda', 'pcmC', 'dOps', 'dfLa', 'dac3', 'dec3', 'ddts', 'stts', 'ctts', 'stsz', 'stz2', 'stss', 'stsc', 'stco', 'co64', 'mvex', 'mehd', 'trex', 'tfra', 'moof', 'traf', 'pssh', 'tfhd', 'tfdt', 'trun', 'saiz', 'saio', 'senc', 'udta', 'meta', 'keys', 'ilst']);
 const MAX_FRAGMENT_CACHE_ENTRIES = 128;
 const FRAGMENT_INDEX_PAGE_SIZE = 16 * 1024;
 const MAX_FRAGMENT_INDEX_PAGES = 4;
@@ -329,6 +331,8 @@ export class IsobmffDemuxer extends Demuxer {
                         throw new InvalidIsobmffInputError('Invalid moov box: missing mvhd box.');
                     }
                     for (const track of this.tracks) {
+                        // Header boxes can appear after the tracks that depend on them.
+                        track.matrix = multiplyMatrices(track.matrix, this.movieMatrix);
                         // Modify the edit list offset based on the previous segment durations. They are in different
                         // timescales, so we first convert to seconds and then into the track timescale.
                         const previousSegmentDurationsInSeconds = track.editListPreviousSegmentDurations / this.movieTimescale;
@@ -414,6 +418,8 @@ export class IsobmffDemuxer extends Demuxer {
                 name: foreignTrack.name,
                 languageCode: foreignTrack.languageCode,
                 sampleTableByteOffset: null,
+                sampleDescriptionRange: null,
+                dataReferenceRange: null,
                 sampleTable: null,
                 fragmentLookupTable: null,
                 currentFragmentState: null,
@@ -644,18 +650,57 @@ export class IsobmffDemuxer extends Demuxer {
             throw new InvalidIsobmffInputError('Truncated movie box payload.');
         return slice;
     }
+    private async getDataReferenceError(track: InternalTrack, index: number) {
+        const invalid = () => new InvalidIsobmffInputError('Invalid MP4 sample data reference.');
+        const range = track.dataReferenceRange;
+        if (!range) {
+            // Some inputs omit dref and use the implicit local reference.
+            return index === 1 ? null : invalid();
+        }
+        if (index === 0 || range.end - range.start < 8) {
+            return invalid();
+        }
+        const table = await this.readMovieSlice(range.start, range.end, 8);
+        table.skip(4); // Version and flags
+        if (index > readU32Be(table)) {
+            return invalid();
+        }
+
+        // Only the chosen sample description's reference is used. Page over
+        // entry headers without reading an external location or its contents.
+        let position = table.filePos;
+        for (let entry = 1; entry <= index; entry++) {
+            if (range.end - position < MIN_BOX_HEADER_SIZE) {
+                return invalid();
+            }
+            const header = await this.readMovieSlice(position, range.end, MAX_BOX_HEADER_SIZE);
+            const info = readBoxHeader(header);
+            if (!info || info.contentSize < 4 || info.totalSize > range.end - position) {
+                return invalid();
+            }
+            if (entry === index) {
+                const flags = await this.readMovieSlice(header.filePos, range.end, 4);
+                return (readU32Be(flags) & 1) === 1 ? null
+                    : new UnsupportedIsobmffInputError('External MP4 sample data references are unsupported.');
+            }
+            position += info.totalSize;
+        }
+        return invalid();
+    }
     async readContiguousBoxes(slice: FileSlice, fromFile = false) {
         if (this.boxNestingDepth === MAX_BOX_NESTING_DEPTH) {
             throw new InvalidIsobmffInputError('Invalid file: boxes are nested too deeply.');
         }
-        const startIndex = slice.filePos;
         this.boxNestingDepth++;
         try {
-            while (slice.filePos - startIndex <= slice.length - MIN_BOX_HEADER_SIZE) {
+            while (slice.remainingLength >= MIN_BOX_HEADER_SIZE) {
                 const foundBox = await this.traverseBox(slice, fromFile);
                 if (!foundBox) {
                     break;
                 }
+            }
+            if (fromFile && slice.remainingLength > 0) {
+                throw new InvalidIsobmffInputError('Truncated nested MP4 box header.');
             }
         }
         finally {
@@ -713,6 +758,30 @@ export class IsobmffDemuxer extends Demuxer {
             else if (tables.includes(boxInfo.name)) {
                 if (this.currentTrack?.sampleTable) {
                     await this.currentTrack.sampleTable.addBox(boxInfo.name, contentStartPos, boxEndPos);
+                }
+                containerSlice.filePos = boxEndPos;
+                return true;
+            }
+            else if (boxInfo.name === 'stsd') {
+                // The handler and time scale determine how to parse the description.
+                // A later sample-table pass only needs the sample timing and locations.
+                const track = this.currentTrack;
+                if (track && !track.sampleTable) {
+                    if (track.sampleDescriptionRange) {
+                        throw new InvalidIsobmffInputError('Duplicate MP4 sample description box.');
+                    }
+                    track.sampleDescriptionRange = { start: startPos, end: boxEndPos };
+                }
+                containerSlice.filePos = boxEndPos;
+                return true;
+            }
+            else if (boxInfo.name === 'dref') {
+                const track = this.currentTrack;
+                if (track && !track.sampleTable) {
+                    if (track.dataReferenceRange) {
+                        track.trackValidationError ??= new InvalidIsobmffInputError('Duplicate MP4 data reference box.');
+                    }
+                    track.dataReferenceRange = { start: contentStartPos, end: boxEndPos };
                 }
                 containerSlice.filePos = boxEndPos;
                 return true;
@@ -783,6 +852,8 @@ export class IsobmffDemuxer extends Demuxer {
                         name: null,
                         languageCode: UNDETERMINED_LANGUAGE,
                         sampleTableByteOffset: -1,
+                        sampleDescriptionRange: null,
+                        dataReferenceRange: null,
                         sampleTable: null,
                         fragmentLookupTable: null,
                         currentFragmentState: null,
@@ -804,6 +875,12 @@ export class IsobmffDemuxer extends Demuxer {
                         && track.timescale !== -1
                         && track.info !== null
                         && track.sampleTableByteOffset !== -1) {
+                        const description = track.sampleDescriptionRange;
+                        if (description) {
+                            const { start, end } = description;
+                            await this.traverseBox(await this.readMovieSlice(start, end, end - start));
+                            track.sampleDescriptionRange = null;
+                        }
                         if (track.info.type === 'video' && track.info.width !== -1) {
                             const videoTrack = track as InternalVideoTrack;
                             track.trackBacking = new IsobmffVideoTrackBacking(videoTrack);
@@ -850,9 +927,7 @@ export class IsobmffDemuxer extends Demuxer {
                         throw new UnsupportedIsobmffInputError(`Incorrect track header version ${version}.`);
                     }
                     slice.skip(2 * 4 + 2 + 2 + 2 + 2);
-                    const trackMatrix = readMatrix(slice);
-                    // The track matrix maps into movie space, and the movie matrix then maps into the final output space
-                    track.matrix = multiplyMatrices(trackMatrix, this.movieMatrix);
+                    track.matrix = readMatrix(slice);
                 }
                 ;
                 break;
@@ -1022,8 +1097,14 @@ export class IsobmffDemuxer extends Demuxer {
                         }
                         track.internalCodecId = sampleBoxInfo.name;
                         const lowercaseBoxName = sampleBoxInfo.name.toLowerCase();
+                        if (sampleBoxInfo.contentSize < 8) {
+                            throw new InvalidIsobmffInputError('Truncated MP4 sample entry.');
+                        }
+                        slice.skip(6); // Reserved
+                        const dataReferenceIndex = readU16Be(slice);
+                        track.trackValidationError ??= await this.getDataReferenceError(track, dataReferenceIndex);
                         if (track.info.type === 'video') {
-                            slice.skip(6 * 1 + 2 + 2 + 2 + 3 * 4);
+                            slice.skip(2 + 2 + 3 * 4);
                             track.info.width = readU16Be(slice);
                             track.info.height = readU16Be(slice);
                             track.info.squarePixelWidth = track.info.width;
@@ -1064,7 +1145,6 @@ export class IsobmffDemuxer extends Demuxer {
                             }
                         }
                         else {
-                            slice.skip(6 * 1 + 2);
                             const version = readU16Be(slice);
                             slice.skip(3 * 2);
                             let channelCount = readU16Be(slice);
@@ -4145,6 +4225,9 @@ class FragmentSampleTable {
     }
     get(index: number, encrypted = true) {
         return this.run(async () => {
+            if (this.defaults.sampleDescriptionIndex !== null && this.defaults.sampleDescriptionIndex !== 1) {
+                throw new InvalidIsobmffInputError('Invalid MP4 fragment sample description index.');
+            }
             const raw = await this.readRaw(index);
             return {
                 ...raw,
@@ -4165,6 +4248,7 @@ class SampleTable {
     private timing: SampleTableRuns | null = null;
     private composition: SampleTableRuns | null = null;
     private chunks: SampleTableRuns | null = null;
+    private hasInvalidSampleDescriptionIndex = false;
     private minOffset = 0;
     private maxOffset = 0;
     private firstChunk = 0;
@@ -4271,10 +4355,11 @@ class SampleTable {
         if (box.name === 'stsc') {
             chunk = row[0]! - 1;
             const next = entry + 1 < box.count ? (await this.row(box, entry + 1))[0]! - 1 : Infinity;
-            if (chunk < 0 || next <= chunk || value === 0 || row[2] === 0) {
+            if (chunk < 0 || next <= chunk || value === 0) {
                 throw new InvalidIsobmffInputError('Invalid stsc sample table.');
             }
             count = Math.max(0, Math.min(next, this.boxes.get('stco')?.count ?? 0) - chunk) * value;
+            this.hasInvalidSampleDescriptionIndex ||= count > 0 && row[2] !== 1;
         }
         if (!Number.isSafeInteger(start + count) || !Number.isSafeInteger(box.name === 'stts' ? time + count * value : time)) {
             throw new InvalidIsobmffInputError(`Unsafe ${box.name} sample table prefix.`);
@@ -4474,6 +4559,9 @@ class SampleTable {
     async getSampleInfo(index: number) {
         if (index < 0 || index >= this.sampleCount)
             return null;
+        if (this.hasInvalidSampleDescriptionIndex) {
+            throw new InvalidIsobmffInputError('Invalid MP4 chunk sample description index.');
+        }
         let rawIndex = index;
         let run: SampleTableRun;
         let chunk: number;

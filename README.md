@@ -340,7 +340,7 @@ function createDiskFragmentSamples(
 ): FragmentSampleStore & { dispose: () => Promise<void> }
 ```
 
-`open` is required and must return a distinct positional file for each `(trackId, kind)` pair. Track IDs are integers in `1…0xffffffff`. Each track lazily opens all four kinds and the adapter truncates them to zero: `records` holds descriptors, `media` holds encoded payload, and `sort-a`/`sort-b` are external-sort scratch files.
+`open` is required and must return a distinct positional file for each `(trackId, kind)` pair. Track IDs are integers in `1…0xffffffff`. A track opens `records` and `media` when first used, and opens `sort-a` and `sort-b` only when it needs external sorting. The adapter truncates each file to zero when it opens it.
 
 | `FragmentSampleFile` method | Return type                 | Contract                                                                                        |
 | --------------------------- | --------------------------- | ----------------------------------------------------------------------------------------------- |
@@ -367,7 +367,7 @@ Partial reads/writes are retried; a nonempty operation must make positive progre
 | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `append(trackId, sample, data)`      | `sample` omits `mediaOffset`; `data` is a `Uint8Array`. Returns a track-local sample ID starting at zero; IDs increase and are not reused after release.                                                                                              |
 | `get(trackId, id)`                   | Return a retained sample's `FragmentSample` descriptor.                                                                                                                                                                                               |
-| `set(trackId, id, sample)`           | Update the descriptor without rewriting payload. Keep payload size/offset references valid. Released IDs are ignored by disk stores.                                                                                                                  |
+| `set(trackId, id, sample)`           | Update the descriptor without rewriting payload. Keep the original payload size and offset. Released IDs are ignored by disk stores.                                                                                                                  |
 | `sort(trackId, start, count)`        | Prepare ascending PTS for a retained sample range; `count` is a positive integer. Replaces previous sort results without changing sample IDs or decode order.                                                                                         |
 | `sorted(trackId, index)`             | Return the timestamp in seconds at a zero-based position in the latest sort result.                                                                                                                                                                   |
 | `readMedia(trackId, offset, length)` | Read retained payload at a logical byte offset; `length` is `0…65536`. Return exactly that many bytes.                                                                                                                                                |
@@ -400,7 +400,7 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 <summary>Track limits, segment compatibility, and timestamp rules</summary>
 
 - Remux and concat use primary tracks by default and offer file-order selection through `tracks`. Combine selects the primary video from the first input and the primary audio from the second.
-- MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), AAC, MP3, and AC-3 (`ac-3`). FLV supports standard AVC, AAC-LC with 960/1024-sample frames, and MP3 with complete Layer III frames at a signaled bitrate. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and mid-stream decoder configuration changes are rejected. A selected MP4 track must have a single sample description.
+- MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), AAC, MP3, and AC-3 (`ac-3`). FLV supports standard AVC, AAC-LC with 960/1024-sample frames, and MP3 with complete Layer III frames at a signaled bitrate. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and mid-stream decoder configuration changes are rejected. A selected MP4 track must have a single sample description and use media stored in the input file.
 - MKV accepts one Matroska segment with selected H.264 and/or AAC-LC tracks and standard `CodecPrivate`. AAC lacing is supported. Selected tracks with content encodings or legacy offsets, laced video, video cropping, and blocks with codec changes, additions, or nonzero discard padding are rejected.
 - AC-3 tracks require a valid `dac3` box, whose payload is copied to the output. Playback requires a browser with AC-3 decoding support. A 5.1-channel sample played with audio in Safari 27.0.1 on macOS.
 - Chrome supports direct `<video src>` playback of H.264/MP3 MP4 files. MP3 support in MP4 varies by browser and playback API.

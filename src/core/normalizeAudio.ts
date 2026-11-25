@@ -271,7 +271,7 @@ export async function normalizeAudio(
   store: RemuxStorage['fragmentSamples'],
   signal?: AbortSignal,
 ) {
-  await checkAacEncoder()
+  await checkAacEncoder(signal)
   const end = Math.round(duration * AAC_SAMPLE_RATE)
 
   if (!Number.isSafeInteger(end) || end < 1) {

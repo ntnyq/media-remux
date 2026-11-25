@@ -379,6 +379,9 @@ export class IsobmffMuxer extends Muxer {
         const decoderConfig = { ...meta.decoderConfig };
         assert(decoderConfig.codedWidth !== undefined);
         assert(decoderConfig.codedHeight !== undefined);
+        if (decoderConfig.codedWidth > 0xffff || decoderConfig.codedHeight > 0xffff) {
+            throw new RangeError('Video dimensions exceed the MP4 sample entry field range.');
+        }
         let requiresAnnexBTransformation = false;
         if (track.source._codec === 'avc' && !decoderConfig.description) {
             // ISOBMFF can only hold AVC in the AVCC format, not in Annex B, but the missing description indicates
@@ -418,12 +421,18 @@ export class IsobmffMuxer extends Muxer {
         const timescale = computeRationalApproximation(1 / (track.metadata.frameRate ?? GLOBAL_TIMESCALE), 1e6).den;
         const displayAspectWidth = decoderConfig.displayAspectWidth;
         const displayAspectHeight = decoderConfig.displayAspectHeight;
-        const pixelAspectRatio = displayAspectWidth === undefined || displayAspectHeight === undefined
-            ? { num: 1, den: 1 }
-            : simplifyRational({
-                num: displayAspectWidth * decoderConfig.codedHeight,
-                den: displayAspectHeight * decoderConfig.codedWidth,
-            });
+        let pixelAspectRatio = { num: 1, den: 1 };
+        if (displayAspectWidth !== undefined && displayAspectHeight !== undefined) {
+            const display = simplifyRational({ num: displayAspectWidth, den: displayAspectHeight });
+            const coded = simplifyRational({ num: decoderConfig.codedWidth, den: decoderConfig.codedHeight });
+            // Cancel common factors before multiplication so a valid pasp survives large coded dimensions.
+            const horizontal = simplifyRational({ num: display.num, den: coded.num });
+            const vertical = simplifyRational({ num: coded.den, den: display.den });
+            pixelAspectRatio = { num: horizontal.num * vertical.num, den: horizontal.den * vertical.den };
+            if (pixelAspectRatio.num > 0xffffffff || pixelAspectRatio.den > 0xffffffff) {
+                throw new RangeError('Pixel aspect ratio exceeds the MP4 pasp field range.');
+            }
+        }
         // Kicks for ProRes 4444.
         const hasAlphaChannel = decoderConfig.codec === 'ap4h' || decoderConfig.codec === 'ap4x';
         const decodeStart = this.formatOptions._fragmentTrackTimings?.get(track.id)?.decodeStart;

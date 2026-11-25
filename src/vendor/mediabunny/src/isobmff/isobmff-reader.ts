@@ -18,6 +18,8 @@ export const readBoxHeader = (slice: FileSlice, fileEnd: number | null = null) =
     let headerSize = 8;
     const hasLargeSize = totalSize === 1;
     if (hasLargeSize) {
+        if (slice.remainingLength < 8)
+            return null;
         totalSize = readU64Be(slice);
         headerSize = 16;
     }
