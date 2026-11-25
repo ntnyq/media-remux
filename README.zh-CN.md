@@ -5,7 +5,7 @@
 [![NPM DOWNLOADS](https://img.shields.io/npm/dy/media-remux.svg)](https://www.npmjs.com/package/media-remux)
 [![LICENSE](https://img.shields.io/github/license/ntnyq/media-remux.svg)](https://github.com/ntnyq/media-remux/blob/main/LICENSE)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [使用文档](https://github.com/ntnyq/media-remux/tree/main/docs/zh)
 
 以磁盘为后端的浏览器媒体处理工具，支持重新封装、音视频轨道合并和媒体片段拼接。默认直接复制编码包。项目内置所需的 Mediabunny 源码子集及补丁，没有运行时依赖。
 

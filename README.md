@@ -5,7 +5,7 @@
 [![NPM DOWNLOADS](https://img.shields.io/npm/dy/media-remux.svg)](https://www.npmjs.com/package/media-remux)
 [![LICENSE](https://img.shields.io/github/license/ntnyq/media-remux.svg)](https://github.com/ntnyq/media-remux/blob/main/LICENSE)
 
-[English](./README.md) | [简体中文](./README.zh-CN.md)
+[English](./README.md) | [简体中文](./README.zh-CN.md) | [Documentation](https://github.com/ntnyq/media-remux/tree/main/docs)
 
 Disk-backed browser media remuxing, track combining, and segment concatenation. The default mode copies encoded packets. The patched Mediabunny source subset is included directly, with no runtime dependencies.
 

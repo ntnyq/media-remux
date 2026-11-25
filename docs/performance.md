@@ -1,5 +1,9 @@
 # Browser performance baseline
 
+English · [简体中文](./zh/performance.md)
+
+[Documentation](./README.md) · [Media compatibility](./compatibility.md)
+
 Measured 2026-10-30 on an Apple M1 Pro (10 logical cores, 16 GiB RAM), headless Chromium 151.0.0.0. These are local development measurements, not a cross-device guarantee.
 
 Each case ran serially three times through `runMediaJob`, with both input and output backed by OPFS. The timer includes Worker startup, metadata inspection, packet copying, sorting, output finalization, and spool cleanup. Fetching/staging inputs and deleting the retained output are excluded. Files and browser modules were warm in the operating-system/browser caches; this does not measure cold-storage bandwidth or physical durable-write latency. Peak Worker/process memory was not measured.
