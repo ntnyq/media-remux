@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'vitest'
 import { createDiskFragmentIndex } from '../src/storage/fragmentIndex'
-import type { FragmentIndexFile } from '../src/storage/fragmentIndex'
+import type { FragmentIndexFile } from '../src/types'
 
 interface FileRecord {
   bytes: Uint8Array<ArrayBuffer>

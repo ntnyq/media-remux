@@ -1,6 +1,5 @@
 /* oxlint-disable no-await-in-loop -- FLV tags are read in file order with bounded memory. */
 
-import { checkAbort } from '../../abort'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_CODEC,
@@ -8,39 +7,22 @@ import {
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
 } from '../../constants'
-import { createRemuxError } from '../../errors'
-import type { RemuxTrackSelection } from '../../types'
-import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
+import type {
+  RemuxTrackSelection,
+  FlvTag,
+  FlvTrackFormat,
+  MediaInput,
+  PacketTrack,
+} from '../../types'
 import {
   aacFrameSamples,
   aacLcDecoderConfig,
   avcDecoderConfig,
-} from './codecConfig'
-import type { MediaInput, PacketTrack } from './mediaInput'
-import { parseMp3FrameHeader } from './mp3Frame'
-import type { Mp3FrameHeader } from './mp3Frame'
-
-interface FlvTag {
-  kind: PacketTrack['kind']
-  timestamp: number
-  compositionTime: number
-  packetType: number
-  isKey: boolean
-  data: Uint8Array<ArrayBuffer>
-  size: number
-  mp3?: Mp3FrameHeader
-}
-
-type FlvTrackFormat =
-  | {
-      codec: typeof MEDIA_CODEC.avc | typeof MEDIA_CODEC.aac
-      description: Uint8Array<ArrayBuffer>
-    }
-  | {
-      codec: typeof MEDIA_CODEC.mp3
-      sampleRate: number
-      numberOfChannels: number
-    }
+  checkAbort,
+  createRemuxError,
+  parseMp3FrameHeader,
+} from '../../utils'
+import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 
 /**
  * Reads an exact FLV byte range with cancellation checks around the Blob read.
@@ -100,7 +82,12 @@ function uint24(bytes: Uint8Array, offset: number): number {
  * Splits a legacy FLV MP3 payload into whole frames. Only frame headers are
  * read during preflight. A tag timestamps its first frame.
  *
+ * @param blob - Source FLV Blob containing the tag payload.
+ * @param tag - Payload byte range and first frame timestamp in seconds.
+ * @param metadataOnly - Whether to omit encoded frame bytes.
+ * @param signal - Optional cancellation signal checked around reads.
  * @yields {FlvTag} One sample per complete MP3 frame.
+ * @throws If a frame is invalid, the payload is truncated, or a read fails.
  */
 async function* readMp3Frames(
   blob: Blob,

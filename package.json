@@ -72,7 +72,7 @@
   "devDependencies": {
     "@ntnyq/tsconfig": "^3.1.0",
     "@ntnyq/utils": "^0.27.0",
-    "@types/node": "^26.6.6",
+    "@types/node": "^26.6.7",
     "bumpp": "^12.3.0",
     "eslint-plugin-ntnyq": "^0.21.0",
     "husky": "^9.1.7",

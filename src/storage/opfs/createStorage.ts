@@ -1,20 +1,6 @@
-import type { RemuxStorage } from '../../types'
+import type { DisposableRemuxStorage } from '../../types'
 import { createOpfsFragmentIndex } from './fragmentIndex'
 import { createOpfsFragmentSamples } from './fragmentSamples'
-
-/**
- * Caller-owned temporary remux stores with a shared resource cleanup operation.
- */
-export interface DisposableRemuxStorage extends RemuxStorage {
-  /**
-   * Attempts to close both stores even if one fails. Repeated calls reuse each
-   * store's disposal; removing the temporary directory remains the caller's job.
-   *
-   * @returns A promise resolving when both stores are disposed.
-   * @throws The first rejected disposal result if either store fails to close.
-   */
-  dispose: () => Promise<void>
-}
 
 /**
  * Opens lazy OPFS spools inside a caller-owned, exclusive job directory.

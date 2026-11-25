@@ -1,6 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Inspect one track at a time to bound packet metadata reads. */
 
-import { checkAbort } from '../abort'
+import { isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_CODEC,
@@ -8,35 +8,17 @@ import {
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
 } from '../constants'
-import { createRemuxError } from '../errors'
-import type { RemuxOptions } from '../types'
+import type {
+  RemuxOptions,
+  DecodeTimeline,
+  MediaInput,
+  PacketTrack,
+  SegmentInfo,
+} from '../types'
+import { checkAbort, createRemuxError, isIndependentMp3Frame } from '../utils'
 import { resolveIsobmffColorInformation } from '../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { simplifyRational } from '../vendor/mediabunny/src/misc'
 import type { Rational } from '../vendor/mediabunny/src/misc'
-import type { DecodeTimeline } from './decodeTimeline'
-import type { MediaInput, PacketTrack } from './input/mediaInput'
-import { isIndependentMp3Frame } from './input/mp3Frame'
-
-/**
- * Validated presentation timeline shared by all selected tracks in a segment.
- */
-export interface SegmentInfo {
-  /**
-   * Earliest playable timestamp in seconds, possibly negative.
-   */
-  start: number
-
-  /**
-   * Positive span in seconds from start through the latest selected packet end.
-   */
-  duration: number
-
-  /** Number of packets discarded from the beginning of each selected track. */
-  skippedPackets?: readonly number[]
-
-  /** Retained audio presentation bounds before the common segment shift. */
-  audioRange?: { start: number; end: number }
-}
 
 /**
  * Selects tracks by kind and returns them in video-before-audio order without
@@ -118,7 +100,7 @@ function getDisplayAspectRatio(config: VideoDecoderConfig): Rational | null {
   const width = config.displayAspectWidth ?? config.codedWidth
   const height = config.displayAspectHeight ?? config.codedHeight
 
-  if (width === undefined || height === undefined) {
+  if (isUndefined(width) || isUndefined(height)) {
     return null
   }
 
@@ -243,11 +225,11 @@ export async function inspectTracks(
       }
 
       if (
-        (firstVideoSequence !== undefined &&
+        (!isUndefined(firstVideoSequence) &&
           packet.sequenceNumber !== firstVideoSequence) ||
         (track.kind === MEDIA_TRACK_KIND.audio &&
           count === 0 &&
-          trimBefore !== undefined &&
+          !isUndefined(trimBefore) &&
           packet.timestamp < trimBefore)
       ) {
         skipped++
@@ -258,7 +240,7 @@ export async function inspectTracks(
       let presentationStart = packet.timestamp
 
       if (count === 0 && track.kind === MEDIA_TRACK_KIND.audio) {
-        if (audioEditStart !== undefined && packet.timestamp < audioEditStart) {
+        if (!isUndefined(audioEditStart) && packet.timestamp < audioEditStart) {
           const duration = Math.min(
             packet.duration,
             packet.sideData.decodeDuration ?? packet.duration,
@@ -329,7 +311,7 @@ export async function inspectTracks(
       count++
     }
 
-    if (count + skipped === 0 || firstVideoSequence !== undefined) {
+    if (count + skipped === 0 || !isUndefined(firstVideoSequence)) {
       throw createRemuxError(
         REMUX_ERROR_CODE.invalidInput,
         `The ${track.kind} track has no packets.`,
@@ -350,7 +332,7 @@ export async function inspectTracks(
     start,
     duration: end - start,
     ...(skippedPackets.some(count => count > 0) ? { skippedPackets } : {}),
-    ...(audioRange === undefined ? {} : { audioRange }),
+    ...(isUndefined(audioRange) ? {} : { audioRange }),
   }
 
   decodeTimeline?.finishSegment(info)

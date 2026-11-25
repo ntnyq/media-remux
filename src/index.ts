@@ -1,6 +1,5 @@
 export { remuxMedia, combineTracks, concatMedia } from './core/remux'
 export { runMediaJob } from './browser/client'
-export { isRemuxError } from './errors'
 export {
   FRAGMENT_SAMPLE_FILE_KIND,
   FRAGMENT_SAMPLE_TYPE,
@@ -16,6 +15,7 @@ export {
   createDiskFragmentIndex,
   createDiskFragmentSamples,
 } from './storage'
+export { isRemuxError } from './utils'
 
 export type {
   RemuxOptions,
@@ -24,10 +24,11 @@ export type {
   RemuxProgress,
   RemuxTrackSelection,
   MediaOutputChunk,
-} from './types'
-export type { MediaJob, MediaJobOptions, MediaJobResult } from './browser/types'
-export type { RemuxError, RemuxErrorCode } from './errors'
-export type {
+  MediaJob,
+  MediaJobOptions,
+  MediaJobResult,
+  RemuxError,
+  RemuxErrorCode,
   DisposableRemuxStorage,
   FragmentStoreFile,
   FragmentStore,
@@ -36,4 +37,4 @@ export type {
   FragmentSample,
   FragmentSampleFile,
   FragmentSampleStore,
-} from './storage'
+} from './types'

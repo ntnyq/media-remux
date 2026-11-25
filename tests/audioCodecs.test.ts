@@ -44,6 +44,40 @@ test.each(['AudioDecoder', 'AudioEncoder'])(
   1000,
 )
 
+test('preserves the abort reason while a codec flush is pending', async () => {
+  const controller = new AbortController()
+  const reason = new Error('cancelled during flush')
+  const started = Promise.withResolvers<void>()
+  const pending = Promise.withResolvers<void>()
+  const close = vi.fn<() => void>()
+
+  vi.stubGlobal(
+    'AudioEncoder',
+    class {
+      state = 'configured'
+      configure() {}
+      close = close
+      flush() {
+        started.resolve()
+
+        return pending.promise
+      }
+    },
+  )
+
+  async function* inputs() {
+    yield* []
+  }
+
+  const result = encodeAac(inputs(), controller.signal).next()
+
+  await started.promise
+  controller.abort(reason)
+  await expect(result).rejects.toBe(reason)
+  pending.reject(new Error('flush failed after cancellation'))
+  expect(close).toHaveBeenCalledOnce()
+})
+
 test('does not start flushing if cancellation arrives as the input ends', async () => {
   const controller = new AbortController()
   const reason = new Error('cancelled before flush')

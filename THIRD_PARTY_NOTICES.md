@@ -17,4 +17,4 @@ The FLV reader is an original implementation following the [Adobe Flash Video Fi
 
 ## @ntnyq/utils
 
-The distribution bundles the `isFunction`, `isNumber`, and `isString` guards from [@ntnyq/utils](https://github.com/ntnyq/utils). Copyright (c) 2024-PRESENT ntnyq <https://github.com/ntnyq>. The guards are distributed under the MIT license printed in `LICENSE`.
+The distribution bundles selected runtime utilities from [@ntnyq/utils](https://github.com/ntnyq/utils). Copyright (c) 2024-PRESENT ntnyq <https://github.com/ntnyq>. These utilities are distributed under the MIT license printed in `LICENSE`.

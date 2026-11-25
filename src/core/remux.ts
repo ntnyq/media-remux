@@ -1,20 +1,24 @@
 /* oxlint-disable no-await-in-loop -- Tracks and segments are consumed in order with bounded memory. */
 
-import { checkAbort } from '../abort'
+import { isBoolean, isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   REMUX_PROGRESS_PHASE,
   REMUX_TRACK_SELECTION,
 } from '../constants'
-import { createRemuxError } from '../errors'
-import type { RemuxOptions, RemuxResult } from '../types'
+import type {
+  RemuxOptions,
+  RemuxResult,
+  MediaInput,
+  PacketTrack,
+  SegmentInfo,
+} from '../types'
+import { checkAbort, createRemuxError } from '../utils'
 import { checkAudioDecoder } from './audioCodecs'
 import { createDecodeTimeline } from './decodeTimeline'
 import { openMediaInput } from './input/mediaInput'
-import type { MediaInput, PacketTrack } from './input/mediaInput'
 import { selectTracks, trackSignature, inspectTracks } from './mediaTracks'
-import type { SegmentInfo } from './mediaTracks'
 import { writeSegments } from './writeSegments'
 
 /**
@@ -27,12 +31,12 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
   const { writable, storage, signal, onProgress, tracks, normalizeAudio } =
     options
 
-  if (normalizeAudio !== undefined && typeof normalizeAudio !== 'boolean') {
+  if (!isUndefined(normalizeAudio) && !isBoolean(normalizeAudio)) {
     throw new TypeError('normalizeAudio must be a boolean.')
   }
 
   if (
-    tracks !== undefined &&
+    !isUndefined(tracks) &&
     !Object.values(REMUX_TRACK_SELECTION).includes(tracks)
   ) {
     throw new TypeError('Unsupported media track selection.')
@@ -41,10 +45,10 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
   return {
     writable,
     storage,
-    ...(signal === undefined ? {} : { signal }),
-    ...(onProgress === undefined ? {} : { onProgress }),
-    ...(tracks === undefined ? {} : { tracks }),
-    ...(normalizeAudio === undefined ? {} : { normalizeAudio }),
+    ...(isUndefined(signal) ? {} : { signal }),
+    ...(isUndefined(onProgress) ? {} : { onProgress }),
+    ...(isUndefined(tracks) ? {} : { tracks }),
+    ...(isUndefined(normalizeAudio) ? {} : { normalizeAudio }),
   }
 }
 

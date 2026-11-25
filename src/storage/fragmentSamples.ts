@@ -1,246 +1,23 @@
 /* oxlint-disable no-await-in-loop -- Paged I/O and merge cursors advance sequentially with bounded memory. */
 
-import type { ValueOf } from '@ntnyq/utils'
-import { FRAGMENT_SAMPLE_FILE_KIND, FRAGMENT_SAMPLE_TYPE } from '../constants'
-
-/**
- * One encoded sample descriptor persisted as a fixed 56-byte record.
- * Timestamps and duration are seconds; mediaOffset is a logical byte position.
- */
-export interface FragmentSample {
-  /**
-   * Finite presentation timestamp in seconds, possibly negative.
-   */
-  timestamp: number
-
-  /**
-   * Finite decode timestamp in seconds, possibly negative.
-   */
-  decodeTimestamp: number
-
-  /**
-   * Finite, nonnegative presentation duration in seconds.
-   */
-  duration: number
-
-  /**
-   * Encoded payload byte count, an integer from 0 through 0xffffffff.
-   */
-  size: number
-
-  /**
-   * Whether the sample is independently decodable or depends on other samples.
-   */
-  type: ValueOf<typeof FRAGMENT_SAMPLE_TYPE>
-
-  /**
-   * Sample duration in the track's integer timescale units, refined as subsequent
-   * samples arrive. Must be a nonnegative safe integer.
-   */
-  timescaleUnitsToNextSample: number
-
-  /**
-   * Nonnegative safe integer logical offset of the encoded payload in its track.
-   * Surviving sample offsets remain unchanged when released prefixes are compacted.
-   */
-  mediaOffset: number
-}
-
-/**
- * Positioned sample metadata, external timestamp sorting, and encoded payload I/O.
- * Reads must return at most 64 KiB; callers must await every operation.
- */
-export interface FragmentSampleStore {
-  /**
-   * Appends sample metadata and payload, assigning its logical media offset.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param sample - Descriptor without mediaOffset; size must equal data.length.
-   * @param data - Encoded payload; keep it stable until the append completes.
-   * @returns The track-local sample ID, or a promise resolving to it. Disk stores
-   * assign monotonically increasing IDs starting at zero, without reusing released IDs.
-   */
-  append: (
-    trackId: number,
-    sample: Omit<FragmentSample, 'mediaOffset'>,
-    data: Uint8Array,
-  ) => number | Promise<number>
-
-  /**
-   * Retrieves a descriptor for a sample that has not been released.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param id - Track-local logical sample ID returned by append().
-   * @returns The stored descriptor, or a promise resolving to it.
-   */
-  get: (trackId: number, id: number) => FragmentSample | Promise<FragmentSample>
-
-  /**
-   * Replaces a sample descriptor without rewriting its encoded payload. Disk
-   * stores ignore updates to released IDs so later duration refinements are safe.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param id - Track-local logical sample ID to update.
-   * @param sample - Updated descriptor with the original payload offset and size.
-   * @returns Nothing, or a promise resolving when the descriptor update completes.
-   */
-  set: (
-    trackId: number,
-    id: number,
-    sample: FragmentSample,
-  ) => void | Promise<void>
-
-  /**
-   * Prepares ascending presentation timestamps for a contiguous sample range
-   * without changing sample IDs or decode order. Replaces previous sort results.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param start - First retained sample ID in the range.
-   * @param count - Positive integer number of consecutive retained samples to sort.
-   * @returns Nothing, or a promise resolving when sorted timestamps are available.
-   */
-  sort: (trackId: number, start: number, count: number) => void | Promise<void>
-
-  /**
-   * Reads a timestamp from the most recent sort result for a track.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param index - Zero-based position within the last sorted range.
-   * @returns A presentation timestamp in seconds, or a promise resolving to it.
-   */
-  sorted: (trackId: number, index: number) => number | Promise<number>
-
-  /**
-   * Reads a bounded range of retained encoded payload using logical media offsets.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param offset - Logical source byte offset, at or after the retained prefix.
-   * @param length - Integer byte count from 0 through 65536, within retained media.
-   * @returns Exactly length payload bytes, or a promise resolving to them.
-   */
-  readMedia: (
-    trackId: number,
-    offset: number,
-    length: number,
-  ) => Uint8Array | Promise<Uint8Array>
-
-  /**
-   * Releases samples preceding a boundary and their payloads. Disk stores compact
-   * backing files while preserving surviving IDs and offsets, and clear sort results
-   * when the retained prefix advances.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param before - Exclusive sample ID boundary between the first retained ID
-   * and the next ID that append() would assign, inclusive.
-   * @returns Nothing, or a promise resolving when release and compaction complete.
-   */
-  release: (trackId: number, before: number) => void | Promise<void>
-}
-
-/**
- * Positional temporary file; implementations may use synchronous Worker I/O.
- */
-export interface FragmentSampleFile {
-  /**
-   * Reads file bytes into a caller-provided buffer using positional I/O.
-   *
-   * @param data - Destination buffer to fill from its first byte.
-   * @param position - Absolute source byte offset in the backing file.
-   * @returns Bytes read, or a promise resolving to that count. Partial reads are
-   * supported; nonempty reads must make positive progress.
-   */
-  read: (
-    data: Uint8Array<ArrayBuffer>,
-    position: number,
-  ) => number | Promise<number>
-
-  /**
-   * Writes bytes at a position without truncating unrelated file contents.
-   *
-   * @param data - Source bytes; keep the buffer stable until completion.
-   * @param position - Absolute destination byte offset in the backing file.
-   * @returns Bytes written, or a promise resolving to that count. Partial writes
-   * are supported; nonempty writes must make positive progress.
-   */
-  write: (
-    data: Uint8Array<ArrayBuffer>,
-    position: number,
-  ) => number | Promise<number>
-
-  /**
-   * Resizes a backing file, discarding bytes beyond the new end when shrinking.
-   *
-   * @param size - New file length in bytes; zero clears the file before use.
-   * @returns Nothing, or a promise resolving when resizing completes.
-   */
-  truncate: (size: number) => void | Promise<void>
-
-  /**
-   * Releases the backing file handle and any associated exclusive access lock.
-   *
-   * @returns Nothing, or a promise resolving when file resources are released.
-   */
-  close: () => void | Promise<void>
-}
-
-/**
- * Descriptor size in bytes: six Float64 fields, a sample-type byte, and padding.
- */
-const RECORD_SIZE = 56
-
-/**
- * Number of descriptors per cache page; each track retains at most two pages.
- */
-const RECORDS_PER_PAGE = 1024
-
-/**
- * Descriptor page size in bytes, used for cache buffers and record-file offsets.
- */
-const PAGE_SIZE = RECORD_SIZE * RECORDS_PER_PAGE
-
-/**
- * Payload and sort-page transfer limit in bytes, bounding I/O buffers to 64 KiB.
- */
-const IO_SIZE = 64 * 1024
-
-/**
- * Maximum timestamps sorted in memory at once; larger ranges use disk merge passes.
- */
-const SORT_RUN = 4096
-
-type FileKind = ValueOf<typeof FRAGMENT_SAMPLE_FILE_KIND>
-type SortFileKind =
-  | typeof FRAGMENT_SAMPLE_FILE_KIND.sortA
-  | typeof FRAGMENT_SAMPLE_FILE_KIND.sortB
-
-interface Page {
-  index: number
-  bytes: Uint8Array<ArrayBuffer>
-  dirty: boolean
-}
-
-interface Track {
-  files: Record<Exclude<FileKind, SortFileKind>, FragmentSampleFile>
-  sortFiles: Record<SortFileKind, FragmentSampleFile> | undefined
-  pages: Page[]
-  base: number
-  end: number
-  /** Logical ID at physical file offset zero, including unreclaimed records. */
-  recordFileBase: number
-  recordBytes: number
-  mediaBase: number
-  mediaEnd: number
-  /** Logical byte offset at physical file offset zero. */
-  mediaFileBase: number
-  mediaBuffer: Uint8Array<ArrayBuffer>
-  mediaUsed: number
-  mediaWritten: number
-  sortedCount: number
-  sortedMemory: Float64Array<ArrayBuffer>
-  externalSort: boolean
-  sortedFile: SortFileKind
-  sortedPage: { offset: number; bytes: Uint8Array<ArrayBuffer> } | undefined
-}
+import { isInteger, isUndefined } from '@ntnyq/utils'
+import {
+  FRAGMENT_SAMPLE_FILE_KIND,
+  FRAGMENT_SAMPLE_TYPE,
+  FRAGMENT_SAMPLE_RECORD_SIZE as RECORD_SIZE,
+  FRAGMENT_SAMPLE_RECORDS_PER_PAGE as RECORDS_PER_PAGE,
+  FRAGMENT_SAMPLE_PAGE_SIZE as PAGE_SIZE,
+  FRAGMENT_SAMPLE_IO_SIZE as IO_SIZE,
+  FRAGMENT_SAMPLE_SORT_RUN as SORT_RUN,
+} from '../constants'
+import type {
+  FragmentSample,
+  FragmentSampleFile,
+  FragmentSampleFileKind as FileKind,
+  FragmentSamplePage as Page,
+  FragmentSampleSortFileKind as SortFileKind,
+  FragmentSampleTrack as Track,
+} from '../types'
 
 /**
  * Retrieves a timestamp from an in-memory sorted run or loaded sort page.
@@ -253,7 +30,7 @@ interface Track {
 function readTimestamp(values: Float64Array, index: number): number {
   const timestamp = values[index]
 
-  if (timestamp === undefined) {
+  if (isUndefined(timestamp)) {
     throw new RangeError('Invalid sorted timestamp reference.')
   }
 
@@ -356,7 +133,7 @@ export function createDiskFragmentSamples(
         ? file.write(remaining, position + consumed)
         : file.read(remaining, position + consumed))
 
-      if (!Number.isInteger(count) || count <= 0 || count > remaining.length) {
+      if (!isInteger(count) || count <= 0 || count > remaining.length) {
         throw new RangeError('Sample storage file read or write incomplete.')
       }
 
@@ -374,7 +151,7 @@ export function createDiskFragmentSamples(
    * @throws If opening or truncating a backing file fails.
    */
   async function getTrack(trackId: number) {
-    if (!Number.isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
+    if (!isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
       throw new RangeError('Invalid sample track id.')
     }
 
@@ -1066,11 +843,7 @@ export function createDiskFragmentSamples(
       return enqueueOperation(async () => {
         const track = await getTrack(trackId)
 
-        if (
-          !Number.isInteger(index) ||
-          index < 0 ||
-          index >= track.sortedCount
-        ) {
+        if (!isInteger(index) || index < 0 || index >= track.sortedCount) {
           throw new RangeError('Invalid sorted timestamp reference.')
         }
 
@@ -1122,7 +895,7 @@ export function createDiskFragmentSamples(
         if (
           !Number.isSafeInteger(offset) ||
           offset < track.mediaBase ||
-          !Number.isInteger(length) ||
+          !isInteger(length) ||
           length < 0 ||
           length > IO_SIZE ||
           offset + length > track.mediaEnd

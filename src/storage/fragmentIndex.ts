@@ -1,13 +1,8 @@
+/**
+ * Creates a per-track byte store for completed-fragment TFRA index records.
+ *
+ * @param open - Opens a truncated positional backing file for the given track ID.
+ * @returns A lazy index store with append, bounded read, reset, and disposal.
+ * @see createDiskFragmentStore
+ */
 export { createDiskFragmentStore as createDiskFragmentIndex } from './fragmentStore'
-export type {
-  /**
-   * Positional backing file for one track's TFRA index; uses FragmentStoreFile's
-   * write, read, seal, and close contracts.
-   */
-  FragmentStoreFile as FragmentIndexFile,
-
-  /**
-   * Per-track TFRA byte store; uses FragmentStore's append and bounded read contracts.
-   */
-  FragmentStore as FragmentIndexStore,
-} from './fragmentStore'

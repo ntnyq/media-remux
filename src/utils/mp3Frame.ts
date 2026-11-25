@@ -1,24 +1,16 @@
-const MPEG1_LAYER3_BITRATES = [
-  0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
-] as const
-const MPEG2_LAYER3_BITRATES = [
-  0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160,
-] as const
-const MPEG1_SAMPLE_RATES = [44_100, 48_000, 32_000] as const
-
-/**
- * Stream format and frame boundaries derived from a Layer III header.
- */
-export interface Mp3FrameHeader {
-  sampleRate: number
-  numberOfChannels: number
-  duration: number
-  size: number
-}
+import {
+  MPEG1_LAYER3_BITRATES,
+  MPEG1_SAMPLE_RATES,
+  MPEG2_LAYER3_BITRATES,
+} from '../constants'
+import type { Mp3FrameHeader } from '../types'
 
 /**
  * Parses a four-byte MPEG-1, MPEG-2, or MPEG-2.5 Layer III frame header.
  * Free-format frames have no fixed header bitrate to calculate their length.
+ *
+ * @param bytes - Bytes starting at the frame header.
+ * @returns Parsed frame properties, or null for an invalid or unsupported header.
  */
 export function parseMp3FrameHeader(bytes: Uint8Array): Mp3FrameHeader | null {
   const [sync = 0, versionAndLayer = 0, rate = 0, mode = 0] = bytes
@@ -61,6 +53,9 @@ export function parseMp3FrameHeader(bytes: Uint8Array): Mp3FrameHeader | null {
 /**
  * Checks whether the first Layer III frame starts without a bit reservoir.
  * A protected frame has a two-byte CRC before the side information.
+ *
+ * @param bytes - Encoded data starting at the first frame header.
+ * @returns Whether the first frame is complete and uses no main data from preceding frames.
  */
 export function isIndependentMp3Frame(bytes: Uint8Array): boolean {
   const header = parseMp3FrameHeader(bytes)

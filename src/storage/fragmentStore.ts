@@ -1,85 +1,11 @@
 /* oxlint-disable no-await-in-loop -- Each positional I/O step depends on the preceding byte count. */
 
-/**
- * Per-track write buffer and maximum read size in bytes, keeping I/O within 64 KiB.
- */
-const FRAGMENT_PAGE_SIZE = 64 * 1024
-
-/**
- * Backing file for one track of temporary fragment bytes.
- */
-export interface FragmentStoreFile {
-  /**
-   * Writes bytes at an absolute file position before the file is sealed.
-   *
-   * @param data - Bytes to write; keep the buffer stable until completion.
-   * @param position - Absolute destination byte offset.
-   * @returns A promise resolving to the number of bytes written. Partial writes
-   * are supported; nonempty writes must make positive progress.
-   */
-  write: (data: Uint8Array<ArrayBuffer>, position: number) => Promise<number>
-
-  /**
-   * Reads committed bytes into the supplied buffer after sealing.
-   *
-   * @param data - Destination buffer to fill from its first byte.
-   * @param position - Absolute source byte offset.
-   * @returns A promise resolving to the number of bytes read. Partial reads are
-   * supported; nonempty reads must make positive progress.
-   */
-  read: (data: Uint8Array<ArrayBuffer>, position: number) => Promise<number>
-
-  /**
-   * Commits pending writes and prepares a stable file for subsequent reads.
-   *
-   * @returns A promise resolving when the file is readable and no longer writable.
-   */
-  seal: () => Promise<void>
-
-  /**
-   * Releases file resources, discarding any uncommitted writes.
-   *
-   * @returns A promise resolving when handles and read snapshots are released.
-   */
-  close: () => Promise<void>
-}
-
-/**
- * Append bytes, then read bounded pages after sealing the current file.
- */
-export interface FragmentStore {
-  /**
-   * Appends temporary bytes to one track before that track enters its read phase.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param data - Bytes to append; keep them stable until the operation completes.
-   * @returns A promise resolving when bytes are accepted into the buffered store.
-   */
-  append: (trackId: number, data: Uint8Array) => Promise<void>
-
-  /**
-   * Reads a bounded byte range, sealing buffered writes on the track's first read.
-   * No further appends are allowed until the track is reset by its owning store.
-   *
-   * @param trackId - Track identifier, an integer from 1 through 0xffffffff.
-   * @param offset - Nonnegative safe integer byte offset from the track's start.
-   * @param length - Byte count from 0 through 65536, within the appended range.
-   * @returns A promise resolving to a new buffer containing exactly length bytes.
-   */
-  read: (
-    trackId: number,
-    offset: number,
-    length: number,
-  ) => Promise<Uint8Array<ArrayBuffer>>
-}
-
-interface TrackFile {
-  file: FragmentStoreFile
-  buffer: Uint8Array<ArrayBuffer>
-  used: number
-  written: number
-  sealed: boolean
-}
+import { isInteger } from '@ntnyq/utils'
+import { FRAGMENT_PAGE_SIZE } from '../constants'
+import type {
+  FragmentStoreFile,
+  FragmentTrackFile as TrackFile,
+} from '../types'
 
 /**
  * Keeps one write page per track and serializes I/O with caller backpressure.
@@ -94,9 +20,9 @@ interface TrackFile {
  * The first failed operation poisons later queued work; disposal still attempts
  * to close every file and rejects if closing fails. The caller removes the files.
  *
- * @param open - Async track-file opener; each open must truncate that track
- * logical file, including after reset. Files must support positional reads and
- * writes, sealing for reads, and closure; byte counts may represent partial I/O.
+ * @param open - Opens a truncated backing file for the given track ID, including
+ * after reset. Files must support positional reads and writes, sealing for reads,
+ * and closure. Byte counts may represent partial I/O.
  * @returns A serialized per-track store with append/read, reset, and
  * idempotent disposal. Await operations for backpressure; the first read seals
  * buffered writes, and reset permits reopening a track as a new empty file.
@@ -111,7 +37,7 @@ export function createDiskFragmentStore(
   let disposal: Promise<void> | undefined
 
   function assertTrackId(trackId: number) {
-    if (!Number.isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
+    if (!isInteger(trackId) || trackId < 1 || trackId > 0xff_ff_ff_ff) {
       throw new RangeError('Invalid fragment track id.')
     }
   }
@@ -201,7 +127,7 @@ export function createDiskFragmentStore(
       const data = track.buffer.subarray(offset, track.used)
       const written = await track.file.write(data, track.written)
 
-      if (!Number.isInteger(written) || written <= 0 || written > data.length) {
+      if (!isInteger(written) || written <= 0 || written > data.length) {
         throw new Error('Fragment storage file write made no progress.')
       }
 
@@ -269,7 +195,7 @@ export function createDiskFragmentStore(
         if (
           !Number.isSafeInteger(offset) ||
           offset < 0 ||
-          !Number.isInteger(length) ||
+          !isInteger(length) ||
           length < 0 ||
           length > FRAGMENT_PAGE_SIZE
         ) {
@@ -295,11 +221,7 @@ export function createDiskFragmentStore(
           const remaining = data.subarray(consumed)
           const count = await track.file.read(remaining, offset + consumed)
 
-          if (
-            !Number.isInteger(count) ||
-            count <= 0 ||
-            count > remaining.length
-          ) {
+          if (!isInteger(count) || count <= 0 || count > remaining.length) {
             throw new RangeError('Fragment storage file read incomplete.')
           }
 

@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
-import type { PacketTrack } from '../src/core/input/mediaInput'
 import { inspectTracks, trackSignature } from '../src/core/mediaTracks'
+import type { PacketTrack } from '../src/types'
 import { EncodedPacket } from '../src/vendor/mediabunny/src/packet'
 
 /**

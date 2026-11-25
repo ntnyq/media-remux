@@ -1,23 +1,8 @@
-import type { ValueOf } from '@ntnyq/utils'
-import { REMUX_ERROR_CODE } from './constants'
+import { REMUX_ERROR_CODE } from '../constants'
+import type { RemuxError, RemuxErrorCode } from '../types'
 
 /**
- * Stable codes for media input and compatibility failures.
- */
-export type RemuxErrorCode = ValueOf<typeof REMUX_ERROR_CODE>
-
-/**
- * A media error with a code shared by the core and Worker APIs.
- */
-export interface RemuxError extends Error {
-  /**
-   * Stable code for fallback and localization decisions.
-   */
-  readonly code: RemuxErrorCode
-}
-
-/**
- * Validates a code received across a message boundary.
+ * Identifies a stable remux error code, including codes received from a Worker.
  *
  * @param value - Candidate error code.
  * @returns Whether the value is a recognized remux error code.
@@ -44,6 +29,7 @@ export function isRemuxError(value: unknown): value is RemuxError {
  * @param error - Original error to update in place.
  * @param code - Stable remux error code to assign.
  * @returns The original error with the assigned code.
+ * @throws {TypeError} If the error's code property cannot be written.
  */
 export function withRemuxErrorCode(
   error: Error,

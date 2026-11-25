@@ -1,45 +1,43 @@
 /* oxlint-disable no-await-in-loop -- Tracks and their packet ranges are read in file order. */
 
+import { isNonEmptyObject, isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
+  MKV_ID,
 } from '../../constants'
-import { createRemuxError } from '../../errors'
-import type { RemuxTrackSelection } from '../../types'
-import { resolveIsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
-import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
-import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
-import { readBytes } from '../../vendor/mediabunny/src/reader'
+import type {
+  RemuxTrackSelection,
+  MediaInput,
+  MkvElement,
+  MkvTrack,
+  PacketTrack,
+} from '../../types'
 import {
   aacFrameSamples,
   aacLcDecoderConfig,
   avcDecoderConfig,
-} from './codecConfig'
-import type { MediaInput, PacketTrack } from './mediaInput'
+  createRemuxError,
+  invalidMkv,
+} from '../../utils'
+import { resolveIsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
+import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
+import { EncodedPacket } from '../../vendor/mediabunny/src/packet'
+import { readBytes } from '../../vendor/mediabunny/src/reader'
 import { readMkvBlocks, readMkvFrames } from './mkvBlocks'
-import { MKV_ID, MkvReader, invalidMkv } from './mkvElements'
-import type { MkvElement } from './mkvElements'
-
-interface MkvTrack {
-  number: number
-  type: number
-  codecId: string
-  timestampScale: number
-  codecDelay: number
-  defaultDuration: number
-  hasContentEncodings: boolean
-  hasTrackOffset: boolean
-  isEnabled: boolean
-  isDefault: boolean
-  privateData?: MkvElement
-  video?: MkvElement
-}
+import { MkvReader } from './mkvElements'
 
 /**
  * Reads the EBML document header and the one Matroska segment in the input.
+ *
+ * @param reader - Range reader positioned independently for each element.
+ * @param size - Total input length in bytes.
+ * @returns A promise resolving to the single Segment element.
+ * @throws If the EBML header is invalid, the document type or version is unsupported,
+ * or the input does not contain exactly one supported segment.
  */
 async function readSegment(reader: MkvReader, size: number) {
   const header = await reader.element(0, size)
@@ -96,6 +94,11 @@ async function readSegment(reader: MkvReader, size: number) {
 
 /**
  * Reads track metadata. Decoder descriptions are loaded for selected tracks.
+ *
+ * @param reader - Range reader for the Matroska input.
+ * @param tracksElement - Tracks element containing the TrackEntry children.
+ * @returns A promise resolving to the track metadata in file order.
+ * @throws If a track entry lacks a valid number or type, or repeats a track number.
  */
 async function readTracks(reader: MkvReader, tracksElement: MkvElement) {
   const tracks: MkvTrack[] = []
@@ -173,6 +176,12 @@ async function readTracks(reader: MkvReader, tracksElement: MkvElement) {
 
 /**
  * Applies Matroska display dimensions and reads optional container colour.
+ *
+ * @param reader - Range reader for the Matroska input.
+ * @param video - Video element containing track display and colour fields.
+ * @param config - Decoder configuration updated with any explicit display dimensions.
+ * @returns A promise resolving to container colour information when present.
+ * @throws If the container requests unsupported cropping or display dimensions.
  */
 async function readVideoMetadata(
   reader: MkvReader,
@@ -221,7 +230,7 @@ async function readVideoMetadata(
     }
   }
 
-  if (width === undefined && height === undefined) {
+  if (isUndefined(width) && isUndefined(height)) {
     return colour
   }
 
@@ -246,6 +255,13 @@ async function readVideoMetadata(
 /**
  * Resolves explicitly supplied Matroska colour fields against the AVC VUI.
  * Matroska uses the same H.273 identifiers as the MP4 nclx box.
+ *
+ * @param reader - Range reader for the Matroska input.
+ * @param colour - Colour element containing the explicit fields.
+ * @param colorSpace - Optional fallback colour space derived from the AVC bitstream.
+ * @returns A promise resolving to merged colour information, or undefined if
+ * the container supplies no explicit colour values.
+ * @throws If a colour identifier exceeds the MP4 nclx field width.
  */
 async function readColour(
   reader: MkvReader,
@@ -288,7 +304,7 @@ async function readColour(
     }
   }
 
-  return Object.keys(fields).length
+  return isNonEmptyObject(fields)
     ? resolveIsobmffColorInformation(colorSpace, fields)
     : undefined
 }
@@ -296,6 +312,13 @@ async function readColour(
 /**
  * Estimates the final presentation interval when the video has no track
  * default duration. Only the two largest PTS values are needed, even with B frames.
+ *
+ * @param reader - Range reader for the Matroska input.
+ * @param segment - Segment containing the track's blocks.
+ * @param track - Selected video track and its timing metadata.
+ * @param tick - Segment timestamp scale in nanoseconds per tick.
+ * @returns A promise resolving to the estimated duration in seconds, with a
+ * 1/30-second fallback when fewer than two distinct timestamps are present.
  */
 async function inferVideoDuration(
   reader: MkvReader,
@@ -325,6 +348,13 @@ async function inferVideoDuration(
 
 /**
  * Creates a repeatable decode-order reader for an AVC or AAC-LC track.
+ *
+ * @param reader - Range reader shared with subsequent frame iteration.
+ * @param segment - Segment containing the selected track's blocks.
+ * @param track - Selected track entry and codec metadata.
+ * @param tick - Segment timestamp scale in nanoseconds per tick.
+ * @returns A promise resolving to the decoder configuration and packet reader.
+ * @throws If the selected track uses unsupported features or has invalid metadata.
  */
 async function createPacketTrack(
   reader: MkvReader,
@@ -421,10 +451,9 @@ async function createPacketTrack(
         }
 
         const { offset, sizes } = await readMkvFrames(reader, block)
-        const duration =
-          block.duration === undefined
-            ? nominalDuration
-            : block.duration / sizes.length
+        const duration = isUndefined(block.duration)
+          ? nominalDuration
+          : block.duration / sizes.length
         const decodeDuration =
           isVideo && duration > 0 ? duration : nominalDuration
         let position = offset
@@ -460,6 +489,12 @@ async function createPacketTrack(
 
 /**
  * Opens selected AVC/AAC-LC tracks from one Matroska segment.
+ *
+ * @param blob - Source Matroska Blob.
+ * @param signal - Optional cancellation signal checked during range reads.
+ * @param selection - Requested track kinds and selection order.
+ * @returns A promise resolving to the selected tracks and a disposer for the reader.
+ * @throws If Matroska parsing fails, a selected feature is unsupported, or reading is aborted.
  */
 export async function openMkvInput(
   blob: Blob,
@@ -474,7 +509,7 @@ export async function openMkvInput(
     let available: MkvTrack[] | undefined
 
     for await (const element of reader.children(segment)) {
-      if (element.id === MKV_ID.info && tick === undefined) {
+      if (element.id === MKV_ID.info && isUndefined(tick)) {
         tick = 1_000_000
 
         for await (const field of reader.children(element)) {
@@ -486,7 +521,7 @@ export async function openMkvInput(
         available = await readTracks(reader, element)
       }
 
-      if (tick !== undefined && available) {
+      if (!isUndefined(tick) && available) {
         break
       }
     }

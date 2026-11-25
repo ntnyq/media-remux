@@ -1,17 +1,24 @@
-/* oxlint-disable no-await-in-loop -- Directory retries must wait for Worker locks to be released. */
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
 
-import { checkAbort } from '../abort'
+import { isUndefined, retry } from '@ntnyq/utils'
 import {
   MEDIA_JOB_OPERATION,
   REMUX_MIME_TYPE,
   WORKER_MESSAGE_TYPE,
+  JOB_OUTPUT_MP4_FILE,
+  JOB_OUTPUT_M4A_FILE,
+  JOB_SPOOL_DIRECTORY,
 } from '../constants'
-import { withRemuxErrorCode } from '../errors'
-import type { RemuxResult } from '../types'
-import type { WorkerRequest, WorkerResponse } from './protocol'
+import type {
+  RemuxResult,
+  MediaJob,
+  MediaJobOptions,
+  MediaJobResult,
+  WorkerRequest,
+  WorkerResponse,
+} from '../types'
+import { checkAbort, withRemuxErrorCode } from '../utils'
 import { isWorkerResponse } from './protocol'
-import type { MediaJob, MediaJobOptions, MediaJobResult } from './types'
 
 /**
  * Captures job fields and segment order before asynchronous filesystem setup.
@@ -22,7 +29,7 @@ import type { MediaJob, MediaJobOptions, MediaJobResult } from './types'
  */
 function captureJob(job: MediaJob): MediaJob {
   const { normalizeAudio } = job
-  const audioOptions = normalizeAudio === undefined ? {} : { normalizeAudio }
+  const audioOptions = isUndefined(normalizeAudio) ? {} : { normalizeAudio }
 
   switch (job.operation) {
     case MEDIA_JOB_OPERATION.remux: {
@@ -32,7 +39,7 @@ function captureJob(job: MediaJob): MediaJob {
         operation: MEDIA_JOB_OPERATION.remux,
         input,
         ...audioOptions,
-        ...(tracks === undefined ? {} : { tracks }),
+        ...(isUndefined(tracks) ? {} : { tracks }),
       }
     }
     case MEDIA_JOB_OPERATION.concat: {
@@ -42,7 +49,7 @@ function captureJob(job: MediaJob): MediaJob {
         operation: MEDIA_JOB_OPERATION.concat,
         inputs: [...inputs],
         ...audioOptions,
-        ...(tracks === undefined ? {} : { tracks }),
+        ...(isUndefined(tracks) ? {} : { tracks }),
       }
     }
     case MEDIA_JOB_OPERATION.combine: {
@@ -71,33 +78,29 @@ async function removeJob(
   directory: FileSystemDirectoryHandle,
   name: string,
 ): Promise<void> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      await directory.removeEntry(name, { recursive: true })
-
-      return
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'NotFoundError') {
-        return
+  await retry(
+    async () => {
+      try {
+        await directory.removeEntry(name, { recursive: true })
+      } catch (error) {
+        if (
+          !(error instanceof DOMException && error.name === 'NotFoundError')
+        ) {
+          throw error
+        }
       }
-
-      if (
-        !(error instanceof DOMException) ||
-        !['NoModificationAllowedError', 'InvalidStateError'].includes(
+    },
+    {
+      // Worker termination can precede release of its OPFS locks.
+      maxAttempts: 6,
+      backoff: (_error, { attempt }) => 50 * attempt,
+      shouldRetry: error =>
+        error instanceof DOMException &&
+        ['NoModificationAllowedError', 'InvalidStateError'].includes(
           error.name,
-        ) ||
-        attempt >= 5
-      ) {
-        throw error
-      }
-
-      // Worker termination can precede release of its OPFS locks. Retry only
-      // transient lock errors, with a bounded delay before each new attempt.
-      await new Promise(resolve => {
-        setTimeout(resolve, 50 * (attempt + 1))
-      })
-    }
-  }
+        ),
+    },
+  )
 }
 
 /**
@@ -106,11 +109,12 @@ async function removeJob(
  * The Worker is dedicated to this job and is terminated on completion as well.
  *
  * @param job - Remux, track-combining, or concatenation operation and its input
- * Blobs, with optional track selection for remuxing or concatenation.
+ * Blobs. Audio normalization is optional, and remuxing and concatenation
+ * also allow track selection.
  * @param options - Dedicated Worker factory, optional parent directory (defaults
  * to the origin's OPFS root), cancellation signal, and progress callback.
  * @returns A promise resolving to the output File, duration in seconds, MIME
- * type, copied encoded payload bytes, and an idempotent, retryable directory
+ * type, written encoded payload bytes, and an idempotent, retryable directory
  * disposer. Call dispose() after saving or reading the file.
  * @throws {Error} If OPFS is unavailable, Worker execution or messaging fails,
  * a response is invalid, or the output is empty. Also propagates filesystem,
@@ -130,9 +134,9 @@ export async function runMediaJob(
   } = options
   const settings = {
     createWorker,
-    ...(parentDirectory === undefined ? {} : { directory: parentDirectory }),
-    ...(signal === undefined ? {} : { signal }),
-    ...(onProgress === undefined ? {} : { onProgress }),
+    ...(isUndefined(parentDirectory) ? {} : { directory: parentDirectory }),
+    ...(isUndefined(signal) ? {} : { signal }),
+    ...(isUndefined(onProgress) ? {} : { onProgress }),
   }
 
   checkAbort(settings.signal)
@@ -181,8 +185,10 @@ export async function runMediaJob(
 
   try {
     checkAbort(settings.signal)
-    const handle = await temporary.getFileHandle('output.mp4', { create: true })
-    const spools = await temporary.getDirectoryHandle('spools', {
+    const handle = await temporary.getFileHandle(JOB_OUTPUT_MP4_FILE, {
+      create: true,
+    })
+    const spools = await temporary.getDirectoryHandle(JOB_SPOOL_DIRECTORY, {
       create: true,
     })
 
@@ -338,7 +344,7 @@ export async function runMediaJob(
     })
 
     checkAbort(settings.signal)
-    await removeJob(temporary, 'spools')
+    await removeJob(temporary, JOB_SPOOL_DIRECTORY)
 
     const file = await handle.getFile()
 
@@ -350,7 +356,9 @@ export async function runMediaJob(
 
     const outputFile = new File(
       [file],
-      result.mimeType === REMUX_MIME_TYPE.audio ? 'output.m4a' : 'output.mp4',
+      result.mimeType === REMUX_MIME_TYPE.audio
+        ? JOB_OUTPUT_M4A_FILE
+        : JOB_OUTPUT_MP4_FILE,
       { type: result.mimeType },
     )
 

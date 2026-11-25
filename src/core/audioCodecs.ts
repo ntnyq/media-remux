@@ -1,50 +1,34 @@
 /* oxlint-disable no-await-in-loop -- Feed native codecs with bounded queues. */
 
-import { checkAbort } from '../abort'
-import { REMUX_ERROR_CODE } from '../constants'
-import { createRemuxError } from '../errors'
+import { createDeferred, isUndefined, raceWithSignal } from '@ntnyq/utils'
+import {
+  REMUX_ERROR_CODE,
+  AAC_CHANNELS,
+  AAC_ENCODER_CONFIG,
+  AAC_FRAME_SIZE,
+  AAC_SAMPLE_RATE,
+  MAX_CODEC_QUEUE,
+} from '../constants'
+import type { AacChunk, AudioCodecSession } from '../types'
+import { checkAbort, createRemuxError } from '../utils'
 import { readEsDescriptor } from '../vendor/mediabunny/src/isobmff/isobmff-reader'
 import type { EncodedPacket } from '../vendor/mediabunny/src/packet'
 import { FileSlice } from '../vendor/mediabunny/src/reader'
 
-const MAX_CODEC_QUEUE = 8
-
-export const AAC_SAMPLE_RATE = 48_000
-export const AAC_CHANNELS = 2
-export const AAC_FRAME_SIZE = 1024
-
-const AAC_ENCODER_CONFIG = {
-  codec: 'mp4a.40.2',
-  sampleRate: AAC_SAMPLE_RATE,
-  numberOfChannels: AAC_CHANNELS,
-  bitrate: 160_000,
-} satisfies AudioEncoderConfig
-
-type AudioCodec = EventTarget & {
-  state: CodecState
-  flush: () => Promise<void>
-  close: () => void
-}
-
-interface AudioCodecSession<Source> {
-  codec: AudioCodec
-  configure: () => void
-  queueSize: () => number
-  submit: (source: Source) => void
-  releaseInput?: (source: Source) => void
-}
-
-interface AacChunk {
-  chunk: EncodedAudioChunk
-  config?: AudioDecoderConfig | undefined
-}
-
+/**
+ * Checks whether WebCodecs supports the AAC-LC normalization format.
+ *
+ * @param signal - Optional cancellation signal for the support probe.
+ * @returns A promise resolving when the required encoder support is confirmed.
+ * @throws If the required WebCodecs APIs or encoder configuration are unavailable.
+ * @throws The signal's abort reason if cancellation is detected.
+ */
 export async function checkAacEncoder(signal?: AbortSignal): Promise<void> {
   checkAbort(signal)
 
   if (
-    typeof AudioEncoder === 'undefined' ||
-    typeof AudioData === 'undefined' ||
+    isUndefined(globalThis.AudioEncoder) ||
+    isUndefined(globalThis.AudioData) ||
     !(
       await waitForCodec(
         () => AudioEncoder.isConfigSupported(AAC_ENCODER_CONFIG),
@@ -59,6 +43,15 @@ export async function checkAacEncoder(signal?: AbortSignal): Promise<void> {
   }
 }
 
+/**
+ * Checks whether WebCodecs can decode the selected mono or stereo audio format.
+ *
+ * @param config - Decoder configuration from the selected source track.
+ * @param signal - Optional cancellation signal for the support probe.
+ * @returns A promise resolving when the required decoder support is confirmed.
+ * @throws If the channel count, WebCodecs APIs, or decoder configuration are unsupported.
+ * @throws The signal's abort reason if cancellation is detected.
+ */
 export async function checkAudioDecoder(
   config: AudioDecoderConfig,
   signal?: AbortSignal,
@@ -68,8 +61,8 @@ export async function checkAudioDecoder(
   if (
     config.numberOfChannels < 1 ||
     config.numberOfChannels > AAC_CHANNELS ||
-    typeof AudioDecoder === 'undefined' ||
-    typeof EncodedAudioChunk === 'undefined' ||
+    isUndefined(globalThis.AudioDecoder) ||
+    isUndefined(globalThis.EncodedAudioChunk) ||
     !(await waitForCodec(() => AudioDecoder.isConfigSupported(config), signal))
       .supported
   ) {
@@ -80,36 +73,38 @@ export async function checkAudioDecoder(
   }
 }
 
-/** Races a codec wait against cancellation and cleans up its listener. */
+/**
+ * Runs a codec operation with cancellation checks around the wait.
+ *
+ * @template Result - Value produced by the codec operation.
+ * @param wait - Starts the asynchronous codec operation.
+ * @param signal - Optional cancellation signal raced against the operation.
+ * @returns A promise resolving to the codec operation's result.
+ * @throws The operation failure or the signal's abort reason.
+ */
 async function waitForCodec<Result>(
   wait: () => Promise<Result>,
   signal?: AbortSignal,
 ) {
   checkAbort(signal)
+  const result = await (signal ? raceWithSignal(wait(), signal) : wait())
 
-  if (!signal) {
-    return await wait()
-  }
+  checkAbort(signal)
 
-  const abort = Promise.withResolvers<never>()
-  const reject = () => abort.reject(signal.reason)
-
-  signal.addEventListener('abort', reject, { once: true })
-
-  try {
-    const result = await Promise.race([wait(), abort.promise])
-
-    checkAbort(signal)
-
-    return result
-  } finally {
-    signal.removeEventListener('abort', reject)
-  }
+  return result
 }
 
 /**
  * Streams codec outputs with backpressure and closes owned resources on exit.
+ *
+ * @template Source - Input accepted by the codec.
+ * @template Result - Output emitted by the codec.
+ * @param inputs - Stream of inputs to submit in order.
+ * @param open - Creates a codec session using the supplied output and error callbacks.
+ * @param signal - Optional cancellation signal for the session.
+ * @param releaseOutput - Optional cleanup for outputs that were never yielded.
  * @yields Each codec output in callback order.
+ * @throws If input iteration, codec processing, or cancellation fails.
  */
 async function* runAudioCodec<Source, Result>(
   inputs: AsyncIterable<Source>,
@@ -146,13 +141,13 @@ async function* runAudioCodec<Source, Result>(
       checkAbort(activeSignal)
 
       if (queueSize() >= MAX_CODEC_QUEUE) {
-        const dequeue = Promise.withResolvers<void>()
-        const onDequeue = () => dequeue.resolve()
+        const { promise: dequeued, resolve } = createDeferred<void>()
+        const onDequeue = () => resolve()
 
         codec.addEventListener('dequeue', onDequeue, { once: true })
 
         try {
-          await waitForCodec(() => dequeue.promise, activeSignal)
+          await waitForCodec(() => dequeued, activeSignal)
         } finally {
           codec.removeEventListener('dequeue', onDequeue)
         }
@@ -185,7 +180,11 @@ async function* runAudioCodec<Source, Result>(
 
 /**
  * Native WebKit can report an MPEG-4 ES descriptor in AAC encoder metadata.
- * Extract the AudioSpecificConfig required by MP4 and WebCodecs decoders.
+ * Extracts the AudioSpecificConfig required by MP4 and WebCodecs decoders.
+ *
+ * @param config - Decoder configuration emitted by the native AAC encoder.
+ * @returns A configuration with the extracted description, or the original configuration.
+ * @throws If an MPEG-4 ES descriptor is invalid or lacks decoder-specific data.
  */
 function aacDecoderConfig(config: AudioDecoderConfig): AudioDecoderConfig {
   const { description } = config
@@ -220,6 +219,14 @@ function aacDecoderConfig(config: AudioDecoderConfig): AudioDecoderConfig {
   return { ...config, description: decoderSpecificInfo }
 }
 
+/**
+ * Wraps planar stereo PCM in a WebCodecs audio frame at the AAC sample rate.
+ *
+ * @param data - Consecutive left and right Float32 PCM planes.
+ * @param frames - Number of PCM samples per channel.
+ * @param start - First sample position on the output clock.
+ * @returns AudioData timestamped in microseconds.
+ */
 export function makeAudioData(
   data: Float32Array<ArrayBuffer>,
   frames: number,
@@ -235,6 +242,13 @@ export function makeAudioData(
   })
 }
 
+/**
+ * Encodes PCM as AAC-LC and closes each submitted AudioData frame.
+ *
+ * @param inputs - PCM frames matching the normalization format.
+ * @param signal - Optional cancellation signal for encoding.
+ * @yields Encoded AAC chunks with decoder configuration when reported.
+ */
 export async function* encodeAac(
   inputs: AsyncIterable<AudioData>,
   signal?: AbortSignal,
@@ -264,6 +278,14 @@ export async function* encodeAac(
   }
 }
 
+/**
+ * Decodes encoded audio with backpressure. The consumer owns each yielded frame.
+ *
+ * @param inputs - Encoded audio chunks in decode order.
+ * @param config - WebCodecs configuration for the source codec and format.
+ * @param signal - Optional cancellation signal for decoding.
+ * @returns An asynchronous generator yielding decoded AudioData frames.
+ */
 export function decodeAudio(
   inputs: AsyncIterable<EncodedAudioChunk>,
   config: AudioDecoderConfig,
@@ -286,6 +308,12 @@ export function decodeAudio(
   )
 }
 
+/**
+ * Adapts encoded packets to WebCodecs audio chunks marked as key chunks.
+ *
+ * @param packets - Source packets in decode order.
+ * @yields A WebCodecs chunk for each source packet.
+ */
 export async function* audioChunks(packets: AsyncIterable<EncodedPacket>) {
   for await (const packet of packets) {
     yield (
@@ -294,7 +322,13 @@ export async function* audioChunks(packets: AsyncIterable<EncodedPacket>) {
   }
 }
 
-/** Measures native AAC priming with a short signal at a known sample position. */
+/**
+ * Measures native AAC priming by locating a known PCM marker after an encode/decode round trip.
+ *
+ * @param signal - Optional cancellation signal for the probe.
+ * @returns A promise resolving to the encoder delay in samples at the AAC sample rate.
+ * @throws If the codec probe fails or the delay cannot be measured.
+ */
 export async function measureAacPriming(signal?: AbortSignal): Promise<number> {
   const markerStart = 4 * AAC_FRAME_SIZE
   const marker = Float32Array.from(

@@ -1,14 +1,14 @@
+import { isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_CODEC,
   REMUX_ERROR_CODE,
 } from '../constants'
-import { createRemuxError } from '../errors'
+import type { DecodeTimeline, PacketTrack, SegmentInfo } from '../types'
+import { createRemuxError } from '../utils'
 import { GLOBAL_TIMESCALE } from '../vendor/mediabunny/src/isobmff/isobmff-muxer'
 import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
 import type { EncodedPacket } from '../vendor/mediabunny/src/packet'
-import type { PacketTrack } from './input/mediaInput'
-import type { SegmentInfo } from './mediaTracks'
 
 /**
  * Plans decode clocks without retaining individual packet metadata.
@@ -19,7 +19,7 @@ import type { SegmentInfo } from './mediaTracks'
  * @param tracks - Output tracks in muxer order; video uses the default MP4 timescale.
  * @returns A bounded accumulator shared by segment inspections and output setup.
  */
-export function createDecodeTimeline(tracks: PacketTrack[]) {
+export function createDecodeTimeline(tracks: PacketTrack[]): DecodeTimeline {
   const clocks = tracks.map(track => ({
     isAv1: track.codec === MEDIA_CODEC.av1,
     timescale:
@@ -58,7 +58,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
       const clock = clocks[index]
       const duration = packet.sideData.decodeDuration
 
-      if (!clock || duration === undefined) {
+      if (!clock || isUndefined(duration)) {
         throw createRemuxError(
           REMUX_ERROR_CODE.invalidInput,
           'Missing packet decode duration.',
@@ -182,6 +182,3 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
     },
   }
 }
-
-/** Bounded decode-clock state carried across all segment preflight scans. */
-export type DecodeTimeline = ReturnType<typeof createDecodeTimeline>

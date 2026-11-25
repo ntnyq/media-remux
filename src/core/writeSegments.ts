@@ -1,6 +1,6 @@
 /* oxlint-disable no-await-in-loop -- Mux packets in decode order with stream backpressure. */
 
-import { checkAbort } from '../abort'
+import { isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
@@ -12,7 +12,12 @@ import type {
   RemuxProgress,
   RemuxResult,
   RemuxStorage,
+  OutputSegment,
+  PacketTrack,
+  SegmentInfo,
+  TrackWriter,
 } from '../types'
+import { checkAbort } from '../utils'
 import {
   EncodedVideoPacketSource,
   EncodedAudioPacketSource,
@@ -22,8 +27,6 @@ import { Mp4OutputFormat } from '../vendor/mediabunny/src/output-format'
 import type { IsobmffTrackTiming } from '../vendor/mediabunny/src/output-format'
 import { EncodedPacket } from '../vendor/mediabunny/src/packet'
 import { StreamTarget } from '../vendor/mediabunny/src/target'
-import type { PacketTrack } from './input/mediaInput'
-import type { SegmentInfo } from './mediaTracks'
 import { normalizeAudio } from './normalizeAudio'
 
 /**
@@ -137,29 +140,6 @@ function abortableStorage(
   }
 }
 
-interface OutputSegment {
-  tracks: PacketTrack[]
-  info: SegmentInfo
-  isLast: boolean
-}
-
-interface TrackWriter {
-  /**
-   * Sends a packet to its configured encoded media source.
-   *
-   * @param packet - Encoded packet with normalized output presentation timing.
-   * @returns A promise resolving when the source accepts the packet.
-   */
-  add: (packet: EncodedPacket) => Promise<void>
-
-  /**
-   * Marks the encoded source complete before muxer finalization.
-   *
-   * @returns Nothing.
-   */
-  close: () => void
-}
-
 /**
  * Writes compatible encoded segments as fragmented MP4/M4A with backpressure.
  * Each segment's earliest presentation timestamp is shifted to the preceding
@@ -217,7 +197,7 @@ export async function writeSegments(
       _fragmentIndexStore: storage.fragmentIndex,
       _fragmentSampleStore: storage.fragmentSamples,
       _fragmentTrackTimings: trackTimings,
-      _fragmentedEmptyMediaHeaders: normalizedAudio !== undefined,
+      _fragmentedEmptyMediaHeaders: !isUndefined(normalizedAudio),
     }),
     target: new StreamTarget(options.writable, {
       chunked: true,
@@ -364,7 +344,7 @@ export async function writeSegments(
 
   try {
     for (const [index, track] of baseline.entries()) {
-      const transcodes = normalizedAudio !== undefined && index === audioIndex
+      const transcodes = !isUndefined(normalizedAudio) && index === audioIndex
       const codec = transcodes ? MEDIA_CODEC.aac : track.codec
       const config = transcodes ? normalizedAudio.config : track.config
       const isAudioCodec =

@@ -1,13 +1,18 @@
 /* oxlint-disable no-await-in-loop -- MPEG-TS cursors consume encoded packets in decode order. */
-import { checkAbort } from '../../abort'
 import {
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
 } from '../../constants'
-import { createRemuxError, withRemuxErrorCode } from '../../errors'
-import type { RemuxTrackSelection } from '../../types'
+import type { RemuxTrackSelection, MediaInput, PacketTrack } from '../../types'
+import {
+  aacLcDecoderConfig,
+  avcDecoderConfig,
+  checkAbort,
+  createRemuxError,
+  withRemuxErrorCode,
+} from '../../utils'
 import {
   aacChannelMap,
   aacFrequencyTable,
@@ -39,9 +44,13 @@ import {
 } from '../../vendor/mediabunny/src/packet'
 import { Reader } from '../../vendor/mediabunny/src/reader'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
-import { aacLcDecoderConfig, avcDecoderConfig } from './codecConfig'
-import type { MediaInput, PacketTrack } from './mediaInput'
 
+/**
+ * Adds remux error codes to recognized MPEG-TS parser failures.
+ *
+ * @param error - A failure from transport-stream opening or packet reading.
+ * @returns The classified error, or the original value for unrecognized failures.
+ */
 function classifyTsError(error: unknown) {
   if (error instanceof InvalidMpegTsError) {
     return withRemuxErrorCode(error, REMUX_ERROR_CODE.invalidInput)
@@ -54,7 +63,13 @@ function classifyTsError(error: unknown) {
   return error
 }
 
-/** Builds MPEG-4 AAC initialization data from the ADTS header and optional PCE. */
+/**
+ * Builds AAC initialization bytes from an ADTS header and any required program configuration.
+ *
+ * @param frame - First ADTS frame, including payload for in-band channel configuration.
+ * @returns An MPEG-4 AudioSpecificConfig for the frame's AAC-LC format.
+ * @throws If the AAC profile is unsupported or a required program configuration is invalid.
+ */
 function audioDescription(frame: AdtsFrame) {
   const { objectType, samplingFrequencyIndex, channelConfiguration } =
     frame.header
@@ -100,6 +115,15 @@ function audioDescription(frame: AdtsFrame) {
   })
 }
 
+/**
+ * Probes an ADTS stream and exposes repeatable AAC packet iteration.
+ *
+ * @param demuxer - Shared transport-stream demuxer.
+ * @param pid - Packet identifier of the selected AAC stream.
+ * @param reference - Shared timestamp rollover reference in MPEG-TS clock ticks.
+ * @returns A promise resolving to the AAC decoder configuration and packet reader.
+ * @throws If the stream has no ADTS frames or its initial AAC configuration is invalid or unsupported.
+ */
 async function openAudioTrack(
   demuxer: MpegTsDemuxer,
   pid: number,
@@ -213,6 +237,13 @@ async function openAudioTrack(
   }
 }
 
+/**
+ * Builds AVC decoder metadata for MP4 with in-band parameter sets.
+ *
+ * @param data - Annex B access unit containing SPS and PPS NAL units.
+ * @returns The avc3 decoder configuration and parsed sequence parameter set.
+ * @throws If required parameter sets are missing or invalid.
+ */
 function avcDescription(data: Uint8Array) {
   const record = extractAvcDecoderConfigurationRecord(data)
 
@@ -232,7 +263,12 @@ function avcDescription(data: Uint8Array) {
   }
 }
 
-/** Properties that must stay compatible with the MP4 track's sample entry. */
+/**
+ * Serializes SPS properties that must stay compatible with the MP4 sample entry.
+ *
+ * @param sps - Parsed AVC sequence parameter set.
+ * @returns A JSON signature for comparing initial and later parameter sets.
+ */
 function spsSignature(sps: NonNullable<ReturnType<typeof parseAvcSps>>) {
   return JSON.stringify([
     sps.profileIdc,
@@ -251,6 +287,15 @@ function spsSignature(sps: NonNullable<ReturnType<typeof parseAvcSps>>) {
   ])
 }
 
+/**
+ * Probes an Annex B AVC stream and exposes length-prefixed packets in decode order.
+ *
+ * @param demuxer - Shared transport-stream demuxer.
+ * @param pid - Packet identifier of the selected AVC stream.
+ * @param reference - Shared timestamp rollover reference in MPEG-TS clock ticks.
+ * @returns A promise resolving to the AVC decoder configuration and packet reader.
+ * @throws If the stream has no AVC access units or its initial parameter sets are invalid.
+ */
 async function openVideoTrack(
   demuxer: MpegTsDemuxer,
   pid: number,
@@ -420,7 +465,16 @@ async function openVideoTrack(
   }
 }
 
-/** Keeps both tracks on the same rollover clock when their PES headers are readable. */
+/**
+ * Reads a shared rollover reference, falling back to the selected streams on
+ * recognized parser errors when the selection excludes a stream.
+ *
+ * @param demuxer - Shared transport-stream demuxer.
+ * @param pids - Packet identifiers of the available AVC and AAC streams.
+ * @param selectedPids - Packet identifiers retained for output.
+ * @returns A promise resolving to the first usable decode timestamp in MPEG-TS clock ticks.
+ * @throws If the applicable PES headers cannot supply a timestamp or a read fails.
+ */
 async function timestampReference(
   demuxer: MpegTsDemuxer,
   pids: number[],
@@ -443,6 +497,15 @@ async function timestampReference(
   }
 }
 
+/**
+ * Opens selected H.264 and AAC-LC tracks from an MPEG-TS program.
+ *
+ * @param blob - Source MPEG-TS Blob.
+ * @param signal - Optional cancellation signal used during opening and packet reads.
+ * @param selection - Requested media kinds to expose as repeatable packet readers.
+ * @returns A promise resolving to the selected tracks and a disposer for the Blob reader.
+ * @throws If transport-stream parsing fails, a selected format is unsupported, or reading is aborted.
+ */
 export async function openMpegTsInput(
   blob: Blob,
   signal: AbortSignal | undefined,

@@ -1,126 +1,15 @@
 /* oxlint-disable no-await-in-loop -- EBML elements are read in file order. */
 
-import { checkAbort } from '../../abort'
-import { REMUX_ERROR_CODE } from '../../constants'
-import { createRemuxError } from '../../errors'
+import {
+  REMUX_ERROR_CODE,
+  MKV_ID,
+  MKV_SEGMENT_BOUNDARIES,
+} from '../../constants'
+import type { MkvElement } from '../../types'
+import { checkAbort, createRemuxError, invalidMkv, readVint } from '../../utils'
 import { Reader, readBytes, readU8 } from '../../vendor/mediabunny/src/reader'
-import type { FileSlice } from '../../vendor/mediabunny/src/reader'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
 import type { SourceRef } from '../../vendor/mediabunny/src/source'
-
-/**
- * EBML and Matroska element IDs used by the MKV reader.
- */
-export const MKV_ID = {
-  header: 0x1a45dfa3,
-  docType: 0x4282,
-  docTypeReadVersion: 0x4285,
-  segment: 0x18538067,
-  seekHead: 0x114d9b74,
-  info: 0x1549a966,
-  timestampScale: 0x2ad7b1,
-  tracks: 0x1654ae6b,
-  trackEntry: 0xae,
-  trackNumber: 0xd7,
-  trackType: 0x83,
-  flagEnabled: 0xb9,
-  flagDefault: 0x88,
-  codecId: 0x86,
-  codecPrivate: 0x63a2,
-  codecDelay: 0x56aa,
-  defaultDuration: 0x23e383,
-  trackTimestampScale: 0x23314f,
-  trackOffset: 0x537f,
-  contentEncodings: 0x6d80,
-  video: 0xe0,
-  displayWidth: 0x54b0,
-  displayHeight: 0x54ba,
-  displayUnit: 0x54b2,
-  pixelWidth: 0xb0,
-  pixelHeight: 0xba,
-  pixelCropBottom: 0x54aa,
-  pixelCropTop: 0x54bb,
-  pixelCropLeft: 0x54cc,
-  pixelCropRight: 0x54dd,
-  colour: 0x55b0,
-  matrixCoefficients: 0x55b1,
-  range: 0x55b9,
-  transferCharacteristics: 0x55ba,
-  primaries: 0x55bb,
-  cluster: 0x1f43b675,
-  timestamp: 0xe7,
-  simpleBlock: 0xa3,
-  blockGroup: 0xa0,
-  block: 0xa1,
-  blockDuration: 0x9b,
-  referenceBlock: 0xfb,
-  codecState: 0xa4,
-  blockAdditions: 0x75a1,
-  discardPadding: 0x75a2,
-  cues: 0x1c53bb6b,
-  attachments: 0x1941a469,
-  chapters: 0x1043a770,
-  tags: 0x1254c367,
-  void: 0xec,
-  crc32: 0xbf,
-} as const
-
-const SEGMENT_BOUNDARIES = new Set<number>([
-  MKV_ID.header,
-  MKV_ID.segment,
-  MKV_ID.seekHead,
-  MKV_ID.info,
-  MKV_ID.tracks,
-  MKV_ID.cluster,
-  MKV_ID.cues,
-  MKV_ID.attachments,
-  MKV_ID.chapters,
-  MKV_ID.tags,
-])
-
-export interface MkvElement {
-  id: number
-  data: number
-  end: number
-  unknownSize: boolean
-}
-
-/**
- * Signals malformed or truncated MKV data discovered during inspection.
- */
-export function invalidMkv(message: string) {
-  return createRemuxError(REMUX_ERROR_CODE.invalidInput, message)
-}
-
-/**
- * Reads the EBML variable-length integer and its encoded width. The same
- * bits mean an unknown size only when used in an element size field.
- */
-export function readVint(slice: FileSlice) {
-  if (!slice.remainingLength) {
-    throw invalidMkv('Truncated MKV variable-length integer.')
-  }
-
-  const first = readU8(slice)
-  const width = Math.clz32(first) - 23
-
-  if (width > 8 || width - 1 > slice.remainingLength) {
-    throw invalidMkv('Invalid MKV variable-length integer.')
-  }
-
-  const mask = 0xff >> width
-  let value = first & mask
-  let allOnes = value === mask
-
-  for (let i = 1; i < width; i++) {
-    const byte = readU8(slice)
-
-    value = value * 256 + byte
-    allOnes &&= byte === 0xff
-  }
-
-  return { value, width, allOnes }
-}
 
 /**
  * Reads MKV byte ranges with bounded caching and cancellation checkpoints.
@@ -130,6 +19,12 @@ export class MkvReader {
   private readonly reader: Reader
   private readonly signal: AbortSignal | undefined
 
+  /**
+   * Creates a reader that owns a reference to a Blob-backed cache.
+   *
+   * @param blob - Source Matroska Blob.
+   * @param signal - Optional cancellation signal checked during range reads.
+   */
   constructor(blob: Blob, signal?: AbortSignal) {
     const source = new BlobSource(blob, { maxCacheSize: 4 * 1024 * 1024 })
 
@@ -138,6 +33,14 @@ export class MkvReader {
     this.signal = signal
   }
 
+  /**
+   * Reads an exact byte range with cancellation checks around the request.
+   *
+   * @param start - Absolute byte offset at which to begin reading.
+   * @param size - Number of bytes to read.
+   * @returns A promise resolving to the requested file slice.
+   * @throws If the range is truncated or the signal is aborted.
+   */
   async slice(start: number, size: number) {
     checkAbort(this.signal)
     const slice = await this.reader.requestSlice(start, size)
@@ -151,6 +54,14 @@ export class MkvReader {
     return slice
   }
 
+  /**
+   * Reads an EBML element header and validates its extent against the parent.
+   *
+   * @param offset - Absolute byte offset of the element ID.
+   * @param parentEnd - Exclusive byte boundary of the enclosing element or file.
+   * @returns A promise resolving to the element ID, payload bounds, and size flag.
+   * @throws If the header is truncated or the element extent is invalid.
+   */
   async element(offset: number, parentEnd: number): Promise<MkvElement> {
     const slice = await this.slice(offset, Math.min(12, parentEnd - offset))
     const id = readVint(slice)
@@ -173,7 +84,9 @@ export class MkvReader {
   /**
    * Iterates finite, bounded children without reading their payloads.
    *
+   * @param parent - Element whose direct children to visit.
    * @yields {MkvElement} The next direct child.
+   * @throws If a child is malformed, uses an unsupported unknown size, or starts another segment.
    */
   async *children(parent: MkvElement) {
     let offset = parent.data
@@ -206,6 +119,13 @@ export class MkvReader {
     }
   }
 
+  /**
+   * Scans an unknown-size cluster up to the next segment-level element.
+   *
+   * @param cluster - Cluster with a provisional end inherited from its parent.
+   * @returns A promise resolving to the cluster's exclusive byte boundary.
+   * @throws If the cluster contains an invalid child header or an unknown-size child.
+   */
   private async findClusterEnd(cluster: MkvElement) {
     let offset = cluster.data
 
@@ -213,7 +133,7 @@ export class MkvReader {
       const child = await this.element(offset, cluster.end)
 
       // A cluster of unknown size ends at the next segment-level element.
-      if (SEGMENT_BOUNDARIES.has(child.id)) {
+      if (MKV_SEGMENT_BOUNDARIES.has(child.id)) {
         break
       }
 
@@ -227,6 +147,14 @@ export class MkvReader {
     return offset
   }
 
+  /**
+   * Reads an EBML unsigned integer that fits in a JavaScript safe integer.
+   *
+   * @param element - Element containing the unsigned integer payload.
+   * @param defaultValue - Value to use for an empty payload, defaulting to zero.
+   * @returns A promise resolving to the unsigned integer or the supplied default.
+   * @throws If the payload exceeds eight bytes or the value is outside the safe integer range.
+   */
   async uint(element: MkvElement, defaultValue = 0) {
     const size = element.end - element.data
 
@@ -252,6 +180,14 @@ export class MkvReader {
     return value
   }
 
+  /**
+   * Reads a big-endian 32-bit or 64-bit EBML floating-point value.
+   *
+   * @param element - Element containing the floating-point payload.
+   * @param defaultValue - Value to use for an empty payload.
+   * @returns A promise resolving to the decoded number or the supplied default.
+   * @throws If a nonempty payload has an invalid length.
+   */
   async float(element: MkvElement, defaultValue: number) {
     const size = element.end - element.data
 
@@ -270,6 +206,13 @@ export class MkvReader {
       : slice.view.getFloat64(slice.bufferPos)
   }
 
+  /**
+   * Reads a bounded EBML identifier and removes any null padding.
+   *
+   * @param element - Element containing the identifier bytes.
+   * @returns A promise resolving to the text before the first null byte,
+   * or an empty string for payloads longer than 64 bytes.
+   */
   async text(element: MkvElement) {
     const size = element.end - element.data
 
@@ -283,6 +226,13 @@ export class MkvReader {
     return new TextDecoder().decode(readBytes(slice, size)).split('\0', 1)[0]
   }
 
+  /**
+   * Tests whether an EBML integer payload contains any nonzero byte.
+   *
+   * @param element - Element containing a signed or unsigned integer payload.
+   * @returns A promise resolving to whether the integer is nonzero.
+   * @throws If the payload exceeds eight bytes.
+   */
   async hasNonzeroInteger(element: MkvElement) {
     const size = element.end - element.data
 

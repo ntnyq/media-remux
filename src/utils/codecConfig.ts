@@ -1,15 +1,15 @@
-import { MEDIA_CODEC, REMUX_ERROR_CODE } from '../../constants'
-import { createRemuxError, withRemuxErrorCode } from '../../errors'
+import { MEDIA_CODEC, REMUX_ERROR_CODE } from '../constants'
 import {
   InvalidAacDescriptionError,
   parseAacAudioSpecificConfig,
-} from '../../vendor/mediabunny/shared/aac-misc'
-import { Bitstream } from '../../vendor/mediabunny/shared/bitstream'
-import { extractColorSpace } from '../../vendor/mediabunny/src/codec'
+} from '../vendor/mediabunny/shared/aac-misc'
+import { Bitstream } from '../vendor/mediabunny/shared/bitstream'
+import { extractColorSpace } from '../vendor/mediabunny/src/codec'
 import {
   deserializeAvcDecoderConfigurationRecord,
   parseAvcSps,
-} from '../../vendor/mediabunny/src/codec-data'
+} from '../vendor/mediabunny/src/codec-data'
+import { createRemuxError, withRemuxErrorCode } from './errors'
 
 /**
  * Builds an H.264 decoder configuration from an AVCDecoderConfigurationRecord.

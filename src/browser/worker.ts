@@ -1,62 +1,32 @@
 /* oxlint-disable unicorn/require-post-message-target-origin -- Dedicated Workers do not accept a window target origin. */
 /* oxlint-disable no-await-in-loop -- OPFS path components resolve from parent to child. */
+
 import {
   MEDIA_JOB_OPERATION,
   REMUX_PROGRESS_PHASE,
   WORKER_MESSAGE_TYPE,
+  JOB_OUTPUT_MP4_FILE,
+  JOB_SPOOL_DIRECTORY,
 } from '../constants'
 import { remuxMedia, combineTracks, concatMedia } from '../core/remux'
-import { isRemuxError } from '../errors'
 import { createOpfsStorage } from '../storage'
-import type { DisposableRemuxStorage } from '../storage'
 import type {
   MediaOutputChunk,
   RemuxOptions,
   RemuxProgress,
   RemuxResult,
+  DisposableRemuxStorage,
+  MediaWorkerScope,
 } from '../types'
+import { isRemuxError } from '../utils'
 import { isWorkerRequest } from './protocol'
-import type { WorkerResponse } from './protocol'
-
-/**
- * Minimal dedicated-Worker surface, also usable by hosts and tests.
- */
-export interface MediaWorkerScope {
-  /**
-   * Registers a listener for parent-to-Worker messages.
-   *
-   * @param type - Dedicated Worker message event name.
-   * @param listener - Callback receiving an untrusted request in event.data.
-   * @returns Nothing; listener registration is synchronous.
-   */
-  addEventListener: (
-    type: 'message',
-    listener: (event: MessageEvent<unknown>) => void,
-  ) => void
-
-  /**
-   * Removes a previously registered parent-message listener.
-   *
-   * @param type - Dedicated Worker message event name.
-   * @param listener - The same callback reference passed to addEventListener().
-   * @returns Nothing; an already running callback is unaffected.
-   */
-  removeEventListener: (
-    type: 'message',
-    listener: (event: MessageEvent<unknown>) => void,
-  ) => void
-
-  /**
-   * Posts a progress, completion, or error response to the parent thread.
-   *
-   * @param message - Structured-cloneable media Worker protocol response.
-   * @returns Nothing; delivery to the parent is asynchronous.
-   */
-  postMessage: (message: WorkerResponse) => void
-}
 
 /**
  * Opens the parent's existing OPFS job files using the Worker's own root.
+ *
+ * @param path - Job directory components relative to the OPFS root.
+ * @returns A promise resolving to the output file handle and spool directory.
+ * @throws If the OPFS root, the job directory, or its entries cannot be opened.
  */
 async function openJobFiles(path: readonly string[]) {
   let temporary = await globalThis.navigator.storage.getDirectory()
@@ -66,8 +36,8 @@ async function openJobFiles(path: readonly string[]) {
   }
 
   const [handle, directory] = await Promise.all([
-    temporary.getFileHandle('output.mp4'),
-    temporary.getDirectoryHandle('spools'),
+    temporary.getFileHandle(JOB_OUTPUT_MP4_FILE),
+    temporary.getDirectoryHandle(JOB_SPOOL_DIRECTORY),
   ])
 
   return { handle, directory }

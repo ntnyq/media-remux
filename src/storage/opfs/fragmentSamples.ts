@@ -1,52 +1,6 @@
 import { isFunction } from '@ntnyq/utils'
+import type { WorkerFileHandle } from '../../types'
 import { createDiskFragmentSamples } from '../fragmentSamples'
-
-/**
- * Worker file handle supporting synchronous positional access to temporary files.
- */
-interface WorkerFileHandle extends FileSystemFileHandle {
-  /**
-   * Opens exclusive synchronous file access in a dedicated Worker.
-   *
-   * @returns A promise resolving to positional I/O and file lifecycle methods.
-   */
-  createSyncAccessHandle: () => Promise<{
-    /**
-     * Reads synchronously into a caller-owned buffer.
-     *
-     * @param data - Destination bytes to fill from the start of the buffer.
-     * @param options - Positional read settings.
-     * @param options.at - Absolute source byte offset in the file.
-     * @returns Number of bytes read, which may be less than the buffer length.
-     */
-    read: (data: Uint8Array<ArrayBuffer>, options: { at: number }) => number
-
-    /**
-     * Writes synchronously at an explicit file position.
-     *
-     * @param data - Source bytes to write.
-     * @param options - Positional write settings.
-     * @param options.at - Absolute destination byte offset in the file.
-     * @returns Number of bytes written, which may be less than the buffer length.
-     */
-    write: (data: Uint8Array<ArrayBuffer>, options: { at: number }) => number
-
-    /**
-     * Resizes the synchronous backing file.
-     *
-     * @param size - New file length in bytes.
-     * @returns Nothing.
-     */
-    truncate: (size: number) => void
-
-    /**
-     * Releases the synchronous handle and its exclusive file lock.
-     *
-     * @returns Nothing.
-     */
-    close: () => void
-  }>
-}
 
 /**
  * Checks whether a Worker file handle exposes synchronous positional OPFS

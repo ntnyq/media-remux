@@ -1,18 +1,26 @@
 /* oxlint-disable no-await-in-loop -- Decode and spool audio in presentation order. */
 
-import { checkAbort } from '../abort'
+import { isUndefined } from '@ntnyq/utils'
 import {
   FRAGMENT_SAMPLE_TYPE,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
-} from '../constants'
-import { createRemuxError } from '../errors'
-import type { RemuxStorage } from '../types'
-import { EncodedPacket } from '../vendor/mediabunny/src/packet'
-import {
   AAC_CHANNELS,
   AAC_FRAME_SIZE,
   AAC_SAMPLE_RATE,
+  AUDIO_SPOOL_ID,
+  RESAMPLE_RADIUS,
+  RESAMPLE_PHASES,
+} from '../constants'
+import type {
+  RemuxStorage,
+  AudioSegment,
+  PacketTrack,
+  PcmBlock,
+} from '../types'
+import { checkAbort, createRemuxError } from '../utils'
+import { EncodedPacket } from '../vendor/mediabunny/src/packet'
+import {
   audioChunks,
   checkAacEncoder,
   decodeAudio,
@@ -20,29 +28,13 @@ import {
   makeAudioData,
   measureAacPriming,
 } from './audioCodecs'
-import type { PacketTrack } from './input/mediaInput'
-import type { SegmentInfo } from './mediaTracks'
 
-// The output uses at most two tracks. Use a separate temporary track ID.
-const AUDIO_SPOOL_ID = 3
-const RESAMPLE_RADIUS = 8
-const RESAMPLE_PHASES = 64
-
-interface AudioSegment {
-  tracks: PacketTrack[]
-  info: SegmentInfo
-}
-
-interface PcmBlock {
-  planes: Float32Array<ArrayBuffer>[]
-  sampleRate: number
-  start: number
-  end: number
-  previous?: Float32Array<ArrayBuffer>[]
-  next?: Float32Array<ArrayBuffer>[]
-}
-
-/** Low-pass interpolation kernels, indexed by the fractional source position. */
+/**
+ * Builds normalized low-pass kernels for fractional source positions.
+ *
+ * @param sampleRate - Source PCM sample rate in hertz, used to set the cutoff.
+ * @returns A table of interpolation weights indexed by fractional phase.
+ */
 function resamplingKernels(sampleRate: number) {
   const cutoff = Math.min(1, AAC_SAMPLE_RATE / sampleRate)
 
@@ -67,7 +59,12 @@ function resamplingKernels(sampleRate: number) {
 /**
  * Copies Worker-owned AudioData into bounded PCM blocks. Decode the prefix of
  * a cut MP3 stream to restore its reservoir, then crop on the presentation clock.
+ *
+ * @param track - Selected source audio track and its decoder configuration.
+ * @param shift - Source-to-output offset measured in output samples.
+ * @param signal - Optional cancellation signal for decoding.
  * @yields Source PCM blocks positioned on the output clock.
+ * @throws If decoding fails or the track configuration or channel count is invalid.
  */
 async function* decodeSegment(
   track: PacketTrack,
@@ -142,6 +139,10 @@ async function* decodeSegment(
 /**
  * Builds one continuous PCM clock from source samples and silence. The encoder
  * stays open across every splice so no extra priming appears between segments.
+ *
+ * @param segments - Inspected segments in output presentation order.
+ * @param preroll - Number of silent output samples to prepend before encoding.
+ * @param signal - Optional cancellation signal for decoding and PCM assembly.
  * @yields Full PCM blocks for the AAC encoder.
  */
 async function* pcmInputs(
@@ -264,6 +265,14 @@ async function* pcmInputs(
  * Encodes and spools normalized audio before opening the output. Each encoded
  * packet keeps its full AAC data, including the first packet that overlaps the
  * retained end. Encoder priming and added silence occupy complete frames.
+ *
+ * @param segments - Inspected segments in output presentation order.
+ * @param duration - Target presentation span in seconds.
+ * @param store - Temporary sample store for encoded AAC metadata and payloads.
+ * @param signal - Optional cancellation signal for normalization and packet reads.
+ * @returns A promise resolving to the AAC decoder configuration, output timing,
+ * and a reader for the spooled packets.
+ * @throws If the target duration or encoded output is invalid, or normalization fails.
  */
 export async function normalizeAudio(
   segments: AsyncIterable<AudioSegment>,
@@ -333,7 +342,7 @@ export async function normalizeAudio(
     config.sampleRate !== AAC_SAMPLE_RATE ||
     config.numberOfChannels !== AAC_CHANNELS ||
     frame < end ||
-    firstId === undefined
+    isUndefined(firstId)
   ) {
     throw createRemuxError(
       REMUX_ERROR_CODE.unsupportedMediaFeature,

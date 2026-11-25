@@ -1,4 +1,14 @@
-import { isFunction, isNumber, isString } from '@ntnyq/utils'
+import {
+  isBoolean,
+  isFunction,
+  isInteger,
+  isNonEmptyArray,
+  isNonEmptyString,
+  isNumber,
+  isObject,
+  isString,
+  isUndefined,
+} from '@ntnyq/utils'
 import {
   MEDIA_JOB_OPERATION,
   REMUX_MIME_TYPE,
@@ -6,81 +16,8 @@ import {
   REMUX_TRACK_SELECTION,
   WORKER_MESSAGE_TYPE,
 } from '../constants'
-import { isRemuxErrorCode } from '../errors'
-import type { RemuxErrorCode } from '../errors'
-import type { RemuxProgress, RemuxResult } from '../types'
-import type { MediaJob } from './types'
-
-/**
- * Parent-to-Worker message requesting one job in an assigned temporary directory.
- */
-export type WorkerRequest = {
-  /**
-   * Identifies a request to execute a media job.
-   */
-  type: typeof WORKER_MESSAGE_TYPE.run
-
-  /**
-   * Operation and source Blobs to process in the dedicated Worker.
-   */
-  job: MediaJob
-} & (
-  | { path: readonly string[] }
-  | {
-      path?: undefined
-      handle: FileSystemFileHandle
-      directory: FileSystemDirectoryHandle
-    }
-)
-
-/**
- * Worker-to-parent progress, completion, or serialized failure message,
- * discriminated by type.
- */
-export type WorkerResponse =
-  | {
-      /**
-       * Identifies a nonterminal progress notification.
-       */
-      type: typeof WORKER_MESSAGE_TYPE.progress
-
-      /**
-       * Current phase, encoded payload bytes written, and segment position.
-       */
-      progress: RemuxProgress
-    }
-  | {
-      /**
-       * Identifies successful output finalization and temporary store disposal.
-       */
-      type: typeof WORKER_MESSAGE_TYPE.complete
-
-      /**
-       * Completed job's duration, MIME type, and written encoded payload byte count.
-       */
-      result: RemuxResult
-    }
-  | {
-      /**
-       * Identifies a terminal job failure after attempted resource cleanup.
-       */
-      type: typeof WORKER_MESSAGE_TYPE.error
-
-      /**
-       * Original Error name, or 'Error' when the thrown value was not an Error.
-       */
-      name: string
-
-      /**
-       * Failure description, including a cleanup failure suffix when applicable.
-       */
-      message: string
-
-      /**
-       * Stable media failure code when available.
-       */
-      code?: RemuxErrorCode
-    }
+import type { WorkerRequest, WorkerResponse } from '../types'
+import { isRemuxErrorCode } from '../utils'
 
 /**
  * Checks whether an untrusted value can be inspected for protocol properties.
@@ -89,7 +26,7 @@ export type WorkerResponse =
  * @returns Whether the value is a non-null object, including arrays.
  */
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
+  return isObject(value) && !isFunction(value)
 }
 
 /**
@@ -120,7 +57,7 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
     return (
       isString(value['name']) &&
       isString(value['message']) &&
-      (value['code'] === undefined || isRemuxErrorCode(value['code']))
+      (isUndefined(value['code']) || isRemuxErrorCode(value['code']))
     )
   }
 
@@ -142,15 +79,15 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
     isRecord(progress) &&
     Object.values<unknown>(REMUX_PROGRESS_PHASE).includes(progress['phase']) &&
     isFiniteNumber(progress['bytesProcessed']) &&
-    Number.isInteger(progress['segmentIndex']) &&
+    isInteger(progress['segmentIndex']) &&
     isFiniteNumber(progress['segmentIndex'])
   )
 }
 
 /**
- * Checks a run request's operation, Blob inputs, track selection, and required
- * filesystem methods. Handles are checked structurally; access permissions and
- * actual I/O capability are left to the operation that uses them.
+ * Checks a run request's operation, Blob inputs, and track and audio options.
+ * Verifies either the OPFS path components or the required filesystem methods.
+ * The operation verifies access permissions when it opens the job files.
  *
  * @param value - Untrusted data received by a media Worker.
  * @returns Whether the value matches a supported request, narrowing it to
@@ -165,17 +102,15 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   if (
     !isRecord(job) ||
-    (path === undefined
+    (isUndefined(path)
       ? !isRecord(handle) ||
         !isRecord(directory) ||
         !isFunction(handle['createWritable']) ||
         !isFunction(directory['getFileHandle'])
-      : !Array.isArray(path) ||
-        path.length === 0 ||
+      : !isNonEmptyArray(path) ||
         [...path].some(
           component =>
-            !isString(component) ||
-            !component ||
+            !isNonEmptyString(component) ||
             /[/\\]/u.test(component) ||
             component === '.' ||
             component === '..',
@@ -187,9 +122,9 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
   const { tracks, normalizeAudio } = job
 
   if (
-    (tracks !== undefined &&
+    (!isUndefined(tracks) &&
       !Object.values<unknown>(REMUX_TRACK_SELECTION).includes(tracks)) ||
-    (normalizeAudio !== undefined && typeof normalizeAudio !== 'boolean')
+    (!isUndefined(normalizeAudio) && !isBoolean(normalizeAudio))
   ) {
     return false
   }
@@ -204,8 +139,7 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
 
   return (
     job['operation'] === MEDIA_JOB_OPERATION.concat &&
-    Array.isArray(job['inputs']) &&
-    job['inputs'].length > 0 &&
+    isNonEmptyArray(job['inputs']) &&
     job['inputs'].every(input => input instanceof Blob)
   )
 }

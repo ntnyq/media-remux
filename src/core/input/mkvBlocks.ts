@@ -1,30 +1,19 @@
 /* oxlint-disable no-await-in-loop -- Block headers and lace sizes are read in order. */
 
-import { REMUX_ERROR_CODE } from '../../constants'
-import { createRemuxError } from '../../errors'
+import { isInteger, isUndefined } from '@ntnyq/utils'
+import { REMUX_ERROR_CODE, MKV_ID } from '../../constants'
+import type { BlockGroup, MkvBlock, MkvElement } from '../../types'
+import { createRemuxError, invalidMkv, readVint } from '../../utils'
 import { readI16Be, readU8 } from '../../vendor/mediabunny/src/reader'
-import { MKV_ID, invalidMkv, readVint } from './mkvElements'
-import type { MkvElement, MkvReader } from './mkvElements'
-
-interface MkvBlock {
-  offset: number
-  end: number
-  timestamp: number
-  isKey: boolean
-  lacing: number
-  duration?: number
-}
-
-interface BlockGroup {
-  block?: MkvElement
-  duration?: MkvElement
-  discardPadding?: MkvElement
-  hasReference: boolean
-  hasCodecChanges: boolean
-}
+import type { MkvReader } from './mkvElements'
 
 /**
  * Reads block-group metadata by range, leaving the Block payload untouched.
+ *
+ * @param reader - Range reader for the Matroska input.
+ * @param group - BlockGroup element whose direct children are inspected.
+ * @returns A promise resolving to group metadata with its required Block element.
+ * @throws If the group is malformed or lacks exactly one Block.
  */
 async function readBlockGroup(reader: MkvReader, group: MkvElement) {
   const result: BlockGroup = { hasReference: false, hasCodecChanges: false }
@@ -64,7 +53,12 @@ async function readBlockGroup(reader: MkvReader, group: MkvElement) {
 /**
  * Walks one MKV track's blocks in file (decode) order.
  *
+ * @param reader - Range reader for the Matroska input.
+ * @param segment - Segment containing the clusters and blocks to scan.
+ * @param track - Track number, timestamp multiplier, and codec delay (in nanoseconds).
+ * @param tick - Segment timestamp scale in nanoseconds per tick.
  * @yields {MkvBlock} Block payload locations and timing in seconds.
+ * @throws If block structure, timestamps, or selected block features are invalid or unsupported.
  */
 export async function* readMkvBlocks(
   reader: MkvReader,
@@ -90,7 +84,7 @@ export async function* readMkvBlocks(
       }
     }
 
-    if (timestamp === undefined) {
+    if (isUndefined(timestamp)) {
       throw invalidMkv('Missing MKV Cluster timestamp.')
     }
 
@@ -173,6 +167,11 @@ export async function* readMkvBlocks(
  * Resolves the byte lengths of the frames in a laced MKV block.
  * The first lace byte gives the frame count minus one. In Xiph and EBML
  * lacing the last frame occupies the remaining bytes.
+ *
+ * @param reader - Range reader for the block's lace headers.
+ * @param block - Block payload bounds and lacing mode.
+ * @returns A promise resolving to the first frame's byte offset and all frame sizes.
+ * @throws If the block is empty or its lace metadata is invalid.
  */
 export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
   if (block.offset >= block.end) {
@@ -192,7 +191,7 @@ export async function readMkvFrames(reader: MkvReader, block: MkvBlock) {
   if (block.lacing === 2) {
     const size = (block.end - offset) / count
 
-    if (!Number.isInteger(size) || size <= 0) {
+    if (!isInteger(size) || size <= 0) {
       throw invalidMkv('Invalid fixed-size MKV lace.')
     }
 

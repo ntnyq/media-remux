@@ -3,9 +3,8 @@ import type {
   REMUX_MIME_TYPE,
   REMUX_PROGRESS_PHASE,
   REMUX_TRACK_SELECTION,
-} from './constants'
-import type { FragmentIndexStore } from './storage/fragmentIndex'
-import type { FragmentSampleStore } from './storage/fragmentSamples'
+} from '../constants'
+import type { RemuxStorage } from './storage'
 
 /**
  * Primary tracks to retain when remuxing or concatenating.
@@ -35,27 +34,12 @@ export interface MediaOutputChunk {
 }
 
 /**
- * Caller-owned temporary stores; dispose them after every job.
- */
-export interface RemuxStorage {
-  /**
-   * Per-track storage for completed-fragment TFRA index records.
-   */
-  fragmentIndex: FragmentIndexStore
-
-  /**
-   * Storage for sample metadata, encoded payloads, and sorted GOP timestamps.
-   */
-  fragmentSamples: FragmentSampleStore
-}
-
-/**
- * Progress snapshot for input inspection, packet copying, or output finalization.
+ * Progress snapshot for input inspection, packet writing, or output finalization.
  */
 export interface RemuxProgress {
   /**
-   * Current stage: inspect validates inputs, remux copies encoded packets, and
-   * finalize writes the remaining container metadata.
+   * Current stage of input validation, encoded packet writing, or container
+   * finalization.
    */
   phase: ValueOf<typeof REMUX_PROGRESS_PHASE>
 
@@ -126,7 +110,8 @@ export interface RemuxResult {
   bytesProcessed: number
 
   /**
-   * Output presentation span in seconds, summed across normalized segments.
+   * Output presentation span in seconds. For concatenation, this is the sum of
+   * the presentation spans of the inspected segments.
    */
   duration: number
 

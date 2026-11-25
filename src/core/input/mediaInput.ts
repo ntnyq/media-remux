@@ -1,15 +1,14 @@
 /* oxlint-disable no-await-in-loop -- Packet cursors advance in decode order with backpressure. */
-import { isString } from '@ntnyq/utils'
-import type { ValueOf } from '@ntnyq/utils'
-import { checkAbort } from '../../abort'
+import { isString, isUndefined } from '@ntnyq/utils'
 import {
   MEDIA_CODEC,
   MEDIA_TRACK_KIND,
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
+  MKV_ID,
 } from '../../constants'
-import { createRemuxError, withRemuxErrorCode } from '../../errors'
-import type { RemuxTrackSelection } from '../../types'
+import type { RemuxTrackSelection, MediaInput, PacketTrack } from '../../types'
+import { checkAbort, createRemuxError, withRemuxErrorCode } from '../../utils'
 import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
 import {
   AvcNalUnitType,
@@ -25,90 +24,19 @@ import {
   InvalidIsobmffInputError,
   UnsupportedIsobmffInputError,
 } from '../../vendor/mediabunny/src/isobmff/isobmff-demuxer'
-import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { EncodedPacketSink } from '../../vendor/mediabunny/src/media-sink'
-import type { TransformationMatrix } from '../../vendor/mediabunny/src/misc'
 import { TS_PACKET_SIZE } from '../../vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
 import type { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
 import { openFlvInput } from './flvInput'
-import { MKV_ID } from './mkvElements'
 import { openMkvInput } from './mkvInput'
 import { openMpegTsInput } from './mpegTsInput'
 
 /**
- * Supported encoded track with its decoder configuration and repeatable packet reader.
- */
-export interface PacketTrack {
-  /**
-   * Media kind of the selected track.
-   */
-  kind: ValueOf<typeof MEDIA_TRACK_KIND>
-
-  /**
-   * Validated codec family used by the encoded packet source.
-   */
-  codec: ValueOf<typeof MEDIA_CODEC>
-
-  /**
-   * Decoder configuration matching kind, including codec initialization bytes.
-   */
-  config: VideoDecoderConfig | AudioDecoderConfig
-
-  /**
-   * Optional video display transformation preserved in the output. An absent
-   * matrix is treated as identity for compatibility checks; audio omits it.
-   */
-  matrix?: TransformationMatrix
-
-  /**
-   * Numeric color identifiers explicitly signaled by an MP4 video track.
-   */
-  containerColorInformation?: IsobmffColorInformation
-
-  /** First playable position in an MP4 audio edit, on the packet timeline. */
-  audioEditStart?: number
-
-  /**
-   * Creates a fresh packet iterator in decode order.
-   *
-   * @param metadataOnly - Whether to omit encoded payload bytes while retaining
-   * packet timing, kind, and byte lengths; defaults to false.
-   * @param skipPackets - Number of leading packets to skip in decode order.
-   * @returns An asynchronous generator yielding encoded packets until track end.
-   * @throws If packet parsing fails or the input's cancellation signal is aborted.
-   */
-  packets: (
-    metadataOnly?: boolean,
-    skipPackets?: number,
-  ) => AsyncGenerator<EncodedPacket, void, unknown>
-
-  /** Finds an independently decodable sync sample after an initial delta packet. */
-  findNextRandomAccessPacket?: (
-    packet: EncodedPacket,
-  ) => Promise<EncodedPacket | null>
-}
-
-/**
- * Open media input with selected tracks and owned parser resources.
- */
-export interface MediaInput {
-  /**
-   * Available selected tracks. The list can be empty if the requested kind is absent.
-   */
-  tracks: PacketTrack[]
-
-  /**
-   * Releases parser resources and abort listeners after packet readers finish.
-   * Blob-backed FLV inputs have no resources to release.
-   *
-   * @returns Nothing.
-   */
-  dispose: () => void
-}
-
-/**
- * Codes explicit MP4 parser failures without classifying filesystem read errors.
+ * Adds remux error codes to explicit MP4 parser failures.
+ *
+ * @param error - A failure from MP4 input opening or packet reading.
+ * @returns The classified error, or the original value for unrecognized failures.
  */
 function classifyMp4Error(error: unknown): unknown {
   if (error instanceof UnsupportedInputFormatError) {
@@ -129,13 +57,19 @@ function classifyMp4Error(error: unknown): unknown {
   return error
 }
 
-/** An IDR resets H.264 reference pictures and can start Chrome playback. */
+/**
+ * Checks whether an H.264 packet's first slice is an IDR that resets reference pictures.
+ *
+ * @param packet - Encoded H.264 packet containing its NAL units.
+ * @param config - Video decoder configuration used to locate the NAL units.
+ * @returns Whether the first slice is a validly bounded IDR NAL unit.
+ */
 function isAvcIdrPacket(packet: EncodedPacket, config: VideoDecoderConfig) {
   for (const { offset, length } of iterateAvcNalUnits(packet.data, config)) {
     const header = packet.data[offset]
 
     if (
-      header === undefined ||
+      isUndefined(header) ||
       length < 1 ||
       offset + length > packet.byteLength
     ) {
@@ -325,7 +259,7 @@ export async function openMediaInput(
             ? { matrix: await track.getTransformationMatrix() }
             : {}),
           ...(containerColorInformation && { containerColorInformation }),
-          ...(audioEditStart === undefined ? {} : { audioEditStart }),
+          ...(isUndefined(audioEditStart) ? {} : { audioEditStart }),
           ...(codec === MEDIA_CODEC.avc && !('sampleRate' in config)
             ? {
                 async findNextRandomAccessPacket(packet: EncodedPacket) {
