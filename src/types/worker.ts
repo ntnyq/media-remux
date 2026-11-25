@@ -1,10 +1,16 @@
 import type { MEDIA_JOB_OPERATION, WORKER_MESSAGE_TYPE } from '../constants'
 import type { RemuxErrorCode } from './errors'
-import type { RemuxProgress, RemuxResult, RemuxTrackSelection } from './remux'
+import type {
+  RemuxInput,
+  RemuxProgress,
+  RemuxResult,
+  RemuxTrackSelection,
+} from './remux'
 
 /**
  * One isolated Worker operation, discriminated by operation. Inputs are MP4,
  * FLV, MKV, or MPEG-TS Blobs containing supported encoded video and/or audio.
+ * Remux and combine jobs also accept MPEG-TS descriptors.
  */
 export type MediaJob = {
   /**
@@ -19,9 +25,9 @@ export type MediaJob = {
       operation: typeof MEDIA_JOB_OPERATION.remux
 
       /**
-       * Nonempty source MP4, FLV, MKV, or MPEG-TS Blob.
+       * Nonempty source media Blob or MPEG-TS descriptor.
        */
-      input: Blob
+      input: RemuxInput
 
       /**
        * Track kinds to retain; defaults to all supported primary tracks.
@@ -35,14 +41,14 @@ export type MediaJob = {
       operation: typeof MEDIA_JOB_OPERATION.combine
 
       /**
-       * Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary video track.
+       * Media Blob or MPEG-TS descriptor supplying the primary video track.
        */
-      video: Blob
+      video: RemuxInput
 
       /**
-       * Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary audio track.
+       * Media Blob or MPEG-TS descriptor supplying the primary audio track.
        */
-      audio: Blob
+      audio: RemuxInput
     }
   | {
       /**
@@ -128,7 +134,7 @@ export type WorkerRequest = {
   type: typeof WORKER_MESSAGE_TYPE.run
 
   /**
-   * Operation and source Blobs to process in the dedicated Worker.
+   * Operation and source media inputs to process in the dedicated Worker.
    */
   job: MediaJob
 } & (

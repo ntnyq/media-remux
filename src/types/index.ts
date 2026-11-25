@@ -17,6 +17,8 @@ export type {
 } from './media'
 export type { MkvElement, MkvBlock, BlockGroup, MkvTrack } from './mkv'
 export type {
+  MpegTsInput,
+  RemuxInput,
   RemuxTrackSelection,
   MediaOutputChunk,
   RemuxProgress,

@@ -5,7 +5,12 @@ import {
   REMUX_ERROR_CODE,
   REMUX_TRACK_SELECTION,
 } from '../../constants'
-import type { RemuxTrackSelection, MediaInput, PacketTrack } from '../../types'
+import type {
+  MediaInput,
+  MpegTsInput,
+  PacketTrack,
+  RemuxTrackSelection,
+} from '../../types'
 import {
   aacLcDecoderConfig,
   avcDecoderConfig,
@@ -35,6 +40,7 @@ import {
   MpegTsDemuxer,
   MpegTsStreamType,
   normalizeWrappedTimestamp,
+  TS_PACKET_SIZE,
   UnsupportedMpegTsError,
 } from '../../vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
 import type { AdtsFrame } from '../../vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
@@ -44,6 +50,29 @@ import {
 } from '../../vendor/mediabunny/src/packet'
 import { Reader } from '../../vendor/mediabunny/src/reader'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
+
+// PMT types identify known audio and video even when this reader cannot decode
+// their framing. Private data and unrelated streams are left unclassified.
+const videoStreamTypes = new Set([
+  0x01,
+  0x02,
+  0x10,
+  MpegTsStreamType.AVC,
+  0x20,
+  0x21,
+  0x24,
+  0x33,
+  0x42,
+])
+const audioStreamTypes = new Set([
+  0x03,
+  0x04,
+  MpegTsStreamType.AAC,
+  0x11,
+  0x1c,
+  0x81,
+  0x87,
+])
 
 /**
  * Adds remux error codes to recognized MPEG-TS parser failures.
@@ -503,6 +532,7 @@ async function timestampReference(
  * @param blob - Source MPEG-TS Blob.
  * @param signal - Optional cancellation signal used during opening and packet reads.
  * @param selection - Requested media kinds to expose as repeatable packet readers.
+ * @param segmented - Declared packet-aligned segment starts and reset policy.
  * @returns A promise resolving to the selected tracks and a disposer for the Blob reader.
  * @throws If transport-stream parsing fails, a selected format is unsupported, or reading is aborted.
  */
@@ -510,11 +540,44 @@ export async function openMpegTsInput(
   blob: Blob,
   signal: AbortSignal | undefined,
   selection: RemuxTrackSelection,
+  segmented?: Omit<MpegTsInput, 'blob'>,
 ): Promise<MediaInput> {
+  if (segmented) {
+    const { segmentOffsets } = segmented
+
+    if (segmentOffsets[0] !== 0) {
+      throw createRemuxError(
+        REMUX_ERROR_CODE.invalidInput,
+        'MPEG-TS segment offsets must start at byte 0.',
+      )
+    }
+
+    let previous = -1
+
+    for (const [index, offset] of segmentOffsets.entries()) {
+      if (
+        !Number.isSafeInteger(offset) ||
+        offset <= previous ||
+        offset >= blob.size ||
+        offset % TS_PACKET_SIZE !== 0
+      ) {
+        throw createRemuxError(
+          REMUX_ERROR_CODE.invalidInput,
+          `Invalid MPEG-TS offset for segment ${index}. Segment starts must be strictly increasing, packet-aligned, and within the Blob.`,
+        )
+      }
+
+      previous = offset
+    }
+  }
+
   const source = new BlobSource(blob, { maxCacheSize: 4 * 1024 * 1024 })
   const ref = source.ref()
-  const demuxer = new MpegTsDemuxer(new Reader(source), blob.size, () =>
-    checkAbort(signal),
+  const demuxer = new MpegTsDemuxer(
+    new Reader(source),
+    blob.size,
+    () => checkAbort(signal),
+    segmented,
   )
 
   signal?.addEventListener('abort', dispose, { once: true })
@@ -528,9 +591,13 @@ export async function openMpegTsInput(
     const program = await demuxer.readProgram()
     const video = program.find(stream => stream.type === MpegTsStreamType.AVC)
     const audio = program.find(stream => stream.type === MpegTsStreamType.AAC)
+    const firstVideo = program.find(stream => videoStreamTypes.has(stream.type))
+    const firstAudio = program.find(
+      stream => audioStreamTypes.has(stream.type) || stream.privateAudio,
+    )
     const pids = [video, audio].flatMap(stream => (stream ? [stream.pid] : []))
 
-    if (pids.length === 0) {
+    if (!firstVideo && !firstAudio) {
       throw createRemuxError(
         REMUX_ERROR_CODE.unsupportedCodec,
         'MPEG-TS requires H.264 video or AAC-LC audio in ADTS.',
@@ -538,10 +605,35 @@ export async function openMpegTsInput(
     }
 
     const tracks: PacketTrack[] = []
+    const inFileOrder =
+      selection === REMUX_TRACK_SELECTION.firstVideoWithOptionalAudio
     const selectedVideo =
-      selection === REMUX_TRACK_SELECTION.audio ? undefined : video
+      selection === REMUX_TRACK_SELECTION.audio
+        ? undefined
+        : inFileOrder
+          ? firstVideo
+          : (video ?? firstVideo)
     const selectedAudio =
-      selection === REMUX_TRACK_SELECTION.video ? undefined : audio
+      selection === REMUX_TRACK_SELECTION.video
+        ? undefined
+        : inFileOrder
+          ? firstAudio
+          : (audio ?? firstAudio)
+
+    if (selectedVideo && selectedVideo.type !== MpegTsStreamType.AVC) {
+      throw createRemuxError(
+        REMUX_ERROR_CODE.unsupportedCodec,
+        'MPEG-TS requires H.264 video.',
+      )
+    }
+
+    if (selectedAudio && selectedAudio.type !== MpegTsStreamType.AAC) {
+      throw createRemuxError(
+        REMUX_ERROR_CODE.unsupportedCodec,
+        'MPEG-TS requires AAC-LC audio in ADTS.',
+      )
+    }
+
     const selectedPids = [selectedVideo, selectedAudio].flatMap(stream =>
       stream ? [stream.pid] : [],
     )

@@ -445,6 +445,25 @@ async function run(audioContext) {
 
     const vfr = await fixture('vfr-bframes.mp4')
     const vfrFlv = await fixture('vfr-bframes.flv')
+    const mpegTs = await fixture('continuous-av.mpegts')
+    const segmentStart = 5076
+    const tsPacketSize = 188
+    const tsBytes = new Uint8Array(await mpegTs.arrayBuffer())
+
+    for (
+      let offset = segmentStart + 3;
+      offset < tsBytes.length;
+      offset += tsPacketSize
+    ) {
+      tsBytes[offset] = (tsBytes[offset] & 0xf0) | ((tsBytes[offset] + 1) & 15)
+    }
+
+    const segmentedTs = {
+      blob: new Blob([tsBytes]),
+      segmentOffsets: [0, segmentStart],
+      allowContinuityCounterReset: true,
+    }
+    const tsVideoStart = (15000 - 12910) / 90000
     const playbackCases = [
       ['cfr-av', { operation: MEDIA_JOB_OPERATION.combine, video, audio }, 0],
       [
@@ -489,9 +508,25 @@ async function run(audioContext) {
         'mpeg-ts-remux',
         {
           operation: MEDIA_JOB_OPERATION.remux,
-          input: await fixture('continuous-av.mpegts'),
+          input: mpegTs,
         },
-        (15000 - 12910) / 90000,
+        tsVideoStart,
+        true,
+      ],
+      [
+        'segmented-mpeg-ts-remux',
+        { operation: MEDIA_JOB_OPERATION.remux, input: segmentedTs },
+        tsVideoStart,
+        true,
+      ],
+      [
+        'segmented-mpeg-ts-combine',
+        {
+          operation: MEDIA_JOB_OPERATION.combine,
+          video: segmentedTs,
+          audio: segmentedTs,
+        },
+        tsVideoStart,
         true,
       ],
       [
@@ -636,6 +671,8 @@ async function run(audioContext) {
       checks.push({ capturedJob: mutation, cleanup: 'clean' })
     }
 
+    const lostTsPacket = 6956
+
     for (const [label, input, message, code] of [
       [
         'truncated',
@@ -649,6 +686,18 @@ async function run(audioContext) {
         await fixture('leading-delta-mp3.mp4'),
         'normalizeAudio',
         'UNSUPPORTED_MEDIA_FEATURE',
+      ],
+      [
+        'segmented-mpeg-ts-packet-loss',
+        {
+          ...segmentedTs,
+          blob: new Blob([
+            tsBytes.subarray(0, lostTsPacket),
+            tsBytes.subarray(lostTsPacket + tsPacketSize),
+          ]),
+        },
+        'continuity counter is out of sequence. (segment 1, PID 257, byte offset 6956)',
+        'INVALID_INPUT',
       ],
     ]) {
       let failure

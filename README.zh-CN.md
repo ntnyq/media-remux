@@ -161,13 +161,13 @@ function runMediaJob(
 ): Promise<MediaJobResult>
 ```
 
-`job` 是由 `operation` 区分的联合类型。输入必须是完整、非空的 MP4/FLV/MKV/MPEG-TS `Blob`；`File` 继承自 `Blob`，也可以直接传入。
+`job` 是由 `operation` 区分的联合类型。`RemuxInput` 接受非空的 MP4/FLV/MKV/MPEG-TS `Blob`（包括 `File`），也接受 [MPEG-TS 分片描述符](#mpeg-ts-分片边界)。
 
-| `operation` | 必填字段                     | 可选字段 | 行为                                                           |
-| ----------- | ---------------------------- | -------- | -------------------------------------------------------------- |
-| `'remux'`   | `input: Blob`                | `tracks` | 复制单个输入中所选的主轨道。                                   |
-| `'combine'` | `video: Blob`、`audio: Blob` | 无       | 仅使用 `video` 的主视频轨道和 `audio` 的主音轨。               |
-| `'concat'`  | `inputs: readonly Blob[]`    | `tracks` | 按播放顺序拼接非空列表。复制模式要求轨道布局和解码器配置一致。 |
+| `operation` | 必填字段                                 | 可选字段 | 行为                                                           |
+| ----------- | ---------------------------------------- | -------- | -------------------------------------------------------------- |
+| `'remux'`   | `input: RemuxInput`                      | `tracks` | 复制单个输入中所选的主轨道。                                   |
+| `'combine'` | `video: RemuxInput`、`audio: RemuxInput` | 无       | 仅使用 `video` 的主视频轨道和 `audio` 的主音轨。               |
+| `'concat'`  | `inputs: readonly Blob[]`                | `tracks` | 按播放顺序拼接非空列表。复制模式要求轨道布局和解码器配置一致。 |
 
 `tracks` 默认为 `'all'`，保留可用的主轨道。`'audio'` 和 `'video'` 只保留所选类型，并要求存在对应轨道。`'video-with-optional-audio'` 要求每个输入都有主视频，并保留已有的主音轨。`'first-video-with-optional-audio'` 按文件顺序选择第一条视频和可选的第一条音轨，对应 FFmpeg 的 `-map 0:v:0 -map 0:a:0?`。默认复制模式的拼接要求各段轨道布局一致。合并任务从首个输入选择视频，从第二个输入选择音频。
 
@@ -195,11 +195,14 @@ Promise 会在 Worker 终止且临时文件清理完成后兑现。返回的 `Me
 <summary><code>remuxMedia</code>、<code>combineTracks</code> 和 <code>concatMedia</code>：输入与核心选项</summary>
 
 ```ts
-function remuxMedia(input: Blob, options: RemuxOptions): Promise<RemuxResult>
+function remuxMedia(
+  input: RemuxInput,
+  options: RemuxOptions,
+): Promise<RemuxResult>
 
 function combineTracks(
-  video: Blob,
-  audio: Blob,
+  video: RemuxInput,
+  audio: RemuxInput,
   options: Omit<RemuxOptions, 'tracks'>,
 ): Promise<RemuxResult>
 
@@ -211,7 +214,7 @@ function concatMedia(
 
 | 参数      | 所属方法        | 说明                                                                                                  |
 | --------- | --------------- | ----------------------------------------------------------------------------------------------------- |
-| `input`   | `remuxMedia`    | 提供所选主轨道的单个完整、非空的 MP4/FLV/MKV/MPEG-TS `Blob` 或 `File`。                               |
+| `input`   | `remuxMedia`    | 提供所选主轨道的媒体 `Blob` 或 MPEG-TS 分片描述符。                                                   |
 | `video`   | `combineTracks` | 提供主视频轨道的 MP4/FLV/MKV/MPEG-TS 输入；其中的音轨会被忽略。                                       |
 | `audio`   | `combineTracks` | 提供主音轨的 MP4/FLV/MKV/MPEG-TS 输入；其中的视频轨道会被忽略。                                       |
 | `inputs`  | `concatMedia`   | 按播放顺序排列的非空 MP4/FLV/MKV/MPEG-TS 输入数组。写入输出前，会检查所有所选片段的兼容性和时间信息。 |
@@ -403,7 +406,8 @@ I/O、配额、取消、回调和 Worker 运行故障保留原有的错误处理
 - MP4 支持 H.264、HEVC（`hvc1` 和 `hev1`）、AV1（`av01`）、AAC、MP3 和 AC-3（`ac-3`）。FLV 支持标准 AVC、每帧 960/1024 个采样的 AAC-LC，以及帧完整且码率由帧头声明的 MP3。HE-AAC/SBR（含隐式声明）、不支持或已加密的 FLV 标签以及轨道解码配置发生变化的 FLV 都会被拒绝。所选 MP4 轨道必须只有一个采样描述，且对应的媒体数据必须位于输入文件中。
 - MKV 支持单个 Matroska Segment，所选轨道为 H.264 和／或 AAC-LC，且包含标准 `CodecPrivate`。支持 AAC lacing。所选轨道的内容编码、旧式轨道偏移、视频 lacing、容器级裁剪、块附加数据、解码配置变化及非零 `DiscardPadding` 会在预检时被拒绝。
 - MPEG-TS 支持单节目、188 字节传输包、从带 SPS/PPS 的 IDR 开始的 Annex B H.264，以及 ADTS 封装的 AAC-LC。读取时会跨越 33 位时间戳回绕，并保留音视频的共同时间轴。视频以保留带内参数集的 `avc3` 写出。
-- 时间轴和传输包连续计数器均连续、轨道 PID 一致的 TS 分片，可以用 `new Blob(parts)` 合成一个输入，再传给 `remuxMedia`。中间分片可以从依赖帧开始，也可以切在访问单元内部。节目变更、时间戳重置和传输流不连续需要在上层处理。
+- MPEG-TS 的主轨道优先选用受支持的编码。按文件顺序选择时，以节目映射表中首个识别到的视频和音频轨道为准。选中的轨道使用不支持的编码时，返回 `UNSUPPORTED_CODEC`。
+- 时间轴和传输包连续计数器均连续、轨道 PID 一致的 TS 分片，可以用 `new Blob(parts)` 合成一个输入，再传给 `remuxMedia`。中间分片可以从依赖帧开始，也可以切在访问单元内部。节目变更和时间戳重置需要在上层处理。
 - AC-3 音轨需要有效的 `dac3` box，其内容会原样写入输出。浏览器需要支持 AC-3 解码。5.1 声道样本已在 macOS 的 Safari 27.0.1 中实测有声播放。
 - Chrome 可以通过 `<video src>` 直接播放 H.264/MP3 MP4 文件。MP4 中 MP3 音轨的支持取决于浏览器和播放 API。
 - MP4 中的 HEVC 和 AV1 轨道需要各自的解码配置 box（`hvcC` 或 `av1C`）。输出保留原采样条目类型和完整配置字节。
@@ -423,6 +427,22 @@ I/O、配额、取消、回调和 Worker 运行故障保留原有的错误处理
 - 进度阶段为 `inspect`、`remux` 和 `finalize`。`bytesProcessed` 统计编码后的媒体数据量，不包含容器开销。Worker 中的数据包进度通知以 250 ms 为间隔进行节流；阶段切换始终会通知。检查阶段会在创建输出前扫描时间元数据。
 
 </details>
+
+### MPEG-TS 分片边界
+
+将 HLS 分片按顺序写入同一个 TS 文件时，记录每片的起始字节偏移。可以将文件和偏移传给 `remuxMedia`、`combineTracks` 的任一输入，或对应的 Worker 任务。
+
+```ts
+const input = {
+  blob: await tsFileHandle.getFile(),
+  segmentOffsets,
+  allowContinuityCounterReset: true,
+} satisfies MpegTsInput
+```
+
+偏移必须从零开始、严格递增、对齐到 188 字节 TS 包，且小于文件大小。显式开启后，每个 PID 在后续分片中的首个有效载荷可以重置计数器，前提是该包开始了一个合法的新 PES，且上一 PES 通过完整性检查。整条输入共用同一时间轴，输出统一归零时保留原始 PTS/DTS 的关系、音视频相对偏移和时间间隙。
+
+普通 `Blob` 和未开启此选项的描述符使用严格的连续计数器检查。分片内跳变、续接 PES 时跳变和可检测的 PES 截断仍会报错。描述符输入的包级错误会报告从零开始的分片索引、PID 和绝对字节偏移。如果恰好在允许重置的位置丢失了完整 TS 包，而下一个可见包开始了合法的新 PES，可能无法从 TS 字节区分丢包和计数器重置。检测这种情况需要可信分片长度或校验值等外部完整性信息。
 
 ## 内存、磁盘与性能
 

@@ -1,6 +1,11 @@
 import { Buffer } from 'node:buffer'
 import { expect, test } from 'vitest'
-import { remuxMedia } from '../src'
+import {
+  combineTracks,
+  remuxMedia,
+  type RemuxInput,
+  type RemuxTrackSelection,
+} from '../src'
 import { REMUX_ERROR_CODE } from '../src/constants'
 import { openMediaInput } from '../src/core/input/mediaInput'
 import { diskStorage, fixture, memoryTarget, packets } from './helpers/media'
@@ -11,6 +16,7 @@ const audioPid = 0x101
 const pmtPid = 0x1000
 const clock = 90_000
 const wrap = 2 ** 33
+const segmentOffsets = [0, 5076, 8648, 13912, 17296]
 
 // Independent ffprobe PTS values in decode order. DTS advances by 7500 ticks.
 const videoPts = [
@@ -33,6 +39,24 @@ function transportPackets(data: Buffer) {
 
     return { packet, pid, startsPes, payload }
   })
+}
+
+function resetSegmentCounters(bytes: Buffer) {
+  for (const [index, start] of segmentOffsets.entries()) {
+    const firstCounters = new Map<number, number>()
+
+    for (const { packet, pid, payload } of transportPackets(
+      bytes.subarray(start, segmentOffsets[index + 1]),
+    )) {
+      if (payload.length > 0) {
+        const counter = packet[3]! & 15
+        const first = firstCounters.get(pid) ?? counter
+
+        firstCounters.set(pid, first)
+        packet[3] = (packet[3]! & 0xf0) | ((counter - first) & 15)
+      }
+    }
+  }
 }
 
 /** Moves every PES timestamp through the same 33-bit wrap. */
@@ -147,7 +171,7 @@ function replacePes(
   return result
 }
 
-async function remux(input: Blob, tracks?: 'audio' | 'video') {
+async function remux(input: RemuxInput, tracks?: RemuxTrackSelection) {
   const target = memoryTarget()
   const result = await remuxMedia(input, {
     writable: target.writable,
@@ -160,7 +184,7 @@ async function remux(input: Blob, tracks?: 'audio' | 'video') {
 
 test('remuxes consecutive TS fragments that start on dependent pictures', async () => {
   const source = await fixture('continuous-av.mpegts')
-  const boundaries = [0, 5076, 8648, 13912, 17296, source.size]
+  const boundaries = [...segmentOffsets, source.size]
   // Each Blob part represents a distinct HLS download.
   const input = new Blob(
     boundaries
@@ -205,6 +229,269 @@ test('remuxes consecutive TS fragments that start on dependent pictures', async 
   } finally {
     avc3.dispose()
   }
+})
+
+test('remuxes and combines explicit TS segments with reset counters on the original clock', async () => {
+  const source = await fixture('continuous-av.mpegts')
+  const bytes = Buffer.from(await source.arrayBuffer())
+  const gap = 9000
+  const shift = wrap - 51000
+
+  // Put a timestamp rollover and a gap at the first segment transition.
+  shiftPesTimestamps(bytes, shift)
+  shiftPesTimestamps(bytes.subarray(segmentOffsets[1]!), gap)
+
+  // Replace a service description packet with a video adaptation-only packet.
+  // Its counter must not use up the reset opportunity for the video PID.
+  const adaptation = bytes.subarray(
+    segmentOffsets[2]!,
+    segmentOffsets[2]! + packetSize,
+  )
+
+  adaptation.fill(0xff)
+  adaptation.set([0x47, videoPid >> 8, videoPid & 0xff, 0x2b, 183, 0])
+
+  const continuous = new Blob([bytes])
+
+  resetSegmentCounters(bytes)
+
+  const blob = new Blob([bytes])
+  const input = { blob, segmentOffsets, allowContinuityCounterReset: true }
+
+  for (const strictInput of [blob, { blob, segmentOffsets }]) {
+    await expect(remux(strictInput)).rejects.toMatchObject({
+      code: REMUX_ERROR_CODE.invalidInput,
+      message: expect.stringContaining('continuity counter is out of sequence'),
+    })
+  }
+
+  async function readSource(sourceInput: RemuxInput) {
+    const media = await openMediaInput(sourceInput)
+
+    try {
+      return await Promise.all(
+        media.tracks.map(async track => {
+          const encoded = []
+
+          for await (const packet of track.packets()) {
+            encoded.push(packet)
+          }
+
+          return encoded
+        }),
+      )
+    } finally {
+      media.dispose()
+    }
+  }
+
+  const encoded = await readSource(input)
+
+  expect(encoded).toStrictEqual(await readSource(continuous))
+  expect(
+    encoded[0]!.map(
+      packet => Math.round(packet.sideData.decodeTimestamp! * clock) - shift,
+    ),
+  ).toEqual(videoPts.map((_, index) => index * 7500 + (index >= 7 ? gap : 0)))
+  expect(
+    encoded[0]!.map(packet => Math.round(packet.timestamp * clock) - shift),
+  ).toEqual(videoPts.map((pts, index) => pts + (index >= 7 ? gap : 0)))
+
+  const baseline = await remux(continuous)
+  const actual = await remux(input)
+  const target = memoryTarget()
+  const combined = await combineTracks(input, input, {
+    writable: target.writable,
+    storage: await diskStorage(),
+  })
+
+  expect(actual.result).toStrictEqual(baseline.result)
+  expect(combined).toStrictEqual(baseline.result)
+  expect(actual.result.duration).toBeCloseTo(
+    (109 * 1024) / 44100 + gap / clock,
+    4,
+  )
+
+  for (const kind of ['video', 'audio'] as const) {
+    const expected = await packets(baseline.output, kind)
+
+    expect(await packets(actual.output, kind)).toStrictEqual(expected)
+    expect(await packets(target.blob(), kind)).toStrictEqual(expected)
+  }
+})
+
+test.each([
+  {
+    scenario: 'a packet inside a segment',
+    drop: 10340,
+    starts: segmentOffsets,
+    error:
+      'continuity counter is out of sequence. (segment 2, PID 256, byte offset 10340)',
+  },
+  {
+    scenario: 'the first packet of a PES continuation across a boundary',
+    drop: 1128,
+    starts: [0, 1128],
+    error:
+      'continuity counter is out of sequence. (segment 1, PID 256, byte offset 1128)',
+  },
+  {
+    scenario: 'the last packet of a bounded PES before a boundary',
+    drop: 4888,
+    starts: segmentOffsets,
+    error:
+      'Truncated MPEG-TS PES packet. (segment 1, PID 257, byte offset 6580)',
+  },
+])(
+  'rejects loss of $scenario with resets enabled',
+  async ({ drop, starts, error }) => {
+    const source = await fixture('continuous-av.mpegts')
+    const bytes = Buffer.from(await source.arrayBuffer())
+
+    resetSegmentCounters(bytes)
+
+    const target = memoryTarget()
+    const input = {
+      blob: new Blob([
+        bytes.subarray(0, drop),
+        bytes.subarray(drop + packetSize),
+      ]),
+      segmentOffsets: starts.map(start =>
+        start > drop ? start - packetSize : start,
+      ),
+      allowContinuityCounterReset: true,
+    }
+
+    await expect(
+      remuxMedia(input, {
+        writable: target.writable,
+        storage: await diskStorage(),
+      }),
+    ).rejects.toMatchObject({
+      code: REMUX_ERROR_CODE.invalidInput,
+      message: expect.stringContaining(error),
+    })
+    expect(target.state.writes).toEqual([])
+    expect(target.writable.locked).toBe(false)
+  },
+)
+
+test.each([
+  { firstPayload: 'continuous', duplicate: false },
+  { firstPayload: 'duplicated', duplicate: true },
+])(
+  'consumes the reset opportunity on a $firstPayload PES continuation',
+  async ({ duplicate }) => {
+    const source = await fixture('continuous-av.mpegts')
+    const start = 940
+    const prefix = source.slice(0, start)
+    const repeat = duplicate
+      ? source.slice(start - packetSize, start)
+      : new Blob()
+    const input = {
+      blob: new Blob([prefix, repeat, source.slice(start)]),
+      segmentOffsets: [0, start],
+      allowContinuityCounterReset: true,
+    }
+
+    const actual = await remux(input)
+    const baseline = await remux(source)
+
+    expect(actual.result).toStrictEqual(baseline.result)
+    expect(await packets(actual.output, 'video')).toStrictEqual(
+      await packets(baseline.output, 'video'),
+    )
+
+    // Lose the last packet of the unbounded PES after the first payload.
+    const drop = 2256
+
+    input.blob = new Blob([
+      prefix,
+      repeat,
+      source.slice(start, drop),
+      source.slice(drop + packetSize),
+    ])
+
+    await expect(remux(input)).rejects.toMatchObject({
+      code: REMUX_ERROR_CODE.invalidInput,
+      message: expect.stringContaining(
+        `continuity counter is out of sequence. (segment 1, PID 256, byte offset ${drop + repeat.size})`,
+      ),
+    })
+  },
+)
+
+test('checks the new PES header even when the segment may reset its counter', async () => {
+  const source = await fixture('continuous-av.mpegts')
+  const bytes = Buffer.from(await source.arrayBuffer())
+
+  resetSegmentCounters(bytes)
+
+  const packet = transportPackets(bytes)[9212 / packetSize]!
+
+  packet.payload[2] = 0
+
+  await expect(
+    remux({
+      blob: new Blob([bytes]),
+      segmentOffsets,
+      allowContinuityCounterReset: true,
+    }),
+  ).rejects.toMatchObject({
+    code: REMUX_ERROR_CODE.invalidInput,
+    message:
+      'Invalid MPEG-TS PES header. (segment 2, PID 256, byte offset 9212)',
+  })
+})
+
+test.each([
+  { table: 'PAT', offset: 5264, pid: 0 },
+  { table: 'PMT', offset: 5452, pid: pmtPid },
+])(
+  'still checks the $table checksum across explicit segments',
+  async ({ offset, pid }) => {
+    const source = await fixture('continuous-av.mpegts')
+    const bytes = Buffer.from(await source.arrayBuffer())
+
+    resetSegmentCounters(bytes)
+
+    const { payload } = transportPackets(bytes)[offset / packetSize]!
+    const tableStart = 1 + payload[0]!
+    const sectionLength = payload.readUInt16BE(tableStart + 1) & 0x0fff
+    const checksumByte = tableStart + 3 + sectionLength - 1
+
+    payload[checksumByte] = payload[checksumByte]! ^ 1
+
+    await expect(
+      remux({
+        blob: new Blob([bytes]),
+        segmentOffsets,
+        allowContinuityCounterReset: true,
+      }),
+    ).rejects.toMatchObject({
+      code: REMUX_ERROR_CODE.invalidInput,
+      message: `Invalid MPEG-TS program table checksum. (segment 1, PID ${pid}, byte offset ${offset})`,
+    })
+  },
+)
+
+test.each([
+  { starts: [], case: 'empty list' },
+  { starts: [188], case: 'missing zero' },
+  { starts: [0, 0], case: 'duplicate offset' },
+  { starts: [0, 376, 188], case: 'out-of-order offset' },
+  { starts: [0, 189], case: 'unaligned offset' },
+  { starts: [0, 20304], case: 'offset at EOF' },
+])('rejects explicit segment offsets with $case', async ({ starts }) => {
+  const blob = await fixture('continuous-av.mpegts')
+
+  await expect(
+    remux({
+      blob,
+      segmentOffsets: starts,
+      allowContinuityCounterReset: true,
+    }),
+  ).rejects.toMatchObject({ code: REMUX_ERROR_CODE.invalidInput })
 })
 
 test.each([25000, 10000])(
@@ -370,6 +657,79 @@ test('can extract audio when a discarded TS video stream fails the timestamp pro
   )
 })
 
+function updateProgramMap(
+  payload: Buffer,
+  update: (start: number, firstStream: number) => void,
+) {
+  const start = 1 + payload[0]!
+  const firstStream = start + 12 + (payload.readUInt16BE(start + 10) & 0x0fff)
+
+  update(start, firstStream)
+  const end = start + 3 + (payload.readUInt16BE(start + 1) & 0x0fff)
+  let crc = -1
+
+  for (const byte of payload.subarray(start, end - 4)) {
+    crc ^= byte << 24
+
+    for (let bit = 0; bit < 8; bit++) {
+      crc = (crc << 1) ^ (crc < 0 ? 0x04_c1_1d_b7 : 0)
+    }
+  }
+
+  payload.writeUInt32BE(crc >>> 0, end - 4)
+}
+
+test.each([
+  { kind: 'video', type: 0x24, retained: 'audio' },
+  { kind: 'audio', type: 0x11, retained: 'video' },
+  { kind: 'audio', type: 0x81, retained: 'video' },
+  { kind: 'audio', type: 0x06, retained: 'video' },
+] as const)(
+  'rejects unsupported TS $kind type $type when selected and allows discarding it',
+  async ({ kind, type, retained }) => {
+    const source = await fixture('continuous-av.mpegts')
+    const bytes = Buffer.from(await source.arrayBuffer())
+
+    for (const { payload } of transportPackets(bytes).filter(
+      packet => packet.pid === pmtPid,
+    )) {
+      updateProgramMap(payload, (start, video) => {
+        const audio = video + 5 + (payload.readUInt16BE(video + 3) & 0x0fff)
+        const stream = kind === 'video' ? video : audio
+
+        expect(payload[stream]).toBe(kind === 'video' ? 0x1b : 0x0f)
+        payload[stream] = type
+
+        if (type === 0x06) {
+          // Signal AC-3 via a DVB descriptor in the final stream entry.
+          payload.writeUInt16BE(0xf003, audio + 3)
+          payload.set([0x6a, 1, 0], audio + 5)
+          payload.writeUInt16BE(payload.readUInt16BE(start + 1) + 3, start + 1)
+        }
+      })
+    }
+
+    const input = new Blob([bytes])
+
+    for (const tracks of [
+      undefined,
+      kind,
+      'first-video-with-optional-audio',
+    ] as const) {
+      await expect(remux(input, tracks)).rejects.toMatchObject({
+        code: REMUX_ERROR_CODE.unsupportedCodec,
+      })
+    }
+
+    const { output } = await remux(input, retained)
+    const baseline = await remux(source, retained)
+
+    expect(await packets(output, retained)).toStrictEqual(
+      await packets(baseline.output, retained),
+    )
+  },
+)
+
 test('rejects a TS program map change that moves a selected video PID', async () => {
   const source = await fixture('continuous-av.mpegts')
   const bytes = Buffer.from(await source.arrayBuffer())
@@ -378,26 +738,12 @@ test('rejects a TS program map change that moves a selected video PID', async ()
   const firstUpdate = transport.indexOf(maps[1]!)
 
   for (const { payload } of maps.slice(1)) {
-    const start = 1 + payload[0]!
-    const end = start + 3 + (payload.readUInt16BE(start + 1) & 0x0fff)
-    const stream = start + 12 + (payload.readUInt16BE(start + 10) & 0x0fff)
-
-    expect(payload[stream]).toBe(0x1b)
-    payload[start + 5] = payload[start + 5]! + 2 // New table version.
-    payload[start + 9] = 2 // Move the PCR with video.
-    payload[stream + 2] = 2 // Move video from 0x100 to 0x102.
-
-    let crc = -1
-
-    for (const byte of payload.subarray(start, end - 4)) {
-      crc ^= byte << 24
-
-      for (let bit = 0; bit < 8; bit++) {
-        crc = (crc << 1) ^ (crc < 0 ? 0x04_c1_1d_b7 : 0)
-      }
-    }
-
-    payload.writeUInt32BE(crc >>> 0, end - 4)
+    updateProgramMap(payload, (start, stream) => {
+      expect(payload[stream]).toBe(0x1b)
+      payload[start + 5] = payload[start + 5]! + 2 // New table version.
+      payload[start + 9] = 2 // Move the PCR with video.
+      payload[stream + 2] = 2 // Move video from 0x100 to 0x102.
+    })
   }
 
   for (const { packet, pid } of transport.slice(firstUpdate + 1)) {

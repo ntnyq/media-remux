@@ -12,7 +12,9 @@ Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 bo
 
 The MPEG-TS subset adapts the upstream demuxer's transport and PES parsing, timestamp unwrapping, and AVC/ADTS elementary stream framing for sequential rereads. It retains both PTS and DTS, frames access units across PES packets, and has no seeking index. The package adapter converts AVC to length-prefixed samples, strips ADTS framing, and passes source timing to the existing fragmented MP4 writer.
 
-The TS reader checks payload continuity, skips duplicate transport payloads, and validates PAT/PMT checksums. It rejects program changes and changes to a selected stream's PID or codec.
+The TS reader checks payload continuity, skips duplicate transport payloads, and validates PAT/PMT checksums. It rejects program changes and changes to a selected stream's PID or codec. With explicit segment starts and opt-in resets, it permits a counter jump only on a selected PID's first payload in a later segment when that payload begins a PES and the previous PES passes the existing completeness check. The reset does not affect timestamp unwrapping or elementary stream assembly.
+
+The TS reader exposes private audio signaled through DVB and common registration descriptors. The core can report unsupported selected audio alongside a supported video track.
 
 ## Preserved patch behavior
 

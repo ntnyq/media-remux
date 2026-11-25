@@ -7,8 +7,14 @@ import {
   REMUX_TRACK_SELECTION,
   MKV_ID,
 } from '../../constants'
-import type { RemuxTrackSelection, MediaInput, PacketTrack } from '../../types'
+import type {
+  RemuxInput,
+  RemuxTrackSelection,
+  MediaInput,
+  PacketTrack,
+} from '../../types'
 import { checkAbort, createRemuxError, withRemuxErrorCode } from '../../utils'
+import { isMpegTsInput } from '../../utils/remuxInput'
 import { InvalidAacDescriptionError } from '../../vendor/mediabunny/shared/aac-misc'
 import {
   AvcNalUnitType,
@@ -87,27 +93,33 @@ function isAvcIdrPacket(packet: EncodedPacket, config: VideoDecoderConfig) {
 }
 
 /**
- * Opens the selected encoded tracks from an MP4, FLV, MKV, or MPEG-TS Blob.
+ * Opens selected encoded tracks from a media Blob or an MPEG-TS descriptor.
  * Detects FLV, EBML, and MPEG-TS by signature and otherwise attempts MP4 parsing.
  * Packet iterators read in decode order and can omit encoded payloads during
  * metadata inspection. The caller must dispose the returned input after use.
  *
- * @param blob - Nonempty source media Blob.
+ * @param source - Nonempty source media Blob or an MPEG-TS descriptor.
  * @param signal - Optional cancellation signal used during opening and iteration.
  * @param selection - Track kinds and ordering to use; defaults to both primary tracks.
  * @returns A promise resolving to track configurations, packet iterators, and
  * a disposer. The track list may be empty if the selected kind is absent.
- * @throws {TypeError} If the input is not a nonempty Blob.
+ * @throws {TypeError} If the input is not a nonempty media input.
  * @throws {Error} If parsing fails, a selected track is encrypted, its codec is
  * unsupported, or its decoder configuration is missing or invalid.
  * @throws The signal's abort reason if cancellation is detected.
  */
 export async function openMediaInput(
-  blob: Blob,
+  source: RemuxInput,
   signal?: AbortSignal,
   selection: RemuxTrackSelection = REMUX_TRACK_SELECTION.all,
 ): Promise<MediaInput> {
   checkAbort(signal)
+
+  if (!(source instanceof Blob) && isMpegTsInput(source)) {
+    return openMpegTsInput(source.blob, signal, selection, source)
+  }
+
+  const blob = source
 
   if (!(blob instanceof Blob)) {
     throw new TypeError('Media input must be a nonempty Blob.')

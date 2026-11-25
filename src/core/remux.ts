@@ -8,6 +8,7 @@ import {
   REMUX_TRACK_SELECTION,
 } from '../constants'
 import type {
+  RemuxInput,
   RemuxOptions,
   RemuxResult,
   MediaInput,
@@ -15,6 +16,7 @@ import type {
   SegmentInfo,
 } from '../types'
 import { checkAbort, createRemuxError } from '../utils'
+import { captureRemuxInput } from '../utils/remuxInput'
 import { checkAudioDecoder } from './audioCodecs'
 import { createDecodeTimeline } from './decodeTimeline'
 import { openMediaInput } from './input/mediaInput'
@@ -53,27 +55,27 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
 }
 
 /**
- * Remuxes selected tracks from one MP4, FLV, MKV, or MPEG-TS Blob to fMP4/M4A.
+ * Remuxes selected tracks from one MP4, FLV, MKV, or MPEG-TS input to fMP4/M4A.
  * H.264 MP4 with leading dependent frames is trimmed to the first verified IDR.
  * The output stream is closed on success and aborted on a write-stage failure.
  * Temporary stores remain owned by the caller; each job needs fresh stores.
  *
- * @param input - Nonempty source MP4, FLV, MKV, or MPEG-TS Blob.
+ * @param input - Nonempty source media Blob or an MPEG-TS descriptor.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * track selection (defaults to all primary tracks), cancellation, and progress.
  * @returns A promise resolving to duration in seconds, output MIME type, and
  * encoded payload bytes written, excluding container overhead.
- * @throws {TypeError} If the input is not a nonempty Blob.
+ * @throws {TypeError} If the input is not a nonempty media input.
  * @throws {Error} If parsing, selected codecs, decoder configuration, or packet
  * timing is invalid, selected tracks are absent, or video has no usable start.
  * Also propagates storage, output, and progress callback failures.
  * @throws The signal's abort reason if cancellation is detected.
  */
 export async function remuxMedia(
-  input: Blob,
+  input: RemuxInput,
   options: RemuxOptions,
 ): Promise<RemuxResult> {
-  return await concatMedia([input], options)
+  return await remuxInputs([input], options)
 }
 
 /**
@@ -101,13 +103,20 @@ export async function concatMedia(
   inputs: readonly Blob[],
   options: RemuxOptions,
 ): Promise<RemuxResult> {
+  return await remuxInputs(inputs, options)
+}
+
+async function remuxInputs(
+  inputs: readonly RemuxInput[],
+  options: RemuxOptions,
+): Promise<RemuxResult> {
   const settings = captureOptions(options)
   const selection = settings.tracks
 
   checkAbort(settings.signal)
-  const blobs = [...inputs]
+  const sources = Array.from(inputs, captureRemuxInput)
 
-  if (blobs.length === 0) {
+  if (sources.length === 0) {
     throw new TypeError('At least one media segment is required.')
   }
 
@@ -118,7 +127,7 @@ export async function concatMedia(
 
   // Validate every segment before opening the output, so a later incompatible
   // segment cannot leave a partially written concatenation behind.
-  for (const [index, blob] of blobs.entries()) {
+  for (const [index, source] of sources.entries()) {
     checkAbort(settings.signal)
     settings.onProgress?.({
       phase: REMUX_PROGRESS_PHASE.inspect,
@@ -126,7 +135,7 @@ export async function concatMedia(
       segmentIndex: index,
     })
 
-    const input = await openMediaInput(blob, settings.signal, selection)
+    const input = await openMediaInput(source, settings.signal, selection)
 
     try {
       const tracks = selectTracks(input, selection)
@@ -182,8 +191,8 @@ export async function concatMedia(
    * @throws If reopening, track selection, timeline lookup, or cancellation fails.
    */
   async function* segments() {
-    for (const [index, blob] of blobs.entries()) {
-      const input = await openMediaInput(blob, settings.signal, selection)
+    for (const [index, source] of sources.entries()) {
+      const input = await openMediaInput(source, settings.signal, selection)
 
       try {
         const info = infos[index]
@@ -195,7 +204,7 @@ export async function concatMedia(
         yield {
           tracks: selectTracks(input, settings.tracks),
           info,
-          isLast: index + 1 === blobs.length,
+          isLast: index + 1 === sources.length,
         }
       } finally {
         input.dispose()
@@ -217,32 +226,34 @@ export async function concatMedia(
 }
 
 /**
- * Combines the primary video and audio from separate MP4/FLV/MKV/MPEG-TS Blobs.
+ * Combines the primary video and audio from separate MP4/FLV/MKV/MPEG-TS inputs.
  * Existing relative timestamps are preserved and the earliest playable time becomes zero.
  * When H.264 MP4 video is trimmed to an IDR, audio before its PTS is discarded.
  * Success closes the output stream; write-stage failures attempt cancellation.
  * The caller must supply fresh temporary stores and dispose them after the job.
  *
- * @param video - Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary video track.
- * @param audio - Nonempty MP4/FLV/MKV/MPEG-TS Blob supplying the primary audio track.
+ * @param video - Media Blob or MPEG-TS descriptor supplying the primary video track.
+ * @param audio - Media Blob or MPEG-TS descriptor supplying the primary audio track.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback.
  * @returns A promise resolving to the shared presentation span in seconds,
  * video/mp4 MIME type, and encoded payload bytes written, excluding container overhead.
- * @throws {TypeError} If either input is not a nonempty Blob.
+ * @throws {TypeError} If either input is not a nonempty media input.
  * @throws {Error} If a required track is absent, parsing or decoder configuration
  * is invalid, packet timing is invalid, or video has no usable start.
  * Also propagates storage, output, and progress callback failures.
  * @throws The signal's abort reason if cancellation is detected.
  */
 export async function combineTracks(
-  video: Blob,
-  audio: Blob,
+  video: RemuxInput,
+  audio: RemuxInput,
   options: Omit<RemuxOptions, 'tracks'>,
 ): Promise<RemuxResult> {
   const settings = captureOptions(options)
 
   checkAbort(settings.signal)
+  const videoSource = captureRemuxInput(video)
+  const audioSource = captureRemuxInput(audio)
   const inputs: MediaInput[] = []
 
   try {
@@ -253,7 +264,7 @@ export async function combineTracks(
     })
 
     const videoInput = await openMediaInput(
-      video,
+      videoSource,
       settings.signal,
       REMUX_TRACK_SELECTION.video,
     )
@@ -261,7 +272,7 @@ export async function combineTracks(
     inputs.push(videoInput)
 
     const audioInput = await openMediaInput(
-      audio,
+      audioSource,
       settings.signal,
       REMUX_TRACK_SELECTION.audio,
     )

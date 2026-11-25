@@ -18,6 +18,8 @@ export {
 export { isRemuxError } from './utils'
 
 export type {
+  MpegTsInput,
+  RemuxInput,
   RemuxOptions,
   RemuxResult,
   RemuxStorage,

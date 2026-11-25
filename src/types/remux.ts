@@ -7,6 +7,31 @@ import type {
 import type { RemuxStorage } from './storage'
 
 /**
+ * One MPEG-TS stream assembled from ordered, packet-aligned segments.
+ */
+export interface MpegTsInput {
+  /** Immutable media bytes, for example a File read from OPFS. */
+  blob: Blob
+
+  /**
+   * Absolute segment starts in bytes, including zero. Offsets must be strictly
+   * increasing multiples of 188 below the Blob size.
+   */
+  segmentOffsets: readonly number[]
+
+  /**
+   * Allow a new continuity counter on a selected PID's first payload in a
+   * segment when it starts a valid PES and the preceding PES is complete.
+   * Defaults to false. A missing whole packet at such a boundary may be
+   * indistinguishable from a reset.
+   */
+  allowContinuityCounterReset?: boolean
+}
+
+/** A complete media Blob or an MPEG-TS stream with explicit segment starts. */
+export type RemuxInput = Blob | MpegTsInput
+
+/**
  * Primary tracks to retain when remuxing or concatenating.
  * Both optional-audio modes require video in every input. The first-track mode
  * selects video and audio in file order.

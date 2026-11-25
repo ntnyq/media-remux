@@ -18,6 +18,7 @@ import {
 } from '../constants'
 import type { WorkerRequest, WorkerResponse } from '../types'
 import { isRemuxErrorCode } from '../utils'
+import { isMpegTsInput } from '../utils/remuxInput'
 
 /**
  * Checks whether an untrusted value can be inspected for protocol properties.
@@ -85,7 +86,7 @@ export function isWorkerResponse(value: unknown): value is WorkerResponse {
 }
 
 /**
- * Checks a run request's operation, Blob inputs, and track and audio options.
+ * Checks a run request's operation, input shapes, and track and audio options.
  * Verifies either the OPFS path components or the required filesystem methods.
  * The operation verifies access permissions when it opens the job files.
  *
@@ -130,11 +131,14 @@ export function isWorkerRequest(value: unknown): value is WorkerRequest {
   }
 
   if (job['operation'] === MEDIA_JOB_OPERATION.remux) {
-    return job['input'] instanceof Blob
+    return job['input'] instanceof Blob || isMpegTsInput(job['input'])
   }
 
   if (job['operation'] === MEDIA_JOB_OPERATION.combine) {
-    return job['video'] instanceof Blob && job['audio'] instanceof Blob
+    return (
+      (job['video'] instanceof Blob || isMpegTsInput(job['video'])) &&
+      (job['audio'] instanceof Blob || isMpegTsInput(job['audio']))
+    )
   }
 
   return (

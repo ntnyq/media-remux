@@ -161,13 +161,13 @@ function runMediaJob(
 ): Promise<MediaJobResult>
 ```
 
-`job` is a discriminated union selected by `operation`. Inputs must be complete, nonempty MP4/FLV/MKV/MPEG-TS `Blob` objects; `File` is also accepted because it extends `Blob`.
+`job` is a discriminated union selected by `operation`. `RemuxInput` accepts a nonempty MP4/FLV/MKV/MPEG-TS `Blob` (including `File`) or an [MPEG-TS segment descriptor](#mpeg-ts-segment-boundaries).
 
-| `operation` | Required fields              | Optional fields | Behavior                                                                                                |
-| ----------- | ---------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
-| `'remux'`   | `input: Blob`                | `tracks`        | Copy selected primary tracks from one input.                                                            |
-| `'combine'` | `video: Blob`, `audio: Blob` | None            | Use only primary video from `video` and primary audio from `audio`.                                     |
-| `'concat'`  | `inputs: readonly Blob[]`    | `tracks`        | Join a nonempty list in playback order. Copy mode requires matching layouts and decoder configurations. |
+| `operation` | Required fields                          | Optional fields | Behavior                                                                                                |
+| ----------- | ---------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
+| `'remux'`   | `input: RemuxInput`                      | `tracks`        | Copy selected primary tracks from one input.                                                            |
+| `'combine'` | `video: RemuxInput`, `audio: RemuxInput` | None            | Use only primary video from `video` and primary audio from `audio`.                                     |
+| `'concat'`  | `inputs: readonly Blob[]`                | `tracks`        | Join a nonempty list in playback order. Copy mode requires matching layouts and decoder configurations. |
 
 `tracks` defaults to `'all'`, which retains the available primary tracks. `'audio'` and `'video'` require and retain only the selected kind. Use `'video-with-optional-audio'` to require a primary video track in every input and keep its primary audio track when present. Use `'first-video-with-optional-audio'` to select the first video and first available audio in file order, matching FFmpeg's `-map 0:v:0 -map 0:a:0?`. Concat in copy mode requires matching track layouts. Combine jobs select video from the first input and audio from the second.
 
@@ -195,11 +195,14 @@ Failures reject the promise. Worker job errors cross the message boundary as an 
 <summary><code>remuxMedia</code>, <code>combineTracks</code>, and <code>concatMedia</code> — inputs and core options</summary>
 
 ```ts
-function remuxMedia(input: Blob, options: RemuxOptions): Promise<RemuxResult>
+function remuxMedia(
+  input: RemuxInput,
+  options: RemuxOptions,
+): Promise<RemuxResult>
 
 function combineTracks(
-  video: Blob,
-  audio: Blob,
+  video: RemuxInput,
+  audio: RemuxInput,
   options: Omit<RemuxOptions, 'tracks'>,
 ): Promise<RemuxResult>
 
@@ -211,7 +214,7 @@ function concatMedia(
 
 | Argument  | Used by         | Description                                                                                                                                                        |
 | --------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV/MKV/MPEG-TS `Blob` or `File` providing the selected primary tracks.                                                                 |
+| `input`   | `remuxMedia`    | Media `Blob` or MPEG-TS segment descriptor supplying the selected primary tracks.                                                                                  |
 | `video`   | `combineTracks` | MP4/FLV/MKV/MPEG-TS input supplying the primary video track; any audio in this input is ignored.                                                                   |
 | `audio`   | `combineTracks` | MP4/FLV/MKV/MPEG-TS input supplying primary audio; any video in this input is ignored.                                                                             |
 | `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV/MKV/MPEG-TS inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
@@ -403,7 +406,8 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 - MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), AAC, MP3, and AC-3 (`ac-3`). FLV supports standard AVC, AAC-LC with 960/1024-sample frames, and MP3 with complete Layer III frames at a signaled bitrate. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and mid-stream decoder configuration changes are rejected. A selected MP4 track must have a single sample description and use media stored in the input file.
 - MKV accepts one Matroska segment with selected H.264 and/or AAC-LC tracks and standard `CodecPrivate`. AAC lacing is supported. Selected tracks with content encodings or legacy offsets, laced video, video cropping, and blocks with codec changes, additions, or nonzero discard padding are rejected.
 - MPEG-TS accepts a single program with 188-byte packets, Annex B H.264 starting at an IDR with SPS/PPS, and AAC-LC in ADTS. The reader preserves the shared audio and video clock through 33-bit timestamp rollover. Video is written as `avc3` with in-band parameter sets.
-- For consecutive TS downloads on one timeline with the same track PIDs and continuous transport counters, pass `new Blob(parts)` to `remuxMedia`. An internal part boundary can start on a dependent picture or fall within an access unit. Program changes, timestamp resets, and transport discontinuities require external handling.
+- MPEG-TS primary tracks prefer supported formats. File-order selection uses the first recognized video and audio entries in the program map. Selecting a recognized track with an unsupported codec returns `UNSUPPORTED_CODEC`.
+- For consecutive TS downloads on one timeline with the same track PIDs and continuous transport counters, pass `new Blob(parts)` to `remuxMedia`. An internal part boundary can start on a dependent picture or fall within an access unit. Program changes and timestamp resets require external handling.
 - AC-3 tracks require a valid `dac3` box, whose payload is copied to the output. Playback requires a browser with AC-3 decoding support. A 5.1-channel sample played with audio in Safari 27.0.1 on macOS.
 - Chrome supports direct `<video src>` playback of H.264/MP3 MP4 files. MP3 support in MP4 varies by browser and playback API.
 - HEVC and AV1 MP4 tracks require their codec configuration boxes (`hvcC` or `av1C`). The output preserves their sample entry type and configuration bytes.
@@ -424,6 +428,22 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 - Progress phases are `inspect`, `remux`, and `finalize`. `bytesProcessed` counts encoded payload, excluding container overhead. Worker packet progress is throttled to 250 ms; phase transitions always report. Inspection scans timing metadata before output is created.
 
 </details>
+
+### MPEG-TS segment boundaries
+
+To remux HLS segments written in order into one TS file, record each segment's starting byte offset as you write it. Pass the file and offsets to `remuxMedia`, either input of `combineTracks`, or the corresponding Worker job.
+
+```ts
+const input = {
+  blob: await tsFileHandle.getFile(),
+  segmentOffsets,
+  allowContinuityCounterReset: true,
+} satisfies MpegTsInput
+```
+
+Offsets start at zero, strictly increase, align to 188-byte TS packets, and fall before the end of the file. The opt-in allows a counter jump on a PID's first payload in each later segment when it begins a valid PES and the previous PES passes its completeness check. The whole input uses one timeline, preserving the source PTS/DTS relationship, A/V offsets, and gaps with the usual output normalization to zero.
+
+Plain Blobs and descriptors without the opt-in use strict continuity checking. In-segment jumps, jumps on PES continuations, and detectable PES truncation still fail. Packet-level errors on descriptor inputs include the zero-based segment index, PID, and absolute byte offset. A whole packet missing exactly where a reset is allowed can be indistinguishable from a legitimate reset when the next visible packet begins a valid PES. Detecting that case requires external integrity information such as a trusted segment length or checksum.
 
 ## Memory, disk, and performance
 

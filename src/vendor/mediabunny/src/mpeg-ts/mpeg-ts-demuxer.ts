@@ -23,13 +23,22 @@ export const normalizeWrappedTimestamp = (timestamp: number, reference: number) 
 
 export const MpegTsStreamType = { AAC: 0x0f, AVC: 0x1b } as const;
 
-export class InvalidMpegTsError extends Error {}
-export class UnsupportedMpegTsError extends Error {}
+export class InvalidMpegTsError extends Error {
+    constructor(message: string, packet?: TsPacket) {
+        super(withPacketLocation(message, packet));
+    }
+}
+export class UnsupportedMpegTsError extends Error {
+    constructor(message: string, packet?: TsPacket) {
+        super(withPacketLocation(message, packet));
+    }
+}
 
-type TsPacket = { pos: number; pid: number; startsUnit: boolean; bytes: Uint8Array };
-type TsPayload = { counter: number; startsUnit: boolean; data: Uint8Array };
+type TsPacket = { pos: number; pid: number; startsUnit: boolean; bytes: Uint8Array; segmentIndex: number | undefined };
+type TsPayload = { counter: number; packet: TsPacket; data: Uint8Array };
+type SegmentOptions = { segmentOffsets: readonly number[]; allowContinuityCounterReset?: boolean };
 type ProgramAssociation = { number: number; mapPid: number };
-type ProgramStream = { type: number; pid: number };
+type ProgramStream = { type: number; pid: number; privateAudio: boolean };
 type PesTiming = { pts: number; dts: number };
 type PesPayload = { data: Uint8Array; timing: PesTiming | null };
 export type AdtsFrame = PesPayload & { header: AdtsFrameHeader };
@@ -41,11 +50,38 @@ type PesState = {
     timing: PesTiming | null;
     open: boolean;
     previousPayload?: TsPayload;
+    segmentIndex?: number | undefined;
 };
+
+function withPacketLocation(message: string, packet: TsPacket | undefined) {
+    if (packet?.segmentIndex === undefined) {
+        return message;
+    }
+    return `${message} (segment ${packet.segmentIndex}, PID ${packet.pid}, byte offset ${packet.pos})`;
+}
 
 function incompletePes(stream: PesState) {
     return stream.open && (stream.headerBytes < stream.headerSize
         || (stream.bytesLeft !== 0 && stream.bytesLeft !== Infinity));
+}
+
+const privateAudioRegistrations = new Set(['AC-3', 'AC-4', 'EAC3', 'DTS1', 'DTS2', 'DTS3', 'Opus']);
+
+function hasPrivateAudioDescriptor(pmt: Uint8Array, start: number, end: number, packet: TsPacket) {
+    let privateAudio = false;
+    for (let at = start; at < end;) {
+        const tag = pmt[at]!;
+        const size = pmt[at + 1];
+        if (size === undefined || at + 2 + size > end) {
+            throw new InvalidMpegTsError('Invalid MPEG-TS PMT stream descriptor.', packet);
+        }
+        // DVB AC-3, enhanced AC-3 and DTS descriptors, or a registered audio format.
+        privateAudio ||= tag === 0x6a || tag === 0x7a || tag === 0x7b
+            || (tag === 0x05 && size >= 4
+                && privateAudioRegistrations.has(String.fromCharCode(...pmt.subarray(at + 2, at + 6))));
+        at += 2 + size;
+    }
+    return privateAudio;
 }
 
 function packetPayload(packet: TsPacket) {
@@ -53,75 +89,81 @@ function packetPayload(packet: TsPacket) {
     const flags = bytes[3]!;
     const adaptationFieldControl = (flags >> 4) & 3;
     if (bytes[1]! & 0x80 || adaptationFieldControl === 0) {
-        throw new InvalidMpegTsError('Invalid MPEG-TS packet header.');
+        throw new InvalidMpegTsError('Invalid MPEG-TS packet header.', packet);
     }
     if (flags & 0xc0) {
-        throw new UnsupportedMpegTsError('Scrambled MPEG-TS packets are unsupported.');
+        throw new UnsupportedMpegTsError('Scrambled MPEG-TS packets are unsupported.', packet);
     }
     const start = adaptationFieldControl & 2 ? 5 + bytes[4]! : 4;
     if (start > TS_PACKET_SIZE) {
-        throw new InvalidMpegTsError('Invalid MPEG-TS adaptation field length.');
+        throw new InvalidMpegTsError('Invalid MPEG-TS adaptation field length.', packet);
     }
     return bytes.subarray(adaptationFieldControl & 1 ? start : TS_PACKET_SIZE);
 }
 
-function nextPayload(packet: TsPacket, previous?: TsPayload): TsPayload | undefined {
+// A duplicate still counts as a payload packet at a segment boundary.
+function nextPayload(packet: TsPacket, previous?: TsPayload, allowReset = false): TsPayload | null | undefined {
     const data = packetPayload(packet);
     if (data.length === 0) {
         return undefined;
     }
     const counter = packet.bytes[3]! & 0x0f;
     if (previous && counter !== ((previous.counter + 1) & 0x0f)) {
-        if (counter === previous.counter && packet.startsUnit === previous.startsUnit
+        if (counter === previous.counter && packet.startsUnit === previous.packet.startsUnit
             && data.length === previous.data.length && data.every((byte, index) => byte === previous.data[index])) {
-            return undefined;
+            return null;
         }
-        throw new InvalidMpegTsError('MPEG-TS payload continuity counter is out of sequence.');
+        if (!allowReset) {
+            throw new InvalidMpegTsError('MPEG-TS payload continuity counter is out of sequence.', packet);
+        }
     }
-    return { counter, startsUnit: packet.startsUnit, data };
+    return { counter, packet, data };
 }
 
-function readPesTimestamp(bits: Bitstream, prefix: number) {
+function readPesTimestamp(bits: Bitstream, prefix: number, packet: TsPacket) {
     if (bits.readBits(4) !== prefix) {
-        throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp prefix.');
+        throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp prefix.', packet);
     }
     let timestamp = 0;
     for (const length of [3, 15, 15]) {
         timestamp = timestamp * 2 ** length + bits.readBits(length);
         if (bits.readBits(1) !== 1) {
-            throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp marker.');
+            throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp marker.', packet);
         }
     }
     return timestamp;
 }
 
-function readPesTiming(header: Uint8Array, size: number): PesTiming | null {
+function readPesTiming(header: Uint8Array, size: number, packet: TsPacket): PesTiming | null {
     const ptsDtsFlags = header[7]! >> 6;
     if (ptsDtsFlags === 0) {
         return null;
     }
     if (ptsDtsFlags === 1 || size < (ptsDtsFlags === 3 ? 19 : 14)) {
-        throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp fields.');
+        throw new InvalidMpegTsError('Invalid MPEG-TS PES timestamp fields.', packet);
     }
     const bits = new Bitstream(header.subarray(9, size));
-    const pts = readPesTimestamp(bits, ptsDtsFlags);
-    return { pts, dts: ptsDtsFlags === 3 ? readPesTimestamp(bits, 1) : pts };
+    const pts = readPesTimestamp(bits, ptsDtsFlags, packet);
+    return { pts, dts: ptsDtsFlags === 3 ? readPesTimestamp(bits, 1, packet) : pts };
 }
 
 export class MpegTsDemuxer {
     private readonly reader: Reader;
     private readonly fileSize: number;
     private readonly check: () => void;
+    private readonly segments: SegmentOptions | undefined;
     private program: { association: ProgramAssociation; streams: ProgramStream[] } | undefined;
 
-    constructor(reader: Reader, fileSize: number, check: () => void) {
+    constructor(reader: Reader, fileSize: number, check: () => void, segments?: SegmentOptions) {
         this.reader = reader;
         this.fileSize = fileSize;
         this.check = check;
+        this.segments = segments;
     }
 
-    private async *transportPackets(start = 0) {
+    private async *transportPackets(start = 0, segmentIndex = this.segments ? 0 : undefined) {
         const blockSize = 256 * TS_PACKET_SIZE;
+        const offsets = this.segments?.segmentOffsets;
         for (let block = start; block < this.fileSize; block += blockSize) {
             this.check();
             const length = Math.min(blockSize, this.fileSize - block);
@@ -136,15 +178,20 @@ export class MpegTsDemuxer {
             const data = readBytes(slice, length);
             for (let offset = 0; offset < length; offset += TS_PACKET_SIZE) {
                 const bytes = data.subarray(offset, offset + TS_PACKET_SIZE);
-                if (bytes[0] !== 0x47) {
-                    throw new InvalidMpegTsError('Invalid MPEG-TS packet sync byte.');
+                const pos = block + offset;
+                if (segmentIndex !== undefined && pos === offsets?.[segmentIndex + 1]) {
+                    segmentIndex++;
                 }
                 const packet: TsPacket = {
-                    pos: block + offset,
+                    pos,
                     pid: ((bytes[1]! & 0x1f) << 8) | bytes[2]!,
                     startsUnit: (bytes[1]! & 0x40) !== 0,
                     bytes,
+                    segmentIndex,
                 };
+                if (bytes[0] !== 0x47) {
+                    throw new InvalidMpegTsError('Invalid MPEG-TS packet sync byte.', packet);
+                }
                 yield packet;
             }
         }
@@ -155,7 +202,7 @@ export class MpegTsDemuxer {
         let size = 0;
         let length = 3;
         let previous: TsPayload | undefined;
-        for await (const packet of this.transportPackets(first.pos)) {
+        for await (const packet of this.transportPackets(first.pos, first.segmentIndex)) {
             if (packet.pid !== first.pid) {
                 continue;
             }
@@ -171,7 +218,7 @@ export class MpegTsDemuxer {
             if (packet.startsUnit) {
                 const start = 1 + data[0]!;
                 if (start >= data.length) {
-                    throw new InvalidMpegTsError('Invalid MPEG-TS program table pointer.');
+                    throw new InvalidMpegTsError('Invalid MPEG-TS program table pointer.', packet);
                 }
                 if (packet.pos === first.pos) {
                     data = data.subarray(start);
@@ -191,7 +238,7 @@ export class MpegTsDemuxer {
                 if (size === 3) {
                     length = 3 + (((section[1]! & 0x0f) << 8) | section[2]!);
                     if (length < 7 || length > section.length || !(section[1]! & 0x80)) {
-                        throw new InvalidMpegTsError('Invalid MPEG-TS program table length.');
+                        throw new InvalidMpegTsError('Invalid MPEG-TS program table length.', packet);
                     }
                 }
             }
@@ -204,7 +251,7 @@ export class MpegTsDemuxer {
                     }
                 }
                 if (crc !== 0) {
-                    throw new InvalidMpegTsError('Invalid MPEG-TS program table checksum.');
+                    throw new InvalidMpegTsError('Invalid MPEG-TS program table checksum.', packet);
                 }
                 return section.subarray(0, length);
             }
@@ -212,7 +259,7 @@ export class MpegTsDemuxer {
                 break;
             }
         }
-        throw new InvalidMpegTsError('Truncated MPEG-TS program table.');
+        throw new InvalidMpegTsError('Truncated MPEG-TS program table.', previous?.packet ?? first);
     }
 
     private async readAssociation(packet: TsPacket) {
@@ -222,13 +269,13 @@ export class MpegTsDemuxer {
         }
         const end = pat.length - 4;
         if (end < 8 || (end - 8) % 4 !== 0) {
-            throw new InvalidMpegTsError('Invalid MPEG-TS PAT.');
+            throw new InvalidMpegTsError('Invalid MPEG-TS PAT.', packet);
         }
         if (!(pat[5]! & 1)) {
             return undefined; // This version is not yet current.
         }
         if (pat[6] !== 0 || pat[7] !== 0) {
-            throw new UnsupportedMpegTsError('Multi-section MPEG-TS program tables are unsupported.');
+            throw new UnsupportedMpegTsError('Multi-section MPEG-TS program tables are unsupported.', packet);
         }
         let association: ProgramAssociation | null = null;
         for (let at = 8; at < end; at += 4) {
@@ -237,7 +284,7 @@ export class MpegTsDemuxer {
                 continue; // Network information PID.
             }
             if (association) {
-                throw new UnsupportedMpegTsError('Only single-program MPEG-TS is supported.');
+                throw new UnsupportedMpegTsError('Only single-program MPEG-TS is supported.', packet);
             }
             association = { number, mapPid: ((pat[at + 2]! & 0x1f) << 8) | pat[at + 3]! };
         }
@@ -251,25 +298,31 @@ export class MpegTsDemuxer {
         }
         const end = pmt.length - 4;
         if (end < 12) {
-            throw new InvalidMpegTsError('Invalid MPEG-TS PMT.');
+            throw new InvalidMpegTsError('Invalid MPEG-TS PMT.', packet);
         }
         if (!(pmt[5]! & 1)) {
             return undefined;
         }
         if (((pmt[3]! << 8) | pmt[4]!) !== programNumber || pmt[6] !== 0 || pmt[7] !== 0) {
-            throw new InvalidMpegTsError('Invalid MPEG-TS PMT program or section number.');
+            throw new InvalidMpegTsError('Invalid MPEG-TS PMT program or section number.', packet);
         }
         const streams: ProgramStream[] = [];
         let at = 12 + (((pmt[10]! & 0x0f) << 8) | pmt[11]!);
         while (at + 5 <= end) {
+            const type = pmt[at]!;
+            const descriptorEnd = at + 5 + (((pmt[at + 3]! & 0x0f) << 8) | pmt[at + 4]!);
+            if (descriptorEnd > end) {
+                throw new InvalidMpegTsError('Invalid MPEG-TS PMT stream descriptors.', packet);
+            }
             streams.push({
-                type: pmt[at]!,
+                type,
                 pid: ((pmt[at + 1]! & 0x1f) << 8) | pmt[at + 2]!,
+                privateAudio: type === 0x06 && hasPrivateAudioDescriptor(pmt, at + 5, descriptorEnd, packet),
             });
-            at += 5 + (((pmt[at + 3]! & 0x0f) << 8) | pmt[at + 4]!);
+            at = descriptorEnd;
         }
         if (at !== end) {
-            throw new InvalidMpegTsError('Invalid MPEG-TS PMT stream descriptors.');
+            throw new InvalidMpegTsError('Invalid MPEG-TS PMT stream descriptors.', packet);
         }
         return streams;
     }
@@ -304,7 +357,7 @@ export class MpegTsDemuxer {
         if (packet.pid === 0) {
             const current = await this.readAssociation(packet);
             if (current !== undefined && (current?.number !== association.number || current.mapPid !== association.mapPid)) {
-                throw new UnsupportedMpegTsError('The MPEG-TS program association changes within the input.');
+                throw new UnsupportedMpegTsError('The MPEG-TS program association changes within the input.', packet);
             }
         } else if (packet.pid === association.mapPid) {
             const current = await this.readProgramMap(packet, association.number);
@@ -312,7 +365,7 @@ export class MpegTsDemuxer {
                 const type = streams.find(stream => stream.pid === pid)?.type;
                 return !current.some(stream => stream.pid === pid && stream.type === type);
             })) {
-                throw new UnsupportedMpegTsError('A selected MPEG-TS stream changes PID or codec within the input.');
+                throw new UnsupportedMpegTsError('A selected MPEG-TS stream changes PID or codec within the input.', packet);
             }
         }
     }
@@ -330,7 +383,15 @@ export class MpegTsDemuxer {
                 }
                 continue;
             }
-            const payload = nextPayload(packet, stream.previousPayload);
+            const { segmentIndex } = packet;
+            // Only relax the counter check. PES completeness and parsing are checked below.
+            const allowReset = this.segments?.allowContinuityCounterReset === true
+                && segmentIndex !== undefined && segmentIndex > 0
+                && segmentIndex !== stream.segmentIndex && packet.startsUnit;
+            const payload = nextPayload(packet, stream.previousPayload, allowReset);
+            if (payload !== undefined) {
+                stream.segmentIndex = segmentIndex;
+            }
             if (!payload) {
                 continue;
             }
@@ -338,7 +399,7 @@ export class MpegTsDemuxer {
             let { data } = payload;
             if (packet.startsUnit) {
                 if (incompletePes(stream)) {
-                    throw new InvalidMpegTsError('Truncated MPEG-TS PES packet.');
+                    throw new InvalidMpegTsError('Truncated MPEG-TS PES packet.', packet);
                 }
                 stream.headerBytes = 0;
                 stream.headerSize = 9;
@@ -358,17 +419,17 @@ export class MpegTsDemuxer {
                     const header = stream.header;
                     if (header[0] !== 0 || header[1] !== 0 || header[2] !== 1
                         || (header[6]! & 0xc0) !== 0x80) {
-                        throw new InvalidMpegTsError('Invalid MPEG-TS PES header.');
+                        throw new InvalidMpegTsError('Invalid MPEG-TS PES header.', packet);
                     }
                     stream.headerSize = 9 + header[8]!;
                     const pesLength = (header[4]! << 8) | header[5]!;
                     stream.bytesLeft = pesLength ? 6 + pesLength - stream.headerSize : Infinity;
                     if (stream.bytesLeft < 0) {
-                        throw new InvalidMpegTsError('Invalid MPEG-TS PES packet length.');
+                        throw new InvalidMpegTsError('Invalid MPEG-TS PES packet length.', packet);
                     }
                 }
                 if (stream.headerBytes === stream.headerSize) {
-                    stream.timing = readPesTiming(stream.header, stream.headerSize);
+                    stream.timing = readPesTiming(stream.header, stream.headerSize, packet);
                 }
             }
             const count = Math.min(data.length, stream.bytesLeft);
@@ -380,7 +441,7 @@ export class MpegTsDemuxer {
         }
         for (const stream of streams.values()) {
             if (incompletePes(stream)) {
-                throw new InvalidMpegTsError('Truncated MPEG-TS PES packet.');
+                throw new InvalidMpegTsError('Truncated MPEG-TS PES packet.', stream.previousPayload?.packet);
             }
         }
     }

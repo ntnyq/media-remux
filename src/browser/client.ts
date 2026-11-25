@@ -18,6 +18,7 @@ import type {
   WorkerResponse,
 } from '../types'
 import { checkAbort, withRemuxErrorCode } from '../utils'
+import { captureRemuxInput } from '../utils/remuxInput'
 import { isWorkerResponse } from './protocol'
 
 /**
@@ -37,7 +38,7 @@ function captureJob(job: MediaJob): MediaJob {
 
       return {
         operation: MEDIA_JOB_OPERATION.remux,
-        input,
+        input: captureRemuxInput(input),
         ...audioOptions,
         ...(isUndefined(tracks) ? {} : { tracks }),
       }
@@ -55,8 +56,8 @@ function captureJob(job: MediaJob): MediaJob {
     case MEDIA_JOB_OPERATION.combine: {
       return {
         operation: MEDIA_JOB_OPERATION.combine,
-        video: job.video,
-        audio: job.audio,
+        video: captureRemuxInput(job.video),
+        audio: captureRemuxInput(job.audio),
         ...audioOptions,
       }
     }
@@ -108,8 +109,8 @@ async function removeJob(
  * failure/cancellation terminates the Worker and removes the entire job folder.
  * The Worker is dedicated to this job and is terminated on completion as well.
  *
- * @param job - Remux, track-combining, or concatenation operation and its input
- * Blobs. Audio normalization is optional, and remuxing and concatenation
+ * @param job - Remux, track-combining, or concatenation operation and its media
+ * inputs. Audio normalization is optional, and remuxing and concatenation
  * also allow track selection.
  * @param options - Dedicated Worker factory, optional parent directory (defaults
  * to the origin's OPFS root), cancellation signal, and progress callback.

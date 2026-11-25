@@ -9,6 +9,8 @@ const root = new URL('../../', import.meta.url)
 const allowedPath = /^(?:\/dist\/|\/tests\/(?:browser|fixtures)\/)[\w.-]+$/u
 const requiredPlayback = [
   'mpeg-ts-remux',
+  'segmented-mpeg-ts-remux',
+  'segmented-mpeg-ts-combine',
   'edited-audio-copy',
   'edited-audio-normalized',
   'normalized-mixed-audio',
