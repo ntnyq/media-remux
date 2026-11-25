@@ -28,11 +28,13 @@ import {
 import type { IsobmffColorInformation } from '../../vendor/mediabunny/src/isobmff/isobmff-misc'
 import { EncodedPacketSink } from '../../vendor/mediabunny/src/media-sink'
 import type { TransformationMatrix } from '../../vendor/mediabunny/src/misc'
+import { TS_PACKET_SIZE } from '../../vendor/mediabunny/src/mpeg-ts/mpeg-ts-demuxer'
 import type { EncodedPacket } from '../../vendor/mediabunny/src/packet'
 import { BlobSource } from '../../vendor/mediabunny/src/source'
 import { openFlvInput } from './flvInput'
 import { MKV_ID } from './mkvElements'
 import { openMkvInput } from './mkvInput'
+import { openMpegTsInput } from './mpegTsInput'
 
 /**
  * Supported encoded track with its decoder configuration and repeatable packet reader.
@@ -88,7 +90,7 @@ export interface PacketTrack {
 }
 
 /**
- * Open MP4, FLV, or MKV input with selected tracks and owned parser resources.
+ * Open media input with selected tracks and owned parser resources.
  */
 export interface MediaInput {
   /**
@@ -151,8 +153,8 @@ function isAvcIdrPacket(packet: EncodedPacket, config: VideoDecoderConfig) {
 }
 
 /**
- * Opens the selected encoded tracks from an MP4, FLV, or MKV Blob.
- * Detects FLV and EBML by signature and otherwise attempts MP4 parsing.
+ * Opens the selected encoded tracks from an MP4, FLV, MKV, or MPEG-TS Blob.
+ * Detects FLV, EBML, and MPEG-TS by signature and otherwise attempts MP4 parsing.
  * Packet iterators read in decode order and can omit encoded payloads during
  * metadata inspection. The caller must dispose the returned input after use.
  *
@@ -197,6 +199,21 @@ export async function openMediaInput(
     new DataView(magic.buffer).getUint32(0) === MKV_ID.header
   ) {
     return openMkvInput(blob, signal, selection)
+  }
+
+  if (magic[0] === 0x47) {
+    const sync = new Uint8Array(
+      await blob.slice(0, 2 * TS_PACKET_SIZE + 1).arrayBuffer(),
+    )
+
+    checkAbort(signal)
+
+    if (
+      sync[TS_PACKET_SIZE] === 0x47 &&
+      (sync.length <= 2 * TS_PACKET_SIZE || sync[2 * TS_PACKET_SIZE] === 0x47)
+    ) {
+      return openMpegTsInput(blob, signal, selection)
+    }
   }
 
   const input = new Input({

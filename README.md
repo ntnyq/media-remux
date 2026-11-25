@@ -11,7 +11,7 @@ Disk-backed browser media remuxing, track combining, and segment concatenation. 
 
 ## Features
 
-- `remuxMedia`: MP4/FLV/MKV primary tracks → fragmented MP4; select an audio track alone for M4A.
+- `remuxMedia`: MP4/FLV/MKV/MPEG-TS primary tracks → fragmented MP4; select an audio track alone for M4A.
 - `combineTracks`: combine supported video and audio from separate files.
 - `concatMedia`: join compatible segments in order, checking configurations/timelines before writing output.
 - `runMediaJob`: dedicated Worker execution with OPFS, progress, cancellation, and temporary-file cleanup.
@@ -139,17 +139,17 @@ For another runtime, implement positional file I/O for `createDiskFragmentIndex`
 
 All functions below are named exports. Import `installMediaWorker` and its `MediaWorkerScope` type from `media-remux/worker`; import the other functions and types from `media-remux`.
 
-| Export                                 | Purpose                                                       | Returns                                             |
-| -------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------- |
-| `runMediaJob(job, options)`            | Run an isolated browser Worker job with managed OPFS files.   | `Promise<MediaJobResult>`                           |
-| `remuxMedia(input, options)`           | Copy selected tracks from one MP4/FLV/MKV into fMP4/M4A.      | `Promise<RemuxResult>`                              |
-| `combineTracks(video, audio, options)` | Combine video and audio from separate files.                  | `Promise<RemuxResult>`                              |
-| `concatMedia(inputs, options)`         | Join compatible segments in the supplied order.               | `Promise<RemuxResult>`                              |
-| `createOpfsStorage(directory)`         | Create temporary stores for a core job in a dedicated Worker. | `DisposableRemuxStorage`                            |
-| `createDiskFragmentStore(open)`        | Adapt positional files to a per-track byte store.             | Store with `append`, `read`, `reset`, and `dispose` |
-| `createDiskFragmentIndex(open)`        | Alias of `createDiskFragmentStore` for fragment indexes.      | Same as `createDiskFragmentStore`                   |
-| `createDiskFragmentSamples(open)`      | Adapt positional files to sample/payload/sorting storage.     | `FragmentSampleStore` with `dispose`                |
-| `installMediaWorker(scope?)`           | Install the single-job Worker message listener.               | `() => void`                                        |
+| Export                                 | Purpose                                                          | Returns                                             |
+| -------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- |
+| `runMediaJob(job, options)`            | Run an isolated browser Worker job with managed OPFS files.      | `Promise<MediaJobResult>`                           |
+| `remuxMedia(input, options)`           | Copy selected tracks from one MP4/FLV/MKV/MPEG-TS into fMP4/M4A. | `Promise<RemuxResult>`                              |
+| `combineTracks(video, audio, options)` | Combine video and audio from separate files.                     | `Promise<RemuxResult>`                              |
+| `concatMedia(inputs, options)`         | Join compatible segments in the supplied order.                  | `Promise<RemuxResult>`                              |
+| `createOpfsStorage(directory)`         | Create temporary stores for a core job in a dedicated Worker.    | `DisposableRemuxStorage`                            |
+| `createDiskFragmentStore(open)`        | Adapt positional files to a per-track byte store.                | Store with `append`, `read`, `reset`, and `dispose` |
+| `createDiskFragmentIndex(open)`        | Alias of `createDiskFragmentStore` for fragment indexes.         | Same as `createDiskFragmentStore`                   |
+| `createDiskFragmentSamples(open)`      | Adapt positional files to sample/payload/sorting storage.        | `FragmentSampleStore` with `dispose`                |
+| `installMediaWorker(scope?)`           | Install the single-job Worker message listener.                  | `() => void`                                        |
 
 <details>
 <summary><code>runMediaJob</code> — job variants, options, and output lifecycle</summary>
@@ -161,7 +161,7 @@ function runMediaJob(
 ): Promise<MediaJobResult>
 ```
 
-`job` is a discriminated union selected by `operation`. Inputs must be complete, nonempty MP4/FLV/MKV `Blob` objects; `File` is also accepted because it extends `Blob`.
+`job` is a discriminated union selected by `operation`. Inputs must be complete, nonempty MP4/FLV/MKV/MPEG-TS `Blob` objects; `File` is also accepted because it extends `Blob`.
 
 | `operation` | Required fields              | Optional fields | Behavior                                                                                                |
 | ----------- | ---------------------------- | --------------- | ------------------------------------------------------------------------------------------------------- |
@@ -209,13 +209,13 @@ function concatMedia(
 ): Promise<RemuxResult>
 ```
 
-| Argument  | Used by         | Description                                                                                                                                                |
-| --------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV/MKV `Blob` or `File` providing the selected primary tracks.                                                                 |
-| `video`   | `combineTracks` | MP4/FLV/MKV input supplying the primary video track; any audio in this input is ignored.                                                                   |
-| `audio`   | `combineTracks` | MP4/FLV/MKV input supplying primary audio; any video in this input is ignored.                                                                             |
-| `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV/MKV inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
-| `options` | All three       | Output stream, fresh stores, and optional hooks described below.                                                                                           |
+| Argument  | Used by         | Description                                                                                                                                                        |
+| --------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `input`   | `remuxMedia`    | One complete, nonempty MP4/FLV/MKV/MPEG-TS `Blob` or `File` providing the selected primary tracks.                                                                 |
+| `video`   | `combineTracks` | MP4/FLV/MKV/MPEG-TS input supplying the primary video track; any audio in this input is ignored.                                                                   |
+| `audio`   | `combineTracks` | MP4/FLV/MKV/MPEG-TS input supplying primary audio; any video in this input is ignored.                                                                             |
+| `inputs`  | `concatMedia`   | Nonempty array of complete MP4/FLV/MKV/MPEG-TS inputs in playback order. Compatibility and timing are checked for every selected segment before output is written. |
+| `options` | All three       | Output stream, fresh stores, and optional hooks described below.                                                                                                   |
 
 | `RemuxOptions` field | Type                                | Required / default | Description                                                                                                                                                |
 | -------------------- | ----------------------------------- | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -402,6 +402,8 @@ I/O, quota, cancellation, callback, and Worker infrastructure failures follow th
 - Remux and concat use primary tracks by default and offer file-order selection through `tracks`. Combine selects the primary video from the first input and the primary audio from the second.
 - MP4 supports H.264, HEVC (`hvc1` and `hev1`), AV1 (`av01`), AAC, MP3, and AC-3 (`ac-3`). FLV supports standard AVC, AAC-LC with 960/1024-sample frames, and MP3 with complete Layer III frames at a signaled bitrate. HE-AAC/SBR (including implicit signaling), unsupported/encrypted FLV tags, and mid-stream decoder configuration changes are rejected. A selected MP4 track must have a single sample description and use media stored in the input file.
 - MKV accepts one Matroska segment with selected H.264 and/or AAC-LC tracks and standard `CodecPrivate`. AAC lacing is supported. Selected tracks with content encodings or legacy offsets, laced video, video cropping, and blocks with codec changes, additions, or nonzero discard padding are rejected.
+- MPEG-TS accepts a single program with 188-byte packets, Annex B H.264 starting at an IDR with SPS/PPS, and AAC-LC in ADTS. The reader preserves the shared audio and video clock through 33-bit timestamp rollover. Video is written as `avc3` with in-band parameter sets.
+- For consecutive TS downloads on one timeline with the same track PIDs and continuous transport counters, pass `new Blob(parts)` to `remuxMedia`. An internal part boundary can start on a dependent picture or fall within an access unit. Program changes, timestamp resets, and transport discontinuities require external handling.
 - AC-3 tracks require a valid `dac3` box, whose payload is copied to the output. Playback requires a browser with AC-3 decoding support. A 5.1-channel sample played with audio in Safari 27.0.1 on macOS.
 - Chrome supports direct `<video src>` playback of H.264/MP3 MP4 files. MP3 support in MP4 varies by browser and playback API.
 - HEVC and AV1 MP4 tracks require their codec configuration boxes (`hvcC` or `av1C`). The output preserves their sample entry type and configuration bytes.

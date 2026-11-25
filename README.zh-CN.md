@@ -11,7 +11,7 @@
 
 ## 功能
 
-- `remuxMedia`：将 MP4/FLV/MKV 中的主轨道重新封装为分片 MP4；仅选择音轨时输出 M4A。
+- `remuxMedia`：将 MP4/FLV/MKV/MPEG-TS 中的主轨道重新封装为分片 MP4；仅选择音轨时输出 M4A。
 - `combineTracks`：合并来自不同文件的受支持视频和音频。
 - `concatMedia`：按顺序拼接兼容的媒体片段，写入输出前检查配置和时间轴。
 - `runMediaJob`：在专用 Worker 中执行任务，支持 OPFS、进度通知、取消和临时文件清理。
@@ -139,17 +139,17 @@ try {
 
 以下函数均为具名导出。`installMediaWorker` 及其 `MediaWorkerScope` 类型从 `media-remux/worker` 导入；其余函数和类型从 `media-remux` 导入。
 
-| 导出方法                               | 用途                                                 | 返回值                                                 |
-| -------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------ |
-| `runMediaJob(job, options)`            | 在独立浏览器 Worker 中运行任务，自动管理 OPFS 文件。 | `Promise<MediaJobResult>`                              |
-| `remuxMedia(input, options)`           | 将单个 MP4/FLV/MKV 中所选轨道复制为 fMP4/M4A。       | `Promise<RemuxResult>`                                 |
-| `combineTracks(video, audio, options)` | 合并不同文件中的视频和音频。                         | `Promise<RemuxResult>`                                 |
-| `concatMedia(inputs, options)`         | 按传入顺序拼接兼容片段。                             | `Promise<RemuxResult>`                                 |
-| `createOpfsStorage(directory)`         | 为专用 Worker 中的核心任务创建临时存储。             | `DisposableRemuxStorage`                               |
-| `createDiskFragmentStore(open)`        | 将按位置读写的文件适配为按轨道组织的字节存储。       | 包含 `append`、`read`、`reset` 和 `dispose` 的存储对象 |
-| `createDiskFragmentIndex(open)`        | `createDiskFragmentStore` 的别名，用于分片索引。     | 与 `createDiskFragmentStore` 相同                      |
-| `createDiskFragmentSamples(open)`      | 将按位置读写的文件适配为采样、媒体数据及排序存储。   | 带有 `dispose` 的 `FragmentSampleStore`                |
-| `installMediaWorker(scope?)`           | 安装处理单个任务的 Worker 消息监听器。               | `() => void`                                           |
+| 导出方法                               | 用途                                                   | 返回值                                                 |
+| -------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------ |
+| `runMediaJob(job, options)`            | 在独立浏览器 Worker 中运行任务，自动管理 OPFS 文件。   | `Promise<MediaJobResult>`                              |
+| `remuxMedia(input, options)`           | 将单个 MP4/FLV/MKV/MPEG-TS 中所选轨道复制为 fMP4/M4A。 | `Promise<RemuxResult>`                                 |
+| `combineTracks(video, audio, options)` | 合并不同文件中的视频和音频。                           | `Promise<RemuxResult>`                                 |
+| `concatMedia(inputs, options)`         | 按传入顺序拼接兼容片段。                               | `Promise<RemuxResult>`                                 |
+| `createOpfsStorage(directory)`         | 为专用 Worker 中的核心任务创建临时存储。               | `DisposableRemuxStorage`                               |
+| `createDiskFragmentStore(open)`        | 将按位置读写的文件适配为按轨道组织的字节存储。         | 包含 `append`、`read`、`reset` 和 `dispose` 的存储对象 |
+| `createDiskFragmentIndex(open)`        | `createDiskFragmentStore` 的别名，用于分片索引。       | 与 `createDiskFragmentStore` 相同                      |
+| `createDiskFragmentSamples(open)`      | 将按位置读写的文件适配为采样、媒体数据及排序存储。     | 带有 `dispose` 的 `FragmentSampleStore`                |
+| `installMediaWorker(scope?)`           | 安装处理单个任务的 Worker 消息监听器。                 | `() => void`                                           |
 
 <details>
 <summary><code>runMediaJob</code>：任务类型、选项及输出生命周期</summary>
@@ -161,7 +161,7 @@ function runMediaJob(
 ): Promise<MediaJobResult>
 ```
 
-`job` 是由 `operation` 区分的联合类型。输入必须是完整、非空的 MP4/FLV/MKV `Blob`；`File` 继承自 `Blob`，也可以直接传入。
+`job` 是由 `operation` 区分的联合类型。输入必须是完整、非空的 MP4/FLV/MKV/MPEG-TS `Blob`；`File` 继承自 `Blob`，也可以直接传入。
 
 | `operation` | 必填字段                     | 可选字段 | 行为                                                           |
 | ----------- | ---------------------------- | -------- | -------------------------------------------------------------- |
@@ -209,13 +209,13 @@ function concatMedia(
 ): Promise<RemuxResult>
 ```
 
-| 参数      | 所属方法        | 说明                                                                                          |
-| --------- | --------------- | --------------------------------------------------------------------------------------------- |
-| `input`   | `remuxMedia`    | 提供所选主轨道的单个完整、非空的 MP4/FLV/MKV `Blob` 或 `File`。                               |
-| `video`   | `combineTracks` | 提供主视频轨道的 MP4/FLV/MKV 输入；其中的音轨会被忽略。                                       |
-| `audio`   | `combineTracks` | 提供主音轨的 MP4/FLV/MKV 输入；其中的视频轨道会被忽略。                                       |
-| `inputs`  | `concatMedia`   | 按播放顺序排列的非空 MP4/FLV/MKV 输入数组。写入输出前，会检查所有所选片段的兼容性和时间信息。 |
-| `options` | 三者共用        | 输出流、全新存储及可选回调，详见下表。                                                        |
+| 参数      | 所属方法        | 说明                                                                                                  |
+| --------- | --------------- | ----------------------------------------------------------------------------------------------------- |
+| `input`   | `remuxMedia`    | 提供所选主轨道的单个完整、非空的 MP4/FLV/MKV/MPEG-TS `Blob` 或 `File`。                               |
+| `video`   | `combineTracks` | 提供主视频轨道的 MP4/FLV/MKV/MPEG-TS 输入；其中的音轨会被忽略。                                       |
+| `audio`   | `combineTracks` | 提供主音轨的 MP4/FLV/MKV/MPEG-TS 输入；其中的视频轨道会被忽略。                                       |
+| `inputs`  | `concatMedia`   | 按播放顺序排列的非空 MP4/FLV/MKV/MPEG-TS 输入数组。写入输出前，会检查所有所选片段的兼容性和时间信息。 |
+| `options` | 三者共用        | 输出流、全新存储及可选回调，详见下表。                                                                |
 
 | `RemuxOptions` 字段 | 类型                                | 必填 / 默认值 | 说明                                                                                                               |
 | ------------------- | ----------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -402,6 +402,8 @@ I/O、配额、取消、回调和 Worker 运行故障保留原有的错误处理
 - 重新封装和拼接默认使用主轨道，也可以通过 `tracks` 按文件顺序选轨。合并操作从第一个输入中选择主视频，从第二个输入中选择主音轨。
 - MP4 支持 H.264、HEVC（`hvc1` 和 `hev1`）、AV1（`av01`）、AAC、MP3 和 AC-3（`ac-3`）。FLV 支持标准 AVC、每帧 960/1024 个采样的 AAC-LC，以及帧完整且码率由帧头声明的 MP3。HE-AAC/SBR（含隐式声明）、不支持或已加密的 FLV 标签以及轨道解码配置发生变化的 FLV 都会被拒绝。所选 MP4 轨道必须只有一个采样描述，且对应的媒体数据必须位于输入文件中。
 - MKV 支持单个 Matroska Segment，所选轨道为 H.264 和／或 AAC-LC，且包含标准 `CodecPrivate`。支持 AAC lacing。所选轨道的内容编码、旧式轨道偏移、视频 lacing、容器级裁剪、块附加数据、解码配置变化及非零 `DiscardPadding` 会在预检时被拒绝。
+- MPEG-TS 支持单节目、188 字节传输包、从带 SPS/PPS 的 IDR 开始的 Annex B H.264，以及 ADTS 封装的 AAC-LC。读取时会跨越 33 位时间戳回绕，并保留音视频的共同时间轴。视频以保留带内参数集的 `avc3` 写出。
+- 时间轴和传输包连续计数器均连续、轨道 PID 一致的 TS 分片，可以用 `new Blob(parts)` 合成一个输入，再传给 `remuxMedia`。中间分片可以从依赖帧开始，也可以切在访问单元内部。节目变更、时间戳重置和传输流不连续需要在上层处理。
 - AC-3 音轨需要有效的 `dac3` box，其内容会原样写入输出。浏览器需要支持 AC-3 解码。5.1 声道样本已在 macOS 的 Safari 27.0.1 中实测有声播放。
 - Chrome 可以通过 `<video src>` 直接播放 H.264/MP3 MP4 文件。MP4 中 MP3 音轨的支持取决于浏览器和播放 API。
 - MP4 中的 HEVC 和 AV1 轨道需要各自的解码配置 box（`hvcC` 或 `av1C`）。输出保留原采样条目类型和完整配置字节。

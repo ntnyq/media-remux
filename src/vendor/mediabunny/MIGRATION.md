@@ -10,6 +10,10 @@ Roots: `Input`, `MP4`, `BlobSource`, `EncodedPacketSink`, `EncodedPacket`, `Outp
 
 Track abstractions, codec descriptions, metadata helpers, packet readers, MP4 boxes, and stream targets remain where required by this graph. Raw sample encoding/decoding, conversion, custom decoder registration, HLS, unrelated container readers/writers, Node filesystem implementations, and the upstream public index are excluded. `InputTrack.canDecode` methods were removed because this package never decodes samples.
 
+The MPEG-TS subset adapts the upstream demuxer's transport and PES parsing, timestamp unwrapping, and AVC/ADTS elementary stream framing for sequential rereads. It retains both PTS and DTS, frames access units across PES packets, and has no seeking index. The package adapter converts AVC to length-prefixed samples, strips ADTS framing, and passes source timing to the existing fragmented MP4 writer.
+
+The TS reader checks payload continuity, skips duplicate transport payloads, and validates PAT/PMT checksums. It rejects program changes and changes to a selected stream's PID or codec.
+
 ## Preserved patch behavior
 
 - Range traversal of `moov`, bounded regular sample-table pages/checkpoints.

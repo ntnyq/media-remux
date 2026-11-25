@@ -83,6 +83,7 @@
     "muxer",
     "mvex",
     "mvhd",
+    "nals",
     "NALUs",
     "nclc",
     "nclx",
@@ -111,6 +112,7 @@
     "schm",
     "senc",
     "sidx",
+    "sinc",
     "sinf",
     "smhd",
     "SOBMFF",
@@ -153,7 +155,8 @@
     "vttc",
     "vtte",
     "webvtt",
-    "wvtt"
+    "wvtt",
+    "Xiph"
   ],
   "cSpell.allowCompoundWords": true
 }

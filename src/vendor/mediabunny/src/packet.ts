@@ -22,10 +22,12 @@ export type PacketType = 'key' | 'delta';
  */
 export type EncodedPacketSideData = {
     /**
-     * Original MP4 decode duration in seconds. Presentation duration may differ
+     * Source decode duration in seconds. Presentation duration may differ
      * for reordered samples; remuxing must not substitute it for the stts/trun delta.
      */
     decodeDuration?: number | undefined;
+    /** Source decode timestamp in seconds, when available from MPEG-TS PES. */
+    decodeTimestamp?: number | undefined;
     /**
      * An encoded alpha frame, encoded with the same codec as the packet. Typically used for transparent videos, where
      * the alpha information is stored separately from the color information.

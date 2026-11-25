@@ -21,7 +21,7 @@ import {
  */
 export function avcDecoderConfig(
   description: Uint8Array<ArrayBuffer>,
-  container: 'FLV' | 'MKV',
+  container: 'FLV' | 'MKV' | 'MPEG-TS',
 ): VideoDecoderConfig {
   const avc = deserializeAvcDecoderConfigurationRecord(description)
   const sps = avc?.sequenceParameterSets[0]
@@ -73,7 +73,7 @@ export function avcDecoderConfig(
  */
 export function aacLcDecoderConfig(
   description: Uint8Array<ArrayBuffer>,
-  container: 'FLV' | 'MKV',
+  container: 'FLV' | 'MKV' | 'MPEG-TS',
 ): AudioDecoderConfig {
   let info
 

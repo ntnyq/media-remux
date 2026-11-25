@@ -4,3 +4,4 @@
 *.flv binary
 *.m4a binary
 *.mp4 binary
+*.mpegts binary

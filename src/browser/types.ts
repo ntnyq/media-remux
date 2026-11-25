@@ -3,7 +3,7 @@ import type { RemuxProgress, RemuxResult, RemuxTrackSelection } from '../types'
 
 /**
  * One isolated Worker operation, discriminated by operation. Inputs are MP4,
- * FLV, or MKV Blobs containing supported encoded video and/or audio.
+ * FLV, MKV, or MPEG-TS Blobs containing supported encoded video and/or audio.
  */
 export type MediaJob = {
   /** Normalizes selected audio to continuous AAC-LC using WebCodecs. */
@@ -16,7 +16,7 @@ export type MediaJob = {
       operation: typeof MEDIA_JOB_OPERATION.remux
 
       /**
-       * Nonempty source MP4, FLV, or MKV Blob.
+       * Nonempty source MP4, FLV, MKV, or MPEG-TS Blob.
        */
       input: Blob
 
@@ -32,12 +32,12 @@ export type MediaJob = {
       operation: typeof MEDIA_JOB_OPERATION.combine
 
       /**
-       * Nonempty MP4, FLV, or MKV Blob supplying the primary video track.
+       * Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary video track.
        */
       video: Blob
 
       /**
-       * Nonempty MP4, FLV, or MKV Blob supplying the primary audio track.
+       * Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary audio track.
        */
       audio: Blob
     }
@@ -49,7 +49,7 @@ export type MediaJob = {
 
       /**
        * Nonempty segment list with matching selected track layouts and decoder
-       * configurations. Each Blob must contain nonempty MP4, FLV, or MKV media.
+       * configurations. Each Blob must contain nonempty MP4, FLV, MKV, or MPEG-TS media.
        */
       inputs: readonly Blob[]
 

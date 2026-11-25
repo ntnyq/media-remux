@@ -9,7 +9,7 @@
 - Included source: `src/vendor/mediabunny/src/` and `src/vendor/mediabunny/shared/`
 - Modifications: `src/vendor/mediabunny/MIGRATION.md`
 
-The included sources are a declaration-level dependency subset for MP4 encoded-packet input/output, incorporating the existing disk-backed MP4 patch. This package does not install, import, or require the `mediabunny` npm package. Vendor files retain their upstream copyright/license headers. Modifications remain covered by MPL-2.0. The exact modified source used to build the distributed JavaScript is included in the npm package and this repository.
+The included sources are a subset for MP4 and MPEG-TS encoded-packet input and disk-backed MP4 output. This package does not install, import, or require the `mediabunny` npm package. Vendor files retain their upstream copyright/license headers. Modifications remain covered by MPL-2.0. The exact modified source used to build the distributed JavaScript is included in the npm package and this repository.
 
 Original code outside the vendor directory is licensed under the repository's MIT license. Distribution includes both licenses; package metadata states `MIT AND MPL-2.0`.
 

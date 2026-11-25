@@ -1151,6 +1151,7 @@ test('produces files independently accepted and decoded by FFmpeg when available
       'progressive-mp3.flv',
       'progressive-ac3.mp4',
       'progressive.mkv',
+      'continuous-av.mpegts',
       'vfr-bframes.mp4',
       'subtitle-first.mp4',
       'hevc-hvc1.mp4',

@@ -315,7 +315,7 @@ export async function runMediaJob(
 
         // Some WebKit versions reject structured cloning OPFS handles. Resolve
         // the job from the Worker's own root while retaining parent ownership.
-        void (async () => {
+        ;(async () => {
           const path = settings.directory
             ? await (
                 await globalThis.navigator?.storage?.getDirectory?.()

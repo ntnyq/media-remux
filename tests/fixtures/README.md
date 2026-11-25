@@ -14,6 +14,17 @@ Small synthetic FFmpeg-generated media fixtures. They contain generated test pat
 - `aac-pce.flv`: stereo AAC-LC with a program config element in its sequence header. Generated with `ffmpeg -f lavfi -i sine=frequency=440:sample_rate=48000:duration=0.06 -ac 2 -c:a aac -aac_pce 1 -b:a 24k -f flv aac-pce.flv`.
 - `subtitle-first.mp4`: fragmented MP4 with a `mov_text` subtitle track before unchanged AAC from `audio.m4a`. The audio `traf` uses the preceding subtitle data's end as its implicit base. Generated with `ffmpeg -i audio.m4a -f srt -i subtitle.srt -map 1 -map 0 -c:a copy -c:s mov_text -movflags empty_moov+frag_keyframe+omit_tfhd_offset subtitle-first.mp4`, using one SRT cue containing `remux regression` from `00:00:00,000` to `00:00:01,000`.
 - `progressive.mp4`, `progressive.flv`: progressive H.264/AAC.
+- `continuous-av.mpegts` joins five FFmpeg HLS segments in byte order. It contains 30 H.264 pictures with B-frame reordering and 109 AAC-LC frames at 44.1 kHz. The first four segment lengths are 5076, 3572, 5264, and 3384 bytes. Tests derive rollover and cross-PES variants by rewriting the fixture's packet headers and boundaries.
+
+  ```sh
+  ffmpeg -f lavfi -i testsrc2=size=64x48:rate=12:duration=2.5 \
+    -f lavfi -i sine=frequency=440:sample_rate=44100:duration=2.5 \
+    -c:v libx264 -preset fast -x264-params 'aud=1:keyint=16:min-keyint=16:scenecut=0:bframes=2:b-adapt=0' \
+    -c:a aac -b:a 24k -hls_time 0.55 -hls_flags split_by_time -hls_list_size 0 \
+    -hls_segment_options mpegts_copyts=1 -hls_segment_filename 'part%d.ts' input.m3u8
+  cat part0.ts part1.ts part2.ts part3.ts part4.ts > continuous-av.mpegts
+  ```
+
 - `progressive.mkv` contains H.264 B frames and 48 kHz AAC-LC with an intentionally delayed audio track and `CodecDelay`. Generated with `ffmpeg -i video.mp4 -itsoffset 0.2 -f lavfi -i sine=frequency=440:sample_rate=48000:duration=1.3 -map 0:v -map 1:a -c:v copy -c:a aac progressive.mkv`.
 - `bt709-full-range.mkv` uses the H.264 packets from `video.mp4` with Matroska Colour metadata. Generated with `ffmpeg -i video.mp4 -map 0:v:0 -c:v copy -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range pc bt709-full-range.mkv`.
 - `audio-edited-head.m4a` contains an AAC head edit at 0.5 seconds within a packet, with a 330 Hz tone before the edit and 990 Hz after it.

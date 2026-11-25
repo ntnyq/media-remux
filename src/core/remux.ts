@@ -49,12 +49,12 @@ function captureOptions(options: RemuxOptions): RemuxOptions {
 }
 
 /**
- * Remuxes selected tracks from one MP4, FLV, or MKV Blob to fMP4/M4A.
+ * Remuxes selected tracks from one MP4, FLV, MKV, or MPEG-TS Blob to fMP4/M4A.
  * H.264 MP4 with leading dependent frames is trimmed to the first verified IDR.
  * The output stream is closed on success and aborted on a write-stage failure.
  * Temporary stores remain owned by the caller; each job needs fresh stores.
  *
- * @param input - Nonempty source MP4, FLV, or MKV Blob.
+ * @param input - Nonempty source MP4, FLV, MKV, or MPEG-TS Blob.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * track selection (defaults to all primary tracks), cancellation, and progress.
  * @returns A promise resolving to duration in seconds, output MIME type, and
@@ -80,7 +80,7 @@ export async function remuxMedia(
  * Success closes the output stream; write-stage failures attempt cancellation.
  * The caller must supply fresh temporary stores and dispose them after the job.
  *
- * @param inputs - Nonempty list of MP4/FLV/MKV Blobs in playback order. Selected
+ * @param inputs - Nonempty list of MP4/FLV/MKV/MPEG-TS Blobs in playback order. Selected
  * track layouts and decoder configurations must match. Audio normalization
  * allows different or absent audio in otherwise compatible video segments.
  * @param options - Positioned output stream, fresh temporary stores, optional
@@ -213,14 +213,14 @@ export async function concatMedia(
 }
 
 /**
- * Combines the primary video and audio from separate MP4/FLV/MKV Blobs.
+ * Combines the primary video and audio from separate MP4/FLV/MKV/MPEG-TS Blobs.
  * Existing relative timestamps are preserved and the earliest playable time becomes zero.
  * When H.264 MP4 video is trimmed to an IDR, audio before its PTS is discarded.
  * Success closes the output stream; write-stage failures attempt cancellation.
  * The caller must supply fresh temporary stores and dispose them after the job.
  *
- * @param video - Nonempty MP4, FLV, or MKV Blob supplying the primary video track.
- * @param audio - Nonempty MP4/FLV/MKV Blob supplying the primary audio track.
+ * @param video - Nonempty MP4, FLV, MKV, or MPEG-TS Blob supplying the primary video track.
+ * @param audio - Nonempty MP4/FLV/MKV/MPEG-TS Blob supplying the primary audio track.
  * @param options - Positioned output stream, fresh temporary stores, optional
  * cancellation signal, and progress callback.
  * @returns A promise resolving to the shared presentation span in seconds,

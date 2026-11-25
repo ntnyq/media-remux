@@ -486,6 +486,15 @@ async function run(audioContext) {
         true,
       ],
       [
+        'mpeg-ts-remux',
+        {
+          operation: MEDIA_JOB_OPERATION.remux,
+          input: await fixture('continuous-av.mpegts'),
+        },
+        (15000 - 12910) / 90000,
+        true,
+      ],
+      [
         'vfr-mp4-flv',
         { operation: MEDIA_JOB_OPERATION.concat, inputs: [vfr, vfrFlv] },
         0,
@@ -523,7 +532,7 @@ async function run(audioContext) {
 
         assert(
           Math.abs(actual.firstFrame - firstFrame) < 0.00005,
-          `${label}: first-frame timestamp shifted`,
+          `${label}: first-frame timestamp ${actual.firstFrame} differs from ${firstFrame}`,
         )
         assert(
           Math.abs(actual.duration - result.duration) < 0.001,

@@ -27,6 +27,7 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
     units: 0,
     remainder: 0,
     decodeStartUnits: 0,
+    sourceDecodeStart: undefined as number | undefined,
     segmentMinimum: Infinity,
     segmentStart: Infinity,
     segmentEnd: -Infinity,
@@ -86,6 +87,12 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
         const precise = duration * clock.timescale + clock.remainder
         const units = Math.round(precise)
 
+        // MPEG-TS supplies a decode origin directly. Later segments keep the
+        // output's continuous clock, using source DTS deltas for each sample.
+        if (clock.start === Infinity && clock.segmentStart === Infinity) {
+          clock.sourceDecodeStart = packet.sideData.decodeTimestamp
+        }
+
         clock.segmentMinimum = Math.min(clock.segmentMinimum, decodeOrigin)
         clock.remainder = precise - units
         clock.units += units
@@ -127,11 +134,19 @@ export function createDecodeTimeline(tracks: PacketTrack[]) {
           clock.segmentLastAv1Timestamp = -Infinity
         } else {
           const earliestOrigin = clock.segmentMinimum - info.start + elapsed
+          const sourceOrigin = clock.sourceDecodeStart
+          const decodeStartUnits =
+            sourceOrigin === undefined
+              ? clock.decodeStartUnits
+              : Math.round(
+                  (sourceOrigin - info.start + elapsed) * clock.timescale,
+                )
 
           clock.decodeStartUnits = Math.min(
-            clock.decodeStartUnits,
+            decodeStartUnits,
             Math.floor(earliestOrigin * clock.timescale),
           )
+          clock.sourceDecodeStart = undefined
         }
 
         clock.segmentMinimum = Infinity

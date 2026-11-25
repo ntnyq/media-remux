@@ -8,6 +8,7 @@ const host = '127.0.0.1'
 const root = new URL('../../', import.meta.url)
 const allowedPath = /^(?:\/dist\/|\/tests\/(?:browser|fixtures)\/)[\w.-]+$/u
 const requiredPlayback = [
+  'mpeg-ts-remux',
   'edited-audio-copy',
   'edited-audio-normalized',
   'normalized-mixed-audio',
